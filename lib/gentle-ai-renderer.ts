@@ -1,6 +1,6 @@
 import { keyHint, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { CARD_TONE, cardBottom, cardInnerWidth, cardLine, cardTop, type Card, type CardTheme, type CardTone } from "./shell-card.ts";
+import { CARD_TONE, cardBottom, cardInnerWidth, cardLine, cardTop, isCuteTheme, type Card, type CardTheme, type CardTone } from "./shell-card.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 
 // Gentle AI tool cards: every call into the gentle-ai binary and every
@@ -73,7 +73,8 @@ export class GentleAiCallCard {
 	private open = true;
 
 	update(status: LifecycleStatus, operationPath: string, theme: CardTheme, detail?: string, hint?: string): void {
-		this.card = { title: CARD_TITLE, subtitle: `${status} · ${operationPath}`, body: [], tone: STATUS_TONE[status], glyph: CARD_GLYPH };
+		const glyph = isCuteTheme(theme) ? "🤖" : CARD_GLYPH;
+		this.card = { title: CARD_TITLE, subtitle: `${status} · ${operationPath}`, body: [], tone: STATUS_TONE[status], glyph };
 		this.theme = theme;
 		this.detail = detail;
 		this.hint = hint;

@@ -46,8 +46,21 @@ const BODY_ROLE = "text";
 const SEPARATOR = "·";
 const FRAME_COLUMNS = 4;
 
-function rule(length: number): string {
-	return "─".repeat(Math.max(0, length));
+export function isCuteTheme(theme?: CardTheme): boolean {
+	const name = (theme as any)?.name ?? (theme as any)?.theme?.name ?? "";
+	return typeof name === "string" && (name.includes("Cute") || name.includes("CUTE"));
+}
+
+export function cardGlyphs(theme?: CardTheme): { tl: string; tr: string; bl: string; br: string; h: string; v: string } {
+	if (isCuteTheme(theme)) {
+		return { tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║" };
+	}
+	return { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" };
+}
+
+function rule(length: number, theme?: CardTheme): string {
+	const g = cardGlyphs(theme);
+	return g.h.repeat(Math.max(0, length));
 }
 
 function titleText(card: Card, theme: CardTheme): { styled: string; width: number } {
@@ -64,19 +77,24 @@ function bodyLines(card: Card, innerWidth: number): string[] {
 
 // The left rail, corners included, carries the tone at full strength; the
 // rest of the frame stays in the theme's border color, so the state reads from the rail.
+// In Cute themes, the entire frame inherits the tone color (e.g. mint green).
 const FRAME_ROLE = "border";
 
-function soft(theme: CardTheme, _tone: CardTone, text: string): string {
+function soft(theme: CardTheme, tone: CardTone, text: string): string {
+	if (isCuteTheme(theme)) {
+		return theme.fg(TONE_ROLE[tone], text);
+	}
 	return theme.fg(FRAME_ROLE, text);
 }
 
 export function cardTop(card: Card, theme: CardTheme, width: number, hint?: string): string {
+	const g = cardGlyphs(theme);
 	const targetWidth = Math.max(0, Math.floor(width));
 	if (targetWidth === 0) return "";
 	if (targetWidth < 5) {
-		const left = theme.fg(TONE_ROLE[card.tone], "╭");
+		const left = theme.fg(TONE_ROLE[card.tone], g.tl);
 		if (targetWidth === 1) return left;
-		return left + soft(theme, card.tone, `${rule(targetWidth - 2)}╮`);
+		return left + soft(theme, card.tone, `${rule(targetWidth - 2, theme)}${g.tr}`);
 	}
 
 	const title = titleText(card, theme);
@@ -86,31 +104,33 @@ export function cardTop(card: Card, theme: CardTheme, width: number, hint?: stri
 	const titleWidth = Math.max(0, targetWidth - 5 - hintWidth);
 	const styledTitle = title.width <= titleWidth ? title.styled : truncateToWidth(title.styled, titleWidth, "");
 	const styledTitleWidth = title.width <= titleWidth ? title.width : visibleWidth(styledTitle);
-	const fill = rule(targetWidth - styledTitleWidth - 5 - hintWidth);
+	const fill = rule(targetWidth - styledTitleWidth - 5 - hintWidth, theme);
 	const tail = shownHint ? ` ${theme.fg(HINT_ROLE, shownHint)} ` : "";
-	return theme.fg(TONE_ROLE[card.tone], "╭") + soft(theme, card.tone, "─ ") + styledTitle + soft(theme, card.tone, ` ${fill}`) + tail + soft(theme, card.tone, "╮");
+	return theme.fg(TONE_ROLE[card.tone], g.tl) + soft(theme, card.tone, `${g.h} `) + styledTitle + soft(theme, card.tone, ` ${fill}`) + tail + soft(theme, card.tone, g.tr);
 }
 
 export function cardLine(text: string, tone: CardTone, theme: CardTheme, width: number): string {
+	const g = cardGlyphs(theme);
 	const targetWidth = Math.max(0, Math.floor(width));
 	if (targetWidth === 0) return "";
-	const left = theme.fg(TONE_ROLE[tone], "│");
+	const left = theme.fg(TONE_ROLE[tone], g.v);
 	if (targetWidth === 1) return left;
-	if (targetWidth === 2) return left + soft(theme, tone, "│");
-	if (targetWidth === 3) return `${left} ${soft(theme, tone, "│")}`;
+	if (targetWidth === 2) return left + soft(theme, tone, g.v);
+	if (targetWidth === 3) return `${left} ${soft(theme, tone, g.v)}`;
 
 	const innerWidth = targetWidth - FRAME_COLUMNS;
 	const clipped = innerWidth === 0 ? "" : truncateToWidth(text, innerWidth, "…");
 	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
-	return `${left} ${clipped}${padding} ${soft(theme, tone, "│")}`;
+	return `${left} ${clipped}${padding} ${soft(theme, tone, g.v)}`;
 }
 
 export function cardBottom(tone: CardTone, theme: CardTheme, width: number): string {
+	const g = cardGlyphs(theme);
 	const targetWidth = Math.max(0, Math.floor(width));
 	if (targetWidth === 0) return "";
-	const left = theme.fg(TONE_ROLE[tone], "╰");
+	const left = theme.fg(TONE_ROLE[tone], g.bl);
 	if (targetWidth === 1) return left;
-	return left + soft(theme, tone, `${rule(targetWidth - 2)}╯`);
+	return left + soft(theme, tone, `${rule(targetWidth - 2, theme)}${g.br}`);
 }
 
 export function cardInnerWidth(width: number): number {
