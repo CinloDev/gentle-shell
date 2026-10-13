@@ -31,7 +31,7 @@ function launch(args: string[], scenario = 'owned') {
    source = source.replace('const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));', ${JSON.stringify(`const packageRoot = '${shellRoot}';`)});
    source = source.replace('const bundled = resolveBundledInstall({ packageRoot, platform: process.platform, fs: bundledFs, verifying });', 'const bundled = undefined;');
    source = source.replace('runtime = resolvePiRuntime({', ${JSON.stringify(`runtime = ({ kind: '${adjacent ? 'bundled' : 'env'}', command: '${adjacent ? 'node' : piRoot + '/dist/bundle/cli.js'}', args: ${JSON.stringify(adjacent ? [piRoot + '/dist/bundle/cli.js'] : [])} }); /*`)}).replace('nodeExecPath: process.execPath,\\n\\t\\t});', 'nodeExecPath: process.execPath, */');
-   source = source.replace('const versionProbe = spawnSync(versionProbePlan.command, versionProbePlan.args, {', 'const versionProbe = { stdout: "1.1.0" }; /*').replace('env: bundledEnv ?? process.env,\\n\\t});', 'env: bundledEnv ?? process.env, */');
+   source = source.replace('const versionProbe = spawnSync(versionProbePlan.command, versionProbePlan.args, {', 'const versionProbe = { stdout: "1.2.0" }; /*').replace('env: bundledEnv ?? process.env,\\n\\t});', 'env: bundledEnv ?? process.env, */');
    source = source.replace('async function packageManagerAdapters() {', 'async function packageManagerAdapters() { return globalThis.fakeAdapters; } async function unusedAdapters() {');
    source = source.replace('let homeHadContentBeforeBootstrap = false;', 'if (passthrough.length === 1) { console.error("error: pi cannot self-update this installation. This installation is not managed by a global pnpm install."); process.exitCode = 1; return; } console.log("FORWARD " + JSON.stringify(passthrough)); return; let homeHadContentBeforeBootstrap = false;');
    return {format:'module', source, shortCircuit:true};
@@ -41,7 +41,7 @@ function launch(args: string[], scenario = 'owned') {
  const links = ${JSON.stringify(links)}, roots = ${JSON.stringify(roots)};
  globalThis.fakeAdapters = {
   fs: { realpath: async p => { if (links[p]) return links[p]; if (roots.includes(p)) return p; throw new Error('ENOENT ' + p); },
-   readFile: async p => { if (p === '${shellRoot}/package.json') return JSON.stringify({name:'gentle-pi',version:'4.1.0'}); if(p === '${piRoot}/package.json') return JSON.stringify({name:'${PI}',version:'1.1.0',bin:{pi:'dist/bundle/cli.js'}}); throw new Error('ENOENT ' + p); } },
+   readFile: async p => { if (p === '${shellRoot}/package.json') return JSON.stringify({name:'gentle-pi',version:'4.1.0'}); if(p === '${piRoot}/package.json') return JSON.stringify({name:'${PI}',version:'1.2.0',bin:{pi:'dist/bundle/cli.js'}}); throw new Error('ENOENT ' + p); } },
   which: async n => n === '${npm ? 'npm' : 'pnpm'}' ? '/fake/' + n : null,
   run: async (cmd, args) => {
    if(args.includes('list') || args.includes('ls')) return {code:0,stdout:${JSON.stringify(listing)}};
@@ -58,7 +58,7 @@ for (const scenario of ['owned','adjacent','separate']) test(`public linked-stor
  assert.match(result.stdout, scenario === 'adjacent' ? /MUTATION \["add","-g","gentle-pi@4\.1\.0","--allow-build=gentle-pi"\]/ : /MUTATION \["add","-g","@earendil-works\/pi-coding-agent@latest"\]/);
  assert.doesNotMatch(result.stdout, /FORWARD/);
  // The fake manager changes nothing, so the readback reports the same version and pnpm's release-age rule.
- assert.match(result.stdout, /the selected Pi is still 1\.1\.0\./);
+ assert.match(result.stdout, /the selected Pi is still 1\.2\.0\./);
  assert.match(result.stdout, /minimumReleaseAge/);
  assert.equal(result.stderr, '');
 });

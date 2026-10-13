@@ -298,7 +298,7 @@ test("/api/plan reports blockers with guidance and no profile change when alread
 
 test("/api/plan names the found and required version of an older Gentle Shell and how to resolve it", async () => {
 	const { host, port, login } = await start({ collect: async () => collected({
-		pi: { available: true, version: "1.0.4", usable: true },
+		pi: { available: true, version: "1.2.4", usable: true },
 		shell: { available: true, version: "3.4.0", usable: false, global: true },
 		gentleAi: { available: null }, setup: { available: null },
 	}) });
@@ -306,8 +306,8 @@ test("/api/plan names the found and required version of an older Gentle Shell an
 		const view = await plan(port, await login());
 		assert.deepEqual(view.blockers.map((blocker: { code: string; tool: string }) => [blocker.code, blocker.tool]), [["incompatible-tool", "shell"]]);
 		assert.equal(view.blockers[0].guidance,
-			"Gentle Shell 3.4.0 is installed globally with pnpm, but this installer needs 4.1.0 or newer. Nothing was replaced. " +
-			"Update it with `pnpm add -g gentle-pi@4.1.0`, or remove it with `pnpm remove -g gentle-pi`, then select Check again.");
+			"Gentle Shell 3.4.0 is installed globally with pnpm, but this installer needs 4.2.0 or newer. Nothing was replaced. " +
+			"Update it with `pnpm add -g gentle-pi@4.2.0`, or remove it with `pnpm remove -g gentle-pi`, then select Check again.");
 		assert.deepEqual(view.actions, []);
 	} finally {
 		await host.close("test");
@@ -449,7 +449,7 @@ test("/api/plan explains a pnpm in $PNPM_HOME/bin that the installer will not re
 
 test("/api/plan explains a Gentle Shell that neither pnpm nor npm manages", async () => {
 	const { host, port, login } = await start({ collect: async () => collected({
-		pi: { available: true, version: "1.0.4", usable: true },
+		pi: { available: true, version: "1.2.4", usable: true },
 		shell: { available: null, outsidePnpm: true }, gentleAi: { available: null }, setup: { available: null },
 	}) });
 	try {
@@ -514,7 +514,7 @@ test("the outcome says which Pi Gentle Shell runs only when it is not the instal
 
 test("/api/plan describes updating an existing Gentle Shell on either channel", async () => {
 	const shell = { available: true, version: "3.9.0", usable: true, global: true, owner: "npm" };
-	const { host, port, login } = await start({ collect: async (channel) => collectedFor(channel, { pi: { available: true, version: "1.0.4", usable: true },
+	const { host, port, login } = await start({ collect: async (channel) => collectedFor(channel, { pi: { available: true, version: "1.2.4", usable: true },
 		shell, go: { available: true, version: "1.26.0", usable: true }, gentleAi: { available: null }, setup: { available: null } }) });
 	try {
 		const cookie = await login();
