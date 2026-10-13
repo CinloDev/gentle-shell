@@ -6,6 +6,12 @@ For development, use [ODD and feature recovery](readme-reference.md#organic-driv
 
 Source map: [shell extension](../extensions/gentle-shell.ts), [shell bar](../lib/shell-bar.ts), [changes model](../lib/shell-changes.ts), [changes view](../lib/shell-changes-view.ts), [usage model](../lib/shell-usage.ts), [usage view](../lib/shell-usage-view.ts), [agents extension](../extensions/gentle-agents.ts), and [agent runner](../lib/agents-runner.ts).
 
+## Updating Pi safely
+
+Run `gentle-shell update` to update the selected global Pi runtime. Shell verifies npm/pnpm global listing JSON and canonical package roots before installing exactly one supplying package. This supports pnpm v11 linked stores without relying on `PNPM_HOME` containment. For an adjacent Pi peer supplied by Shell's own listed group, the update targets that Shell group instead; it never combines Pi and Shell into a comma install.
+
+Unknown or ambiguous ownership, npm source/link packages, and pnpm groups shared with other top-level packages refuse without installation changes. Separate groups in one aggregated listing are allowed. A successful install request does not verify the resulting Pi peer version; rerun `gentle-shell --version` to check it. Use the supplying package manager for source checkouts or unsupported layouts. `gentle-shell update --extensions-only` remains an extension-only Pi command; prefix-bundled Pi still updates with `gentle-shell upgrade`. See [managing packages](readme-reference.md#managing-packages) for the ownership contract.
+
 ## v2.6.0 workspace updates
 
 The [v2.6.0 release](https://github.com/Gentleman-Programming/gentle-pi/releases/tag/v2.6.0) makes the workspace state more durable and inspectable:

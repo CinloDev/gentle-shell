@@ -322,7 +322,13 @@ gentle-shell self-uninstall [--dry-run] [--yes] [--include-shared]
 
 `gentle-shell install npm:<pkg>`, `gentle-shell remove ...`, `gentle-shell list`, `gentle-shell update ...`, `gentle-shell config`, and `gentle-shell auth ...` run pi's own commands against the resolved home — the `--isolated` home by default, or your own pi home with `--link`. A launcher flag before the subcommand (`--link`, `--isolated`, `--home <path>`) still selects which home the subcommand runs against. Running `gentle-shell install npm:gentle-pi` inside the isolated home is unnecessary: the launcher already loads the Gentle Shell package itself (see "Loading the package" below).
 
-`gentle-shell update` and `gentle-shell list` follow that same home selection, so they inspect and update packages in whichever home the effective flag or persisted `home` config points to.
+`gentle-shell list` and extension updates follow that same home selection. `gentle-shell update --extensions-only` preserves Pi's extension-only command; `--extensions`, package targets, and model updates also stay with Pi.
+
+`gentle-shell update` updates the selected Pi through its verified npm or pnpm global owner, avoiding Pi's self-update refusal for pnpm v11 linked stores. Ownership requires successful global listing JSON, an exact canonical listed package-root/CLI match, and binding to the selected runtime. An adjacent peer may instead be supplied by the exact listed `gentle-pi` group: only that Shell package is updated. Pi and Shell are never installed together in a comma group, and unrelated packages are never reinstalled. Merely residing under `PNPM_HOME` proves nothing. Adjacent peers resolve through the supplying group's canonical `node_modules`, including pnpm's sibling store links. npm source/link entries are rejected. pnpm updates additionally require that the actual old global group contains only the target top-level package: aggregated listings may contain other, separate groups, but shared groups are rejected because pnpm can remove the whole old group. Unknown, malformed, failed, or ambiguous ownership refuses before installation; update source checkouts and other unsupported layouts with their supplying package manager.
+
+A successful command confirms only completion of the supplying package's `@latest` install request. It does not prove that the adjacent Pi peer changed or that the selected runtime is latest. Rerun `gentle-shell --version` to inspect the selected Pi version.
+
+Prefix-bundled installations keep their existing `gentle-shell upgrade` route for Pi. `update --all` updates the verified owner before forwarding extension updates; an ownership refusal stops without mutation. Shell's `upgrade` and `self-uninstall` ownership behavior is unchanged.
 
 ### `setup` subcommand
 
@@ -432,8 +438,8 @@ without it. If the installer cannot attribute the existing installation to npm
 or pnpm (for example, an `npm link` checkout), it leaves that installation
 untouched and explains why; see the [installation wizard](install-wizard.md).
 
-Do not substitute `gentle-shell update`: that is Pi's package update, not this
-Gentle Shell upgrade/bootstrap operation.
+Do not substitute `gentle-shell update`: that updates the selected Pi owner,
+not this Gentle Shell channel upgrade/bootstrap operation.
 
 #### Behavior on supporting builds
 
