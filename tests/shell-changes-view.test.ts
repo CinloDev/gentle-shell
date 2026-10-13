@@ -458,7 +458,7 @@ const statusCases = [
 	[CHANGE_STATUS.ADDED, "A", 3, 0],
 	[CHANGE_STATUS.DELETED, "D", 0, 4],
 	[CHANGE_STATUS.RENAMED, "R", 0, 0],
-	[CHANGE_STATUS.UNTRACKED, "??", 5, 0],
+	[CHANGE_STATUS.UNTRACKED, "U", 5, 0],
 ] as const;
 
 for (const [status, code, added, deleted] of statusCases) {
