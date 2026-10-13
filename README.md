@@ -214,6 +214,12 @@ Model, effort, and who does what should be choices, not accidents. Named profile
 
 Extension commands are only useful if you can find them. `alt+k` opens a curated, grouped palette — Configuration, Session, Diagnostics, and Skills — searchable by label, command name, or description, showing entries only when they are actually registered.
 
+**[Docs →](docs/gentle-shell.md#command-palette)**
+
+---
+
+### Customize — Look, layout, and editor in one panel
+
 `/gentle:customize` opens an interactive panel to set animation quality, startup banner rose, text logo and color, or choose an installed Pi theme.
 
 <details>
@@ -229,13 +235,9 @@ Extension commands are only useful if you can find them. `alt+k` opens a curated
 
 </details>
 
-<br>
-
-**[Docs →](docs/gentle-shell.md#command-palette)**
-
 ---
 
-### Audio notifications — opt-in
+### Audio notifications — Opt-in sounds for success, errors, and attention
 
 <img width="100%" src="docs/assets/features/audio-notifications.png" alt="Customize panel with the Notifications category selected: audio notifications on and unmuted, success, error, and attention tones, an Advanced row for per-event exceptions, and a preview line for the global switch">
 
@@ -261,7 +263,9 @@ Open `/gentle:customize` → **Notifications** (the card header reads **Audio no
 
 ---
 
-### Background jobs
+<a id="background-jobs"></a>
+
+### Background jobs — Inspect what runs in the background
 
 Use `/gentle:jobs` to inspect this session's background commands and monitors. Running jobs appear first; each group is ordered newest first. Arrow keys select a job, `Tab` opens details on narrow terminals, `s` stops a running job, and `q` closes the modal.
 
@@ -355,7 +359,9 @@ Cross-orchestrator messages appear as compact `🤖 Sender → 🤖 Recipient` c
 
 ---
 
-### NaN model provider
+<a id="nan-model-provider"></a>
+
+### NaN model provider — First-party, no extra package
 
 The first-party `nan` provider is included; no third-party provider package is required. Set `NAN_API_KEY` before starting Pi, or use native `/login` → NaN (also `/login nan`), then use `/model` to select a model.
 
@@ -465,7 +471,7 @@ It installs what is missing (Node.js, pnpm, Pi, Gentle Shell) and updates an exi
 
 <br>
 
-This is a preview: it is tested on Linux and in CI, while clean-machine runs on macOS and Windows are still being verified. Details: **[installation wizard](docs/install-wizard.md)**.
+Details: **[installation wizard](docs/install-wizard.md)**.
 
 ### Path A: standalone `gentle-shell` (recommended, no pi changes)
 
