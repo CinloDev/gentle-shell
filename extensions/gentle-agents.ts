@@ -26,8 +26,9 @@ import { VISUAL_SETTINGS_CHANGED } from "../lib/shell-sidebar.ts";
 import { resolveVisualSettings } from "../lib/visual-customization-policy.ts";
 import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { createAgentMessageQueue, type PendingAgentMessage } from "../lib/agents-message-delivery.ts";
-import { AGENT_MODE, discoverAgents, formatModelRef, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode } from "../lib/agents-config.ts";
-import { freezeSessionProfileAtStartup, inheritedProfileDriftNotice, resolveSessionProfile, sessionProfileRoutingAt } from "../lib/session-profile-freeze.ts";
+import { AGENT_MODE, PROFILE_SOURCE, discoverAgents, formatModelRef, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode, type ProfileSource } from "../lib/agents-config.ts";
+import { freezeSessionProfileAtStartup, inheritedProfileDriftNotice, resolveSessionProfile, sessionProfileRoutingAt, type InheritedProfileOptions, type SessionProfileResolution } from "../lib/session-profile-freeze.ts";
+import { resolveProfilePin, resolveUnversionedProjectProfile } from "../lib/agent-profile-pin.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
 import { installBackgroundCacheWarming } from "../lib/background-cache-warming.ts";
 import { isFinished, MISSING_TOOLS_NOTE_PREFIX, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } from "../lib/agents-protocol.ts";
@@ -184,6 +185,44 @@ function childExtensionRequest(env: NodeJS.ProcessEnv, curated: string[] | undef
 	const injection = parseChildPackageInjection(env);
 	if (injection) return { extensionPaths: [...injection.extensionPaths], ...(injection.noExtensions ? { noExtensions: true } : {}) };
 	return curated && curated.length > 0 ? { extensionPaths: [...curated] } : {};
+}
+
+// gentle-shell#2180: a short, stable token for the profile layer that supplied
+// the launch's model, recorded next to the model in the TaskRecord so every
+// task card shows which layer won and stale disk edits below a frozen session
+// become visible. Derived from the resolution the request already performed;
+// the only profile reads are the pin/declaration lookups in the paths where
+// `sessionProfileRoutingAt` itself reads the target's own layers without
+// carrying the origin (a foreign target under a session frozen without a
+// profile, and `follow`/child launches), so no layer is resolved twice to route.
+function modelSourceToken(
+	source: ProfileSource,
+	resolution: SessionProfileResolution,
+	routingTarget: InheritedProfileOptions & { foreignRepository?: boolean },
+): string | undefined {
+	if (source === PROFILE_SOURCE.DEFINITION) return "definition";
+	// Unresolved means no layer supplied a model at all: the card already shows
+	// `default`, and naming a layer next to it would only be noise.
+	if (source === PROFILE_SOURCE.UNRESOLVED) return undefined;
+	if (source !== PROFILE_SOURCE.PROFILE) return "default";
+	if (resolution.kind === "explicit") return "binding";
+	if (resolution.kind === "inherited") {
+		if (resolution.profile !== undefined) return `frozen:${resolution.profile.origin}`;
+		// Frozen without a profile: a foreign target keeps only its own pin
+		// layers, so a winning pin there is named from the same read
+		// `sessionProfileRoutingAt` just performed; otherwise the session keeps
+		// the materialized config routing.
+		if (routingTarget.foreignRepository === true) {
+			const pin = resolveProfilePin(routingTarget);
+			return pin === undefined ? "profile" : `pin:${pin.source}`;
+		}
+		return "profile";
+	}
+	// `follow` and live child launches read the target's own defaults
+	// (pin → declaration → global active); name the layer the same read chose.
+	const pin = resolveProfilePin(routingTarget);
+	if (pin !== undefined) return `pin:${pin.source}`;
+	return resolveUnversionedProjectProfile(routingTarget.cwd, routingTarget.configHome) !== undefined ? "declaration" : "profile";
 }
 
 export function agentRuntimePaths(home: string, agentHome = join(home, ".pi", "agent")): { sessions: string; transcripts: string } {
@@ -1641,14 +1680,17 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		// included; only `follow` reads the defaults of the target. The profile is
 		// resolved here, at task-request creation, so queued and running children
 		// keep the routing frozen into their requests even if the session rebinds.
+		// The routing target this launch reads (#1064), reused to name the winning
+		// layer (#2180) so both answers come from one resolution.
+		const routingTarget = {
+			cwd: target ?? parentCwd,
+			configHome: profileConfigHome,
+			resolveWorktree: pinIdentity,
+			foreignRepository: foreign,
+		};
 		const config = withPinnedModelProfiles(
 			loadAgentsConfig(roots(ctx)),
-			sessionProfileRoutingAt(sessionProfile, {
-				cwd: target ?? parentCwd,
-				configHome: profileConfigHome,
-				resolveWorktree: pinIdentity,
-				foreignRepository: foreign,
-			}),
+			sessionProfileRoutingAt(sessionProfile, routingTarget),
 		);
 		// Drift is measured against the defaults of the session's own directory,
 		// where the profile was frozen, never against a delegated target.
@@ -1663,6 +1705,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			if (drift !== undefined) ctx.ui.notify(drift, "info");
 		}
 		const profile = resolveAgentProfile(agent, config);
+		// #2180: the winning layer is named from the resolution and routing this
+		// request already performed, never by re-resolving them.
+		const modelSource = modelSourceToken(profile.source.model, sessionProfile, routingTarget);
 		if (admittedModel !== undefined) {
 			const model = profile.model ?? ctx.model;
 			const catalogModel = model?.provider ? ctx.modelRegistry?.find(model.provider, model.id) : ctx.modelRegistry?.getAll().find(candidate => candidate.id === model?.id);
@@ -1703,6 +1748,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			} } : {}),
 			...(target === undefined || foreign ? {} : { onLaunch: () => { registry.register(target, "subagent:spawn"); } }),
 			model: profile.model,
+			...(modelSource === undefined ? {} : { modelSource }),
 			thinking: profile.thinking,
 			sessionDir,
 			resumeSessionPath: resume,

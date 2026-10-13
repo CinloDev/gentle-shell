@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -3406,6 +3406,13 @@ async function launchNonGitSession(base: ReturnType<typeof pinFixture>, env: Rec
 	const { pi, tools, fire } = fakePi();
 	gentleAgents(pi, {}, harness.deps);
 	const { ctx } = fakeContext();
+	// Outside Git the declaration is read at the session's own cwd, so the
+	// fixture binds a dedicated session directory instead of leaking the
+	// declaration into the shared fixture cwd other tests launch from.
+	const sessionCwd = join(base.root, "session");
+	mkdirSync(join(sessionCwd, ".pi", "gentle-ai"), { recursive: true });
+	copyFileSync(base.declarationPath, join(sessionCwd, ".pi", "gentle-ai", "profile.json"));
+	ctx.sessionManager.getCwd = () => sessionCwd;
 	await fire("session_start", ctx);
 	return {
 		launch: async () => {
