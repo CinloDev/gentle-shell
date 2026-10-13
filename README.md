@@ -32,8 +32,6 @@
 
 <p align="center">Your terminal can run an agent. Your workspace should help you lead it.<br><strong>gentle-shell is your coding agent, bringing your changes, tasks, and engineering workflow together—built for Pi.</strong></p>
 
-<p align="center"><sub>One workspace. A coding agent you direct. A workflow you can inspect.</sub></p>
-
 <div align="center">
  <h3>🎬 See it in action</h3>
 
@@ -56,13 +54,7 @@ https://github.com/user-attachments/assets/6d2bc422-a4dd-4ecf-a04b-fcd3bea7fea9
 
 </div>
 
-<p align="center"><strong>BUILT FOR PI</strong> &nbsp;·&nbsp; Coding-agent workspace &nbsp;·&nbsp; Focused agents &nbsp;·&nbsp; ODD</p>
-
-<div align="center">
-
-<sub>Built for Pi. Shaped by Gentle-AI.</sub>
-
-</div>
+<p align="center"><strong>BUILT FOR PI</strong> &nbsp;·&nbsp; Shaped by Gentle-AI &nbsp;·&nbsp; Coding-agent workspace &nbsp;·&nbsp; Focused agents &nbsp;·&nbsp; ODD</p>
 
 <p align="center">
   <img src="docs/assets/brand/terminal-divider.svg" width="480" alt="">
