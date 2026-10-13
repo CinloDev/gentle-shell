@@ -280,7 +280,7 @@ The Status panel has a **Jobs** section with each running job's description. Whe
 
 <img width="100%" src="docs/assets/diagrams/permission-modes.svg" alt="Three permission modes from more to fewer questions: Normal keeps standard prompts, Auto lets an independent check decide and does not run unavailable or stale decisions, YOLO gives standing permission for scoped work while destructive actions still ask; in every mode explicit restrictions, destructive guards, and independent consent remain">
 
-Choose `/gentle:mode auto` to check eligible actions with an independent, tool-free inference using the current session model.
+Choose `/gentle:mode auto` to check eligible actions with an independent inference using the current session model. Ordinary checks are tool-free; an eligible script check can inspect at most two complete files ([inspection limits](docs/auto-permission-evidence.md)).
 
 <details>
 <summary><kbd>More</kbd> <strong>Coverage, defaults, and scope</strong> — what Auto checks, its cost, and how to make it the default</summary>
