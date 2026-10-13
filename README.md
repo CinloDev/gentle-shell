@@ -275,6 +275,8 @@ Use `/gentle:jobs` to inspect this session's background commands and monitors. R
 
 The Status panel has a **Jobs** section with each running job's description. When the panel is hidden or unavailable in the compact/mobile layout, the top or bottom bar shows only the running count (`⧗ 1 job`). The count and descriptions disappear when no jobs remain active; `/gentle:jobs` retains completed jobs for inspection.
 
+**[Docs →](docs/gentle-shell.md#background-jobs)**
+
 <p align="center">
   <img src="docs/assets/brand/terminal-divider.svg" width="480" alt="">
 </p>
@@ -357,7 +359,7 @@ Save `/gentle:mode default auto` or `/gentle:mode default yolo` to use either op
 
 Cross-orchestrator messages appear as compact `🤖 Sender → 🤖 Recipient` cards with single-row headings. Expand a card to inspect available identifiers and reasons. **Message queued** means queued, not delivered or read; long names are clipped to fit narrow terminals.
 
-> **Every component, skill and preset: [Full breakdown →](docs/gentle-shell.md)**
+**Every component, skill and preset: [Full breakdown →](docs/gentle-shell.md)**
 
 ---
 
