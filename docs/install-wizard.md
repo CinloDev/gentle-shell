@@ -58,7 +58,7 @@ it lets the window close.
 
 Current requirements come from `package.json` and
 [`gentle-ai-installer.mjs`](../scripts/gentle-ai-installer.mjs): Node ≥22.19.0,
-Pi ≥0.99.1, pnpm acquisition 11.1.1, Gentle Shell package 4.0.0 and package-local
+Pi ≥1.0.0, pnpm acquisition 11.1.1, Gentle Shell package 4.0.0 and package-local
 Gentle AI 4.1.1. Windows native source builds require Go ≥1.25.10 when the
 required usable native binary is missing. A reusable binary does not require Go.
 When a build needs Go and the user's Go is missing, older or unchecked, the installer uses
@@ -503,7 +503,7 @@ Mutating and verification steps, returning `failed` with `failedStep` and the
    launcher runs from that real path, as Node resolves it (gentle-pi's own
    `node_modules` first, then beside gentle-pi), must be a
    `@earendil-works/pi-coding-agent` package at a stable version at least the
-   minimum (0.99.1); a missing, unreadable, prerelease or older one fails. When
+   minimum (1.0.0); a missing, unreadable, prerelease or older one fails. When
    it is not 1.0.0, the outcome reports it as `piVersion` and the wizard says
    which Pi Gentle Shell runs.
 3. `verify-shell-bin`: `$PNPM_HOME/bin/gentle-shell` (`gentle-shell.cmd` on

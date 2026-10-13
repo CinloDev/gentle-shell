@@ -133,13 +133,13 @@ test("public docs and metadata advertise ODD and review without retired phase wo
 
 test("technical reference declares the tested Pi minimum required for agent_settled", () => {
 	const manifest = readPackageJson();
-	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], ">=0.99.1");
+	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], ">=1.0.0");
 	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], ">=1.0.0");
 	assert.equal(manifest.peerDependenciesMeta?.["@earendil-works/pi-coding-agent"]?.optional, true);
 	assert.equal(manifest.engines?.node, ">=22.19.0");
 	for (const path of ["docs/readme-reference.md", "docs/gentle-shell.md"]) {
 		const source = readFileSync(join(PACKAGE_ROOT, path), "utf8");
-		assert.match(source, /Pi 0\.99\.1 or newer/, path);
+		assert.match(source, /Pi 1\.0\.0 or newer/, path);
 		assert.match(source, /open `>=1\.0\.0` development range/, path);
 		assert.doesNotMatch(source, /development tests pin Pi/, path);
 		// Docs name exactly the audited Vim editor releases, never a future one.

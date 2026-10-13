@@ -299,7 +299,7 @@ The installer is a preview: it is tested on Linux and in CI, while clean-machine
 
 ### Path A: standalone `gentle-shell` (recommended, no pi changes)
 
-`gentle-shell` opens Pi with the Gentle Shell package loaded, without installing it into your pi agent or editing its `settings.json`.
+`gentle-shell` opens Pi with the Gentle Shell package loaded, without installing it into your pi agent or editing its `settings.json`. It requires Pi 1.0.0 or newer.
 
 ```bash
 npm i -g gentle-pi

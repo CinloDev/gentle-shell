@@ -6,6 +6,12 @@ For development, use [ODD and feature recovery](readme-reference.md#organic-driv
 
 Source map: [shell extension](../extensions/gentle-shell.ts), [shell bar](../lib/shell-bar.ts), [changes model](../lib/shell-changes.ts), [changes view](../lib/shell-changes-view.ts), [usage model](../lib/shell-usage.ts), [usage view](../lib/shell-usage-view.ts), [agents extension](../extensions/gentle-agents.ts), and [agent runner](../lib/agents-runner.ts).
 
+## Updating Pi safely
+
+Run `gentle-shell update` to update the selected global Pi runtime. Shell verifies npm/pnpm global listing JSON and canonical package roots before installing exactly one supplying package. This supports pnpm v11 linked stores without relying on `PNPM_HOME` containment. For an adjacent Pi peer supplied by Shell's own listed group, the update targets that Shell group instead; it never combines Pi and Shell into a comma install.
+
+Unknown or ambiguous ownership, npm source/link packages, and pnpm groups shared with other top-level packages refuse without installation changes. Separate groups in one aggregated listing are allowed. A successful install request does not verify the resulting Pi peer version; rerun `gentle-shell --version` to check it. Use the supplying package manager for source checkouts or unsupported layouts. `gentle-shell update --extensions-only` remains an extension-only Pi command; prefix-bundled Pi still updates with `gentle-shell upgrade`. See [managing packages](readme-reference.md#managing-packages) for the ownership contract.
+
 ## v2.6.0 workspace updates
 
 The [v2.6.0 release](https://github.com/Gentleman-Programming/gentle-pi/releases/tag/v2.6.0) makes the workspace state more durable and inspectable:
@@ -205,7 +211,7 @@ Gentle Shell ships its own interactive tools instead of depending on third-party
 
 ### Gentle Agents
 
-The current package requires Pi 0.99.1 or newer and Node >=22.19.0. Development tests resolve Pi through the open `>=1.0.0` development range. The private Vim editor adapter admits only the audited Pi `0.99.1`, `0.99.2`, `1.0.0`, and `1.1.0` releases; any other release keeps ordinary prompt editing until its editor is audited. Use the latest Pi release; gentle-pi does not update your installed Pi automatically. Children, including any `GENTLE_PI_AGENTS_PI` override, must emit `agent_settled`: `agent_end` records a run's output but is not completion because retries or queued continuations may follow.
+The current package requires Pi 1.0.0 or newer and Node >=22.19.0. Development tests resolve Pi through the open `>=1.0.0` development range. The private Vim editor adapter admits only the audited Pi `0.99.1`, `0.99.2`, `1.0.0`, `1.1.0`, and `1.2.0` releases; any other release keeps ordinary prompt editing until its editor is audited. Use the latest Pi release; gentle-pi does not update your installed Pi automatically. Children, including any `GENTLE_PI_AGENTS_PI` override, must emit `agent_settled`: `agent_end` records a run's output but is not completion because retries or queued continuations may follow.
 
 The `subagent_*` tools and the agents card replace the third-party subagents package (remove `npm:pi-subagents-j0k3r` from your pi packages; while it is still installed the tools stay unregistered and a warning says so at startup). Agent definitions and settings are the ones you already have: markdown agents in `~/.pi/agent/agents/`, `~/.pi/agent/subagents/`, `<cwd>/.pi/agents/`, `<cwd>/.pi/subagents/` (project beats global, `subagents/` beats `agents/`), and `subagents.json` at the global and project level (`default_model`, `default_effort`, `default_mode`, `model_profiles`, `stall_timeout_ms`, `tool_stall_timeout_ms`, `max_concurrency`, `history_max_tasks`).
 

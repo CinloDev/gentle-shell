@@ -962,17 +962,22 @@ test("gentle-shell update pi --extensions in a bundled install redirects Pi's pa
 	assert.ok(JSON.parse(readFileSync(join(prefix.home, ".gentle-shell", "agent", "settings.json"), "utf8")).npmCommand);
 });
 
-test("a kept version that current does not name keeps the ordinary launcher, Pi override and Pi update included", { skip: posixHost }, (t) => {
+test("a kept version that current does not name keeps the ordinary Pi override and refuses an unowned update", { skip: posixHost }, (t) => {
 	const prefix = bundledPrefix(t);
 	const other = join(prefix.root, "versions", "0.0.1-1.0.0");
 	mkdirSync(other);
 	writeFileSync(join(other, ".gentle-shell-version"), "0.0.1-1.0.0\n");
 	rmSync(join(prefix.root, "current"));
 	symlinkSync("versions/0.0.1-1.0.0", join(prefix.root, "current"));
-	const update = spawnSync(process.execPath, [prefix.entry, "update"], { env: { HOME: dirname(prefix.root), PATH: "/usr/bin:/bin",
-		GENTLE_SHELL_PI: join(dirname(dirname(prefix.root)), "user-bin", "pi"), GENTLE_SHELL_NO_AUTO_SETUP: "1" }, encoding: "utf8", input: "" });
-	assert.equal(update.status, 0, update.stderr);
-	assert.equal(update.stdout, "9.9.9\n");
+	const options = { env: { HOME: dirname(prefix.root), PATH: "/usr/bin:/bin",
+		GENTLE_SHELL_PI: join(dirname(dirname(prefix.root)), "user-bin", "pi"), GENTLE_SHELL_NO_AUTO_SETUP: "1" }, encoding: "utf8" as const, input: "" };
+	const version = spawnSync(process.execPath, [prefix.entry, "--version"], options);
+	assert.equal(version.status, 0, version.stderr);
+	assert.match(version.stdout, /pi 9\.9\.9/);
+	const update = spawnSync(process.execPath, [prefix.entry, "update"], options);
+	assert.equal(update.status, 1);
+	assert.equal(update.stdout, "");
+	assert.match(update.stderr, /ownership could not be verified.*No installation changed\./);
 });
 
 test("gentle-shell upgrade in a bundled install refuses the main channel and rolls back to the kept version", { skip: posixHost }, (t) => {
