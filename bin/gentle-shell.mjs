@@ -280,10 +280,14 @@ async function classifyBundledMemory() {
 	const endpoint = await probeEngramEndpoint();
 	const result = classifyEngramStartup({ ...decision, store: observed.store, endpoint, provenance: ownEngramStore(observed, core) });
 	if (result.policy === "disabled" && endpoint.kind === "refused" && observed.store === "present" && core) {
-		const record = parseEngramProvenance(readSmallRegularFile(engramProvenancePath(bundledInstall.root), 4096));
-		if (record?.dataDir === observed.dataDir && record.instanceId === observed.instanceId && record.coreSha256 !== sha256File(core)) {
-			return { ...result, notice: ENGRAM_CORE_CHANGED_NOTICE };
-		}
+		// Wording only: an unreadable record or core keeps the generic notice and
+		// must never abort startup.
+		try {
+			const record = parseEngramProvenance(readSmallRegularFile(engramProvenancePath(bundledInstall.root, process.platform), 4096));
+			if (record?.dataDir === observed.dataDir && record.instanceId === observed.instanceId && record.coreSha256 !== sha256File(core)) {
+				return { ...result, notice: ENGRAM_CORE_CHANGED_NOTICE };
+			}
+		} catch { /* Keep the generic disabled notice. */ }
 	}
 	return result;
 }

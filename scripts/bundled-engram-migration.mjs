@@ -2,7 +2,7 @@
 // migration; Shell owns promotion and its core-bound provenance. Never called
 // from ordinary startup or upgrade.
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -21,6 +21,13 @@ function regularText(path, limit) {
 	return readFileSync(path, "utf8");
 }
 const digest = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// Durably record a file or a directory entry change. Windows cannot open a
+// directory for fsync; there NTFS metadata journaling covers the renames.
+function syncPath(path, directory = false) {
+	if (directory && process.platform === "win32") return;
+	const fd = openSync(path, "r");
+	try { fsyncSync(fd); } finally { closeSync(fd); }
+}
 function coreHelp(core, env) {
 	// Older cores route unknown commands through legacy startup. Inspect their
 	// config-free help in an isolated home, never try an unknown data command.
@@ -72,6 +79,8 @@ export function migrateBundledEngram({ prefix, core, home, env }) {
 		// mistake the rename gap for a fresh install and provision an empty store.
 		writeFileSync(marker, `${JSON.stringify({ source, output, backup, originalProvenance: record })}\n`, { flag: "wx", mode: 0o600 });
 		markerOwned = true;
+		syncPath(marker);
+		syncPath(dirname(marker), true);
 		const result = spawnSync(core, ["migrate-copy", "--data-dir", source, "--output-dir", output, "--confirm-quiescent", "--json"], {
 			env: childEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120000, maxBuffer: 16384, windowsHide: true,
 		});
@@ -94,10 +103,16 @@ export function migrateBundledEngram({ prefix, core, home, env }) {
 		promotionStarted = true;
 		renameSync(source, backup);
 		renameSync(output, source);
+		syncPath(dirname(source), true);
 		const temporary = `${provenancePath}.${suffix}.tmp`;
 		writeFileSync(temporary, `${JSON.stringify({ schema: 1, dataDir: source, instanceId: identity, coreSha256: coreHash })}\n`, { flag: "wx", mode: 0o600 });
+		syncPath(temporary);
 		renameSync(temporary, provenancePath);
+		syncPath(dirname(provenancePath), true);
+		// Only a durable promotion and provenance may release the fail-closed marker.
 		rmSync(marker);
+		// The migration is complete; a failed final sync must not report failure.
+		try { syncPath(dirname(marker), true); } catch { /* Best effort. */ }
 		return { code: 0, stdout: `${JSON.stringify({ status: "migrated", instance_id: identity, backup_dir: backup })}\n`, stderr: "" };
 	} catch (error) {
 		if (markerOwned && !promotionStarted) {
