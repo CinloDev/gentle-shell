@@ -621,8 +621,9 @@ This project is built in public. Bring a real workflow, a sharp question, a bug 
 <!--
   sealed_token is a GitHub fine-grained token encrypted against Star History's
   public key, so only the encrypted value is published here. It is required
-  because GitHub restricted the stargazers API to a repository's admins and
-  collaborators on 2026-06-30; without it the chart renders an error placeholder.
+  because GitHub announced on 2026-06-30 that it would restrict the stargazers
+  API to a repository's admins and collaborators; without it the chart renders
+  an error placeholder.
   Regenerate it at https://www.star-history.com/?repos=Gentleman-Programming%2Fgentle-pi&type=date&legend=top-left
 -->
 

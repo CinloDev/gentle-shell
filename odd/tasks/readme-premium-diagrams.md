@@ -13,14 +13,14 @@ Worktree: gentle-shell-worktrees/readme-modernize, branch docs/readme-modernize.
 
 ## Tasks
 
-- T1 — S1,S3,S4 — inline — ODD workflow prototype — done (uncommitted)
-- T2 — S1,S3,S4 — inline — Focused agents (`agent-orchestration.svg`) — done (uncommitted)
-- T3 — S1,S3,S4 — inline — Native review (`native-review.svg`) — done (uncommitted)
-- T4 — S1,S2,S3,S4 — inline — el Gentleman (`gentleman-workflow.svg`, currently unused) redesigned and embedded — done (uncommitted)
-- T5 — S2,S3,S4 — inline — Measured: before/after chart from the README table data (`measured-routing.svg`) — done (uncommitted)
-- T6 — S2,S3,S4 — inline — Permission modes: Normal / Auto / YOLO diagram from README facts (`permission-modes.svg`) — done (uncommitted)
+- T1 — S1,S3,S4 — inline — ODD workflow prototype — done — 51cc40ae2
+- T2 — S1,S3,S4 — inline — Focused agents (`agent-orchestration.svg`) — done — 51cc40ae2
+- T3 — S1,S3,S4 — inline — Native review (`native-review.svg`) — done — 51cc40ae2
+- T4 — S1,S2,S3,S4 — inline — el Gentleman (`gentleman-workflow.svg`, currently unused) redesigned and embedded — done — 51cc40ae2
+- T5 — S2,S3,S4 — inline — Measured: before/after chart from the README table data (`measured-routing.svg`) — done — 51cc40ae2
+- T6 — S2,S3,S4 — inline — Permission modes: Normal / Auto / YOLO diagram from README facts (`permission-modes.svg`) — done — 51cc40ae2
 - T7 — S2 — inline — Command palette: embed existing unused `command-palette.png` — dropped: it shows the removed SDD group; moved to T8
-- T8 — S5 — inline — shot list for Command palette, Audio, Background jobs, NaN — command-palette.png and audio-notifications.png captured by the user and embedded; background-jobs.png and nan-models.png still pending
+- T8 — S5 — inline — shot list for Command palette, Audio, Background jobs, NaN — command-palette.png and audio-notifications.png captured by the user and embedded in 3ea120a6f; background-jobs.png and nan-models.png still pending
 
 ## Shot list (T8)
 
@@ -43,3 +43,4 @@ Common setup: Gentle Shell fullscreen, Gentleman-Cute theme, terminal about 160x
 - L6 — Generator kept outside the repo (`/tmp/diaggen/gen.py`); diagrams validated with xmllint and rendered in headless Chrome after the user took over the ego-browser space.
 - L7 — Found `command-palette.png` outdated (removed SDD group); not embedded, added to the shot list.
 - L8 — User: "Solo pude agregarte 2 imagenes en el directorio que me pediste. El generador de diagramas dejemoslo local por ahora. Genera los commit por unidad de trabajo". Captures found in the main checkout `assets/features/` (palette, audio), copied to `docs/assets/features/`.
+- L9 — Work-unit commits: ef0c44d47 (README structure), 51cc40ae2 (T1–T6 diagrams), 3ea120a6f (T8 screenshots). Recorded after CodeRabbit review on PR #2192.
