@@ -67,12 +67,15 @@ export function colorDiff(text: string, theme: ChangesViewTheme): string[] {
 	return lines;
 }
 
+// New files are two distinct states: `A` is tracked and staged, `U` is still
+// untracked. Git's own `??` reads as a broken value in a status column, so the
+// list names the state instead of echoing the plumbing code.
 const FILE_STATUS = {
 	[CHANGE_STATUS.MODIFIED]: "M",
 	[CHANGE_STATUS.ADDED]: "A",
 	[CHANGE_STATUS.DELETED]: "D",
 	[CHANGE_STATUS.RENAMED]: "R",
-	[CHANGE_STATUS.UNTRACKED]: "??",
+	[CHANGE_STATUS.UNTRACKED]: "U",
 } as const;
 
 function fileCounts(file: ChangedFile, theme: ChangesViewTheme): string {
