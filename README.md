@@ -94,6 +94,8 @@ The [v4.1.0 release](https://github.com/Gentleman-Programming/gentle-shell/relea
 
 ### el Gentleman — Think before you build
 
+<img width="100%" src="docs/assets/diagrams/gentleman-workflow.svg" alt="el Gentleman workflow as six steps: you give the intent; el Gentleman clarifies the scope, picks a sensible next step, does the work, and gathers evidence people can review; the final decision stays yours">
+
 Say what you need once, then keep moving. el Gentleman helps turn intent into clear scope, a sensible next step, and evidence people can review — without making every task feel like a process meeting.
 
 **[Docs →](docs/readme-reference.md#organic-driven-development)**
@@ -102,7 +104,7 @@ Say what you need once, then keep moving. el Gentleman helps turn intent into cl
 
 ### ODD — The everyday workflow
 
-<img width="100%" src="docs/assets/diagrams/odd-workflow.svg" alt="Organic Driven Development as seven numbered steps: Authorize, Explore, Resolve uncertainty, and Classify across the top row; Classify forks, so small understood work stays light while substantial work gets step five, Track, with one feature document; both paths converge on Implement task by task and then Close, above a dashed band marking that one feature document mirrored in Engram lets work resume across sessions">
+<img width="100%" src="docs/assets/diagrams/odd-workflow.svg" alt="Organic Driven Development as seven numbered steps in one left-to-right flow: Authorize, Explore, and Resolve uncertainty to understand; Classify forks so small work stays light while substantial work gets step five, Track, with one feature document; both paths converge on Implement task by task and then Close with verified proof, above a band noting that one feature document mirrored in Engram lets work resume across sessions">
 
 **Organic Driven Development (ODD)** is the everyday path: the agent explores before changing anything, clarifies only real decisions, and keeps small understood work small. Substantial, authorized work gets one recoverable feature document — mirrored in memory when available — so progress, evidence, and the next step survive an interruption; behavior changes are test-first by default when a runnable test applies.
 
@@ -114,7 +116,7 @@ Tasks are sized by understanding, risk, and resumability: work you could finish 
 
 ### Focused agents — Context with a return path
 
-<img width="100%" src="docs/assets/diagrams/agent-orchestration.svg" alt="Diagram of one parent session directing bounded map, implementation, and verification work and receiving evidence back">
+<img width="100%" src="docs/assets/diagrams/agent-orchestration.svg" alt="Diagram of one parent session sending tasks to a read-only explorer, parallel writers, and an independent verifier, each returning its observed result to the parent, which stays accountable">
 
 Bring in help without losing the thread. Focused package-owned Pi agents can map a codebase, implement a bounded change, or verify it, while one parent stays accountable for the scope, the decisions, and the final summary.
 
@@ -125,6 +127,8 @@ The parent delegates for a reason, not for size. Understanding that outgrows one
 ---
 
 ### Measured — What proportional routing changed
+
+<img width="100%" src="docs/assets/diagrams/measured-routing.svg" alt="Bar chart of wall-clock time before and after proportional routing: a 3-line bug fell from 335 to 77 seconds inline, a shared-logic bug from 479 to 276 seconds with one explorer, and a high-risk data migration went from 559 to 539 seconds but was accepted on the first round with one independent verifier">
 
 The routing rules came from benchmarks. These runs use a local benchmark with hidden acceptance suites; each cell is a single run (n=1), and cost is API-equivalent.
 
@@ -141,7 +145,7 @@ Against the same model in Codex CLI, with blind review of every solution, Gentle
 
 ### Native review — Review the exact change
 
-<img width="100%" src="docs/assets/diagrams/native-review.svg" alt="Diagram showing one frozen candidate passing through risk-scoped native review to an outcome, while human delivery choices stay separate">
+<img width="100%" src="docs/assets/diagrams/native-review.svg" alt="Diagram of a frozen candidate passing through risk-scoped review to an evidence outcome, with a bounded correction path back to the candidate, while a separate boundary keeps the decision of what ships with you">
 
 Review the exact change, not a moving target. Native review keeps one candidate in view, returns risk-scoped evidence, and can surface a bounded correction path. You still decide what happens next in your repository.
 
@@ -269,6 +273,8 @@ The Status panel has a **Jobs** section with each running job's description. Whe
 ## 🛡️ Control
 
 ### Permission modes — Normal, Auto, or YOLO
+
+<img width="100%" src="docs/assets/diagrams/permission-modes.svg" alt="Three permission modes from more to fewer questions: Normal keeps standard prompts, Auto lets an independent check decide and does not run unavailable or stale decisions, YOLO gives standing permission for scoped work while destructive actions still ask; in every mode explicit restrictions, destructive guards, and independent consent remain">
 
 Choose `/gentle:mode auto` to check eligible actions with an independent, tool-free inference using the current session model.
 
