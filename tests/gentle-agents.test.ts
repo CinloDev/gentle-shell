@@ -30,6 +30,7 @@ import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
 import { AgentRunner, REQUESTED_TOOLS_ENV, type TaskRequest } from "../lib/agents-runner.ts";
 import { bindSessionRepositoryPreparation } from "../lib/bounded-writer-admission.ts";
 import { bindSessionProfile, resetSessionProfileBindingsForTesting } from "../lib/session-profile-binding.ts";
+import { taskHeader } from "../lib/agents-view.ts";
 import { readFrozenInheritedProfile, resetFrozenInheritedProfilesForTesting } from "../lib/session-profile-freeze.ts";
 import { CHILD_METRICS_EVENT } from "../lib/runtime-metrics-children.ts";
 import { CARD_STYLE, cardStyle, setCardStyle } from "../lib/shell-card.ts";
@@ -3526,6 +3527,17 @@ test("a follow launch through a non-Git repository declaration records declarati
 	t.after(session.shutdown);
 	await session.launch();
 	assert.equal(captures[0]!.request.modelSource, "declaration");
+});
+
+test("the agents task card shows the winning layer next to the model, and renders unchanged without one (#2180)", () => {
+	const record = {
+		id: "task", agent: "explore", mode: "task", prompt: "Map the repo", label: "Map", cwd: "/repo", parentSessionId: "s1",
+		status: TASK_STATUS.RUNNING, createdAt: 60_000, startedAt: 60_000, endedAt: null, model: "nan/glm5.3",
+		thinking: undefined, sessionPath: null, error: null, result: null, lastStep: "", lastActivityAt: 60_000,
+		turns: 0, toolCalls: 0, tokens: 0, cost: 0,
+	} as TaskRecord;
+	assert.equal(taskHeader({ ...record, modelSource: "binding" }, 61_000), "explore · running · nan/glm5.3 · binding · 1s");
+	assert.equal(taskHeader(record, 61_000), "explore · running · nan/glm5.3 · 1s", "absent modelSource renders exactly as today");
 });
 
 test("agentsEnabled and agentsCollapseKey read their flags and stay off inside a child", () => {
