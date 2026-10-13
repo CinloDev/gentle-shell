@@ -970,7 +970,7 @@ test("a kept version that current does not name keeps the ordinary Pi override a
 	rmSync(join(prefix.root, "current"));
 	symlinkSync("versions/0.0.1-1.0.0", join(prefix.root, "current"));
 	const options = { env: { HOME: dirname(prefix.root), PATH: "/usr/bin:/bin",
-		GENTLE_SHELL_PI: join(dirname(dirname(prefix.root)), "user-bin", "pi"), GENTLE_SHELL_NO_AUTO_SETUP: "1" }, encoding: "utf8", input: "" };
+		GENTLE_SHELL_PI: join(dirname(dirname(prefix.root)), "user-bin", "pi"), GENTLE_SHELL_NO_AUTO_SETUP: "1" }, encoding: "utf8" as const, input: "" };
 	const version = spawnSync(process.execPath, [prefix.entry, "--version"], options);
 	assert.equal(version.status, 0, version.stderr);
 	assert.match(version.stdout, /pi 9\.9\.9/);
