@@ -75,7 +75,7 @@
 		"@heyhuynhgiabuu/pi-pretty": "0.6.27"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.99.1",
+		"@earendil-works/pi-coding-agent": ">=1.0.0",
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-tui": "*",
 		"typebox": "*"

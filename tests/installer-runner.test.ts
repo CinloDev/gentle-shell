@@ -1679,7 +1679,8 @@ test("verify-global-list accepts the Pi the launcher runs beside gentle-pi at th
 		const h = harness({ texts });
 		const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
 		assert.equal(result.outcome, "ready", JSON.stringify(texts));
-		assert.equal(result.piVersion, Object.values(texts)[0].includes("1.1.0") ? "1.1.0" : requirements.pi);
+		const selectedVersion = JSON.parse(Object.values(texts)[0]).version;
+		assert.equal(result.piVersion, selectedVersion === PI_INSTALL_VERSION ? undefined : selectedVersion);
 	}
 	// The pin itself adds nothing to the outcome.
 	assert.equal("piVersion" in (await runStandardInstall({ plan: plan(), consent: true }, harness().adapters)), false);
