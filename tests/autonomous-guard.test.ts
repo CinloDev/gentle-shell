@@ -40,6 +40,53 @@ test("YOLO waives reversible push and rebase segments after full evaluation (#21
 	]) assert.equal(isReversibleYoloCommand(command, evaluateGuardedCommand(command, config)), false, command);
 });
 
+// gentle-shell#2174: a guarded word inside an argument of a known data command
+// (search, print, view, non-executing edit) is text, not an operation. Every
+// opaque form keeps today's lexical match.
+test("guarded words inside data-command arguments are not guarded operations (#2174)", () => {
+	const config = { autonomousMode: false, guardedCommands: {} };
+	for (const command of [
+		"grep -n 'git push origin main' probe.mts",
+		"grep -o '\"command\":\"[^\"]*git push[^\"]*\"' session.jsonl | sort | uniq -c | sort -rn | head -8",
+		"rg 'npm publish' docs",
+		"echo 'remember to git push later'",
+		"cat > probe.mts <<'EOF'\nconst x = \"git push --force origin main\";\nEOF",
+		"grep -rn 'git reset --hard' docs",
+		"env LC_ALL=C grep 'pi remove' notes.md",
+	]) assert.equal(classifyGuardedCommand(command, config), "not-guarded", command);
+	for (const [command, expected] of [
+		["git push origin main", "confirm"],
+		["grep x file && git push origin main", "confirm"],
+		["sh -c 'git push origin main'", "confirm"],
+		["bash <<'EOF'\ngit push origin main\nEOF", "confirm"],
+		["python3 -c \"import os; os.system('git push')\"", "confirm"],
+		["echo $(git push origin main)", "confirm"],
+		["grep 'git push origin main' f | sh", "confirm"],
+		["time git push origin main", "confirm"],
+		["sed 's/x/git push/e' file", "confirm"],
+		["grep \"git push origin main file", "confirm"],
+		["ssh host git push origin main", "confirm"],
+		["cat <<'EOF' | bash\ngit push -f origin main\nEOF", "block"],
+		["git reset --hard", "block"],
+		["echo ok; git push --force origin main", "block"],
+		// Verifier counterexamples: every executor or unproven heredoc keeps the lexical guard.
+		["cat <<EOF; git push origin main\nhello\nEOF", "confirm"],
+		["cat <<EOF; chmod -R 777 /tmp/guard-target\nhello\nEOF", "block"],
+		["echo '<<true'\ngit push --force origin main\ntrue", "block"],
+		["printf '%s\\n' 'git push --force origin main' | xargs env", "block"],
+		["printf '%s\\n' 'git push origin main' | sudo -s", "confirm"],
+		["printf '%s\\n' 'git push origin main' | env -S 'sh -s'", "confirm"],
+		["printf '%s\\n' 'git push origin main' | exec -a cat sh", "confirm"],
+		["printf '%s\\n' 'git push origin main' | builtin source /dev/stdin", "confirm"],
+		["printf '%s\\n' 'git push origin main' | $'sh'", "confirm"],
+		["printf x | sed 's|.*|git push --force origin main|e'", "block"],
+		["printf x | sed '1e git push origin main'", "confirm"],
+		["echo 'git push origin main' | at now", "confirm"],
+		["echo 'git push origin main' > x.sh && ./x.sh", "confirm"],
+		["sed -i '' 's/a/git push/' file", "confirm"],
+	] as const) assert.equal(classifyGuardedCommand(command, config), expected, command);
+});
+
 test("YOLO preserves explicit push restrictions in either config layer independently of persistent autonomy", () => {
 	const root = makeTmpDir();
 	const cwd = join(root, "repo");
