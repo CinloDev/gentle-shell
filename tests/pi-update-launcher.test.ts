@@ -19,8 +19,9 @@ function launch(args: string[], scenario = 'owned') {
  if (scenario === 'separate') dependencies['unrelated'] = {path:'/global/v11/other/node_modules/unrelated'};
  const groups = [{path:'/global/v11',dependencies}, ...(scenario === 'ambiguous' ? [{path:'/global/other',dependencies}] : [])];
  const listing = scenario === 'malformed' ? '{' : JSON.stringify(npm ? groups[0] : groups);
- const links = {[`${nodeModules}/${target}`]:adjacent ? shellRoot : piRoot,
-  [`${nodeModules}/${PI}`]:piRoot};
+ // pnpm links only the top-level package into the global group; the peer
+ // is reachable solely as the Shell package's store sibling.
+ const links = {[`${nodeModules}/${target}`]:adjacent ? shellRoot : piRoot};
  const roots = [nodeModules, '/global/v11/other/node_modules', shellRoot, piRoot, `${piRoot}/dist/bundle/cli.js`];
  const bootstrap = `import { registerHooks } from 'node:module';
  const original = ${JSON.stringify(new URL('../bin/gentle-shell.mjs', import.meta.url).href)};
@@ -40,7 +41,7 @@ function launch(args: string[], scenario = 'owned') {
  const links = ${JSON.stringify(links)}, roots = ${JSON.stringify(roots)};
  globalThis.fakeAdapters = {
   fs: { realpath: async p => { if (links[p]) return links[p]; if (roots.includes(p)) return p; throw new Error('ENOENT ' + p); },
-   readFile: async p => { if (p === '${shellRoot}/package.json') return JSON.stringify({name:'gentle-pi'}); if(p === '${piRoot}/package.json') return JSON.stringify({name:'${PI}',bin:{pi:'dist/bundle/cli.js'}}); throw new Error('ENOENT ' + p); } },
+   readFile: async p => { if (p === '${shellRoot}/package.json') return JSON.stringify({name:'gentle-pi',version:'4.1.0'}); if(p === '${piRoot}/package.json') return JSON.stringify({name:'${PI}',version:'1.1.0',bin:{pi:'dist/bundle/cli.js'}}); throw new Error('ENOENT ' + p); } },
   which: async n => n === '${npm ? 'npm' : 'pnpm'}' ? '/fake/' + n : null,
   run: async (cmd, args) => {
    if(args.includes('list') || args.includes('ls')) return {code:0,stdout:${JSON.stringify(listing)}};
@@ -54,9 +55,11 @@ function launch(args: string[], scenario = 'owned') {
 for (const scenario of ['owned','adjacent','separate']) test(`public linked-store update succeeds for ${scenario}`, () => {
  const result = launch(['update'], scenario);
  assert.equal(result.status, 0, result.stderr);
- assert.match(result.stdout, scenario === 'adjacent' ? /MUTATION .*add.*gentle-pi@latest/ : /MUTATION .*add.*@earendil-works\/pi-coding-agent@latest/);
+ assert.match(result.stdout, scenario === 'adjacent' ? /MUTATION \["add","-g","gentle-pi@4\.1\.0","--allow-build=gentle-pi"\]/ : /MUTATION \["add","-g","@earendil-works\/pi-coding-agent@latest"\]/);
  assert.doesNotMatch(result.stdout, /FORWARD/);
- assert.match(result.stdout, /selected Pi version after installation has not been verified/);
+ // The fake manager changes nothing, so the readback reports the same version and pnpm's release-age rule.
+ assert.match(result.stdout, /the selected Pi is still 1\.1\.0\./);
+ assert.match(result.stdout, /minimumReleaseAge/);
  assert.equal(result.stderr, '');
 });
 

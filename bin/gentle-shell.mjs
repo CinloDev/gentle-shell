@@ -1777,7 +1777,7 @@ async function main() {
 	const args = parseLauncherArgs(process.argv.slice(2));
 	if (args.error !== undefined) fail(`${args.error}\nRun 'gentle-shell --help' for usage.`, 2);
 	if (args.help) {
-		process.stdout.write("Pi updates: update updates the verified global Pi owner (or the selected adjacent peer's Shell group).\nUnknown ownership refuses without installing; update --extensions-only stays Pi-only.\nPrefix-bundled Pi updates with gentle-shell upgrade.\n");
+		process.stdout.write("Pi updates: update reinstalls the verified supplier of the Pi this launcher runs (a global Pi, or the\nShell package whose adjacent peer it is, at the same Shell version) and reads the resulting Pi version back.\nUnknown ownership refuses without installing; update --extensions-only stays Pi-only.\nPrefix-bundled Pi updates with gentle-shell upgrade.\n");
 		process.stdout.write(`${helpText()}\nBundled Engram safety: memory opens only a fresh, verified or Shell-provisioned store; otherwise ENGRAM_BIN\nis Shell's guard and memory stays off. Matching versions or updating alone do not prove compatibility.\nReuse requires a server with verified /compatibility evidence or matching Shell-provisioned store identity.\nBack up existing data before manual changes; do not delete it or bypass the safety check.\nShell rechecks on every launch and remains usable without memory.\nAn explicit ENGRAM_BIN or ENGRAM_URL is kept and bypasses the guard.\n`);
 		process.exit(0);
 	}
@@ -1869,7 +1869,7 @@ async function main() {
 		const { managedUpdatePlan, updateSelectedPi } = await import("../scripts/pi-update.mjs");
 		const plan = managedUpdatePlan(args.passthrough);
 		if (plan.self) {
-			process.exitCode = await updateSelectedPi({ runtime, packageRoot, platform: process.platform,
+			process.exitCode = await updateSelectedPi({ runtime, packageRoot, platform: process.platform, currentVersion: versionCheck.version, cwd: tmpdir(),
 				adapters: await packageManagerAdapters(), out: (line) => process.stdout.write(`${line}\n`) });
 			if (plan.piArgs === undefined) return;
 		}
