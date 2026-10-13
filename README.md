@@ -218,6 +218,8 @@ Model, effort, and who does what should be choices, not accidents. Named profile
 
 ### Command palette — Every command, one keystroke away
 
+<img width="100%" src="docs/assets/features/command-palette.png" alt="Command palette open over the session: a search prompt above grouped entries for Configuration, Session, and Diagnostics, with alt+g and alt+a shortcuts on the right and a key hint row below">
+
 Extension commands are only useful if you can find them. `alt+k` opens a curated, grouped palette — Configuration, Session, Diagnostics, and Skills — searchable by label, command name, or description, showing entries only when they are actually registered.
 
 `/gentle:customize` opens an interactive panel to set animation quality, startup banner rose, text logo and color, or choose an installed Pi theme.
@@ -238,6 +240,8 @@ Highlighting a theme previews its source palette without changing the active the
 ---
 
 ### Audio notifications — opt-in
+
+<img width="100%" src="docs/assets/features/audio-notifications.png" alt="Customize panel with the Notifications category selected: audio notifications on and unmuted, success, error, and attention tones, an Advanced row for per-event exceptions, and a preview line for the global switch">
 
 Open `/gentle:customize` → **Notifications** (the card header reads **Audio notifications**) and configure audio directly in the same two-column card, with no nested menu. Audio starts off; RPC and children stay silent.
 
