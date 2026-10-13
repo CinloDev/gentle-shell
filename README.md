@@ -235,6 +235,10 @@ Extension commands are only useful if you can find them. `alt+k` opens a curated
 
 </details>
 
+<br>
+
+**[Card style and content →](docs/gentle-shell.md#card-style)**
+
 ---
 
 ### Audio notifications — Opt-in sounds for success, errors, and attention
