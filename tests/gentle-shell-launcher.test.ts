@@ -66,6 +66,20 @@ test("parseLauncherArgs returns all-false defaults for an empty argv", () => {
 	});
 });
 
+test("parseLauncherArgs reserves explicit memory recovery without consuming prior commands or escaped prompts", () => {
+	const memory = parseLauncherArgs(["memory", "migrate", "--confirm-quiescent"]);
+	assert.equal(memory.command, "memory");
+	assert.deepEqual(memory.commandArgs, ["migrate", "--confirm-quiescent"]);
+	assert.deepEqual(memory.passthrough, []);
+	for (const command of ["home", "upgrade", "self-uninstall"] as const) {
+		const parsed = parseLauncherArgs([command, "--help"]);
+		assert.equal(parsed.command, command);
+		assert.deepEqual(parsed.commandArgs, ["--help"]);
+	}
+	assert.deepEqual(parseLauncherArgs(["--", "memory"]).passthrough, ["memory"]);
+	assert.match(helpText(), /gentle-shell memory migrate --confirm-quiescent/);
+});
+
 test("parseLauncherArgs captures a --package-root value from the next argument", () => {
 	assert.equal(parseLauncherArgs(["--package-root", "/custom/root"]).packageRoot, "/custom/root");
 });

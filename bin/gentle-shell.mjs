@@ -63,6 +63,8 @@ import {
 	bundledEngramSchema,
 	classifyEngramStartup,
 	ENGRAM_COMPANION_SOURCE,
+	ENGRAM_CORE_CHANGED_NOTICE,
+	ENGRAM_PRIVATE_REQUIRED_NOTICE,
 	ENGRAM_PROVISION_FAILED_NOTICE,
 	ENGRAM_RECOVERY_NOTICE,
 	engramHeaderAllows,
@@ -74,6 +76,7 @@ import {
 	probeEngramEndpoint,
 	sqliteHeaderUserVersion,
 	supportsEngramStartupPolicy,
+	supportsEngramSessionOwned,
 	bundledChildEnv,
 	bundledPi,
 	bundledSetupEnv,
@@ -95,6 +98,7 @@ import {
 import { bundledGentleAiPaths, GENTLE_AI_VERSION, gentleAiBinaryPath, gentleAiIsolationEnv, PackageLocalGentleAiBinaryMissingError } from "../runtime/gentle-ai-binary.mjs";
 import { DEFAULT_THEME_NAME, installIsolatedTuiModeSetting } from "../scripts/install-tui-mode-setting.mjs";
 import { artifactFor, engramPinVersion } from "../scripts/installer-downloads.mjs";
+import { migrateBundledEngram, migrationPending, supportsBundledSessionOwned, MIGRATION_PENDING_NOTICE, MIGRATION_USAGE } from "../scripts/bundled-engram-migration.mjs";
 import { shouldCheckStartupUpdate, findStartupUpdate } from "../runtime/gentle-shell-startup-update.mjs";
 import { promptStartupUpdate } from "../runtime/gentle-shell-update-panel.mjs";
 import { applyStartupChoice, omitStartupVersion, resolveStartupRelaunch } from "../runtime/gentle-shell-startup-flow.mjs";
@@ -268,12 +272,20 @@ function ownEngramStore(observed, core) {
 // of the default endpoint. No Engram executable, SQLite, identity repair, or
 // contact with an explicitly selected endpoint.
 async function classifyBundledMemory() {
+	if (migrationPending(bundledInstall.root)) return { policy: "disabled", notice: MIGRATION_PENDING_NOTICE };
 	const core = verifiedBundledCore();
 	const decision = { env: process.env, core: core !== undefined, coreVersion: engramPinVersion };
 	if (!engramProbeAllowed(process.env)) return classifyEngramStartup({ ...decision, store: "unknown", endpoint: { kind: "unknown" } });
 	const observed = observeEngramStore();
 	const endpoint = await probeEngramEndpoint();
-	return classifyEngramStartup({ ...decision, store: observed.store, endpoint, provenance: ownEngramStore(observed, core) });
+	const result = classifyEngramStartup({ ...decision, store: observed.store, endpoint, provenance: ownEngramStore(observed, core) });
+	if (result.policy === "disabled" && endpoint.kind === "refused" && observed.store === "present" && core) {
+		const record = parseEngramProvenance(readSmallRegularFile(engramProvenancePath(bundledInstall.root), 4096));
+		if (record?.dataDir === observed.dataDir && record.instanceId === observed.instanceId && record.coreSha256 !== sha256File(core)) {
+			return { ...result, notice: ENGRAM_CORE_CHANGED_NOTICE };
+		}
+	}
+	return result;
 }
 
 // Verified with the published Engram v3.4.0 darwin-arm64 binary in an isolated
@@ -333,6 +345,7 @@ async function ensureEngramCompanion(home, runtime, stdio, timeoutMs) {
 	if (!Array.isArray(packages)) return { ok: false, exitCode: 1, message: "gentle-shell: cannot verify Engram startupPolicy from non-array packages" };
 	let pinned = false;
 	let local = false;
+	let localOwned = true;
 	let npmSelected = false;
 	for (const entry of packages) {
 		const source = typeof entry === "string" ? entry : entry?.source;
@@ -346,9 +359,10 @@ async function ensureEngramCompanion(home, runtime, stdio, timeoutMs) {
 			return { ok: false, exitCode: 1, message: `gentle-shell: selected companion ${source} lacks engram.startupPolicy=1; update it and recheck (selection preserved)` };
 		}
 		local = true;
+		localOwned &&= supportsEngramSessionOwned(readJsonIfExists(join(selected, "package.json")));
 	}
-	if (local && !npmSelected) return { ok: true };
-	if (pinned && supportsEngramStartupPolicy(readJsonIfExists(metadata))) return { ok: true };
+	if (local && !npmSelected) return { ok: true, sessionOwned: localOwned };
+	if (pinned && supportsEngramStartupPolicy(readJsonIfExists(metadata))) return { ok: true, sessionOwned: localOwned && supportsEngramSessionOwned(readJsonIfExists(metadata)) };
 	process.stderr.write(`gentle-shell: installing policy-capable companion ${ENGRAM_COMPANION_SOURCE} through Pi\n`);
 	const result = await spawnAndWait(runtime.command, [...runtime.args, "install", ENGRAM_COMPANION_SOURCE], buildSetupEnv(home, runtime), stdio, timeoutMs);
 	let declared = false;
@@ -359,7 +373,7 @@ async function ensureEngramCompanion(home, runtime, stdio, timeoutMs) {
 	if (!result.ok || result.timedOut || !declared || !supportsEngramStartupPolicy(readJsonIfExists(metadata))) {
 		return { ok: false, exitCode: 1, message: "gentle-shell: companion installation did not establish engram.startupPolicy=1; the Engram guard still keeps unverified stores closed. Repair gentle-engram, then restart Shell." };
 	}
-	return { ok: true };
+	return { ok: true, sessionOwned: localOwned && supportsEngramSessionOwned(readJsonIfExists(metadata)) };
 }
 
 // The bundled children's environment (bundledChildEnv), with the pinned Engram
@@ -1788,6 +1802,20 @@ async function main() {
 	// The verification input applies to `--version` only (scripts/bundled-install.mjs upgradeBundled).
 	const verifying = args.version && args.command === undefined ? process.env[BUNDLED_VERIFY_ENV] : undefined;
 	const bundled = resolveBundledInstall({ packageRoot, platform: process.platform, fs: bundledFs, verifying });
+	if (args.command === "memory") {
+		if (args.commandArgs.length !== 2 || args.commandArgs[0] !== "migrate" || args.commandArgs[1] !== "--confirm-quiescent") {
+			process.stderr.write(MIGRATION_USAGE);
+			process.exitCode = 2;
+			return;
+		}
+		if (!bundled) fail("gentle-shell: memory migrate requires a prefix-bundled installation", 1);
+		bundledInstall = bundled;
+		const result = migrateBundledEngram({ prefix: bundled.root, core: verifiedBundledCore(), home: homedir(), env: process.env });
+		process.stdout.write(result.stdout);
+		process.stderr.write(result.stderr);
+		process.exitCode = result.code;
+		return;
+	}
 	if (args.command === "upgrade") {
 		if (bundled) process.exitCode = await handleBundledUpgrade(bundled, args.commandArgs);
 		else await handleUpgradeCommand(args.commandArgs);
@@ -2048,6 +2076,16 @@ async function main() {
 			// could not be verified is reported, never a reason to stop Shell.
 			const companion = await ensureEngramCompanion(home, runtime, ["ignore", 2, 2], 10000);
 			if (!companion.ok) process.stderr.write(`${companion.message}\n`);
+			if (bundledMemory.policy === "allow" && !bundledMemory.url) {
+				const mode = process.env.ENGRAM_SERVER_MODE;
+				if (mode !== undefined && mode !== "session-owned") {
+					bundledMemory = { policy: "disabled", notice: "Engram memory disabled: explicit ENGRAM_SERVER_MODE is invalid for a local bundled server; unset it or select exactly session-owned. Your selection has not been overridden." };
+				} else {
+					bundledMemory = companion.ok && companion.sessionOwned && supportsBundledSessionOwned(verifiedBundledCore(), process.env)
+						? { ...bundledMemory, owned: true }
+						: { policy: "disabled", notice: ENGRAM_PRIVATE_REQUIRED_NOTICE };
+				}
+			}
 			// A fresh store's identity and provenance exist before Pi starts, or
 			// memory stays off: Pi never runs with allow without a written record.
 			if (bundledMemory.fresh && !provisionEngramStore()) bundledMemory = { policy: "disabled", notice: ENGRAM_PROVISION_FAILED_NOTICE };

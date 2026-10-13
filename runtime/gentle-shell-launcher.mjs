@@ -42,7 +42,7 @@ function isPiSubcommand(token        )                        {
 // untouched as commandArgs — T2 owns interpreting `home link|isolated|<path>`.
 // `self-uninstall` is not `uninstall`, which stays pi's own alias for `remove`.
 export function parseLauncherArgs(argv          )                     {
-	if (argv[0] === "home" || argv[0] === "upgrade" || argv[0] === "self-uninstall") {
+	if (argv[0] === "home" || argv[0] === "upgrade" || argv[0] === "self-uninstall" || argv[0] === "memory") {
 		return {
 			link: false,
 			isolated: false,
@@ -1178,6 +1178,7 @@ export function helpText()         {
 		"       gentle-shell [home selectors] setup [--dry-run]",
 		"       gentle-shell upgrade [--channel release|main]",
 		"       gentle-shell upgrade --rollback",
+		"       gentle-shell memory migrate --confirm-quiescent",
 		"       gentle-shell self-uninstall [--dry-run] [--yes] [--include-shared]",
 		"",
 		"Opens pi with the Gentle Shell package loaded, without touching your",
@@ -1205,6 +1206,11 @@ export function helpText()         {
 		"                   installer's own Node, pnpm and Pi) follows the release channel only:",
 		"                   it installs the new version beside the current one, verifies it, then",
 		"                   switches; --rollback switches back to the previous kept version.",
+		"  memory migrate   Explicit bundled-store recovery using the verified core's migrate-copy.",
+		"                   Requires --confirm-quiescent: stop ALL Engram clients first. Keeps the",
+		"                   original directory as a backup; never runs automatically on upgrade.",
+		"                   Requires a bundled core release supporting migrate-copy; older cores",
+		"                   fail closed without changing the source or its provenance.",
 		"  self-uninstall   Remove Gentle Shell: its own data, the isolated home and the gentle-pi",
 		"                   package. Shows the plan first and asks before removing (--yes skips",
 		"                   the question). The shared ~/.pi/gentle-ai configuration is kept unless",
