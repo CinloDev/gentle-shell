@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -27,9 +27,10 @@ import { PresenceCursor, PresencePublisher, listPresence, readActivity, readDisc
 import { OrchestratorScopeCache } from "../lib/orchestrator-scope.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
-import { AgentRunner, REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
+import { AgentRunner, REQUESTED_TOOLS_ENV, type TaskRequest } from "../lib/agents-runner.ts";
 import { bindSessionRepositoryPreparation } from "../lib/bounded-writer-admission.ts";
 import { bindSessionProfile, resetSessionProfileBindingsForTesting } from "../lib/session-profile-binding.ts";
+import { taskHeader } from "../lib/agents-view.ts";
 import { readFrozenInheritedProfile, resetFrozenInheritedProfilesForTesting } from "../lib/session-profile-freeze.ts";
 import { CHILD_METRICS_EVENT } from "../lib/runtime-metrics-children.ts";
 import { CARD_STYLE, cardStyle, setCardStyle } from "../lib/shell-card.ts";
@@ -3376,6 +3377,167 @@ test("follow mode re-resolves the defaults on every launch without a notice; Ent
 	bindSessionProfile("s1", "frontier", { explore: { model: "openai/alpha", thinking: "minimal" } });
 	assert.equal(await session.launch(), "openai/alpha:minimal", "the explicit binding stops following");
 	assert.deepEqual(session.driftNotices(), []);
+});
+
+// gentle-shell#2180: the launch seam records which profile layer supplied the
+// model, next to the model itself, so every task card shows the winning layer
+// and stale disk edits below a frozen session become visible.
+interface LaunchCapture {
+	request: TaskRequest;
+	record: TaskRecord;
+}
+
+function captureLaunches(t: TestContext): LaunchCapture[] {
+	const captures: LaunchCapture[] = [];
+	const original = AgentRunner.prototype.run;
+	t.mock.method(AgentRunner.prototype, "run", function (this: AgentRunner, request: TaskRequest) {
+		const record = original.call(this, request);
+		captures.push({ request, record });
+		return record;
+	});
+	return captures;
+}
+
+// A non-Git variant of launchSession: the resolver returns nothing, so the
+// declaration is the only pin layer (as non-Git writer admission reads it).
+async function launchNonGitSession(base: ReturnType<typeof pinFixture>, env: Record<string, string> = {}) {
+	const harness = deps();
+	harness.deps.resolveWorktree = () => undefined;
+	harness.deps.env = { PATH: "/bin", GENTLE_PI_CONFIG_HOME: base.configHome, ...env };
+	const { pi, tools, fire } = fakePi();
+	gentleAgents(pi, {}, harness.deps);
+	const { ctx } = fakeContext();
+	// Outside Git the declaration is read at the session's own cwd, so the
+	// fixture binds a dedicated session directory instead of leaking the
+	// declaration into the shared fixture cwd other tests launch from.
+	const sessionCwd = join(base.root, "session");
+	mkdirSync(join(sessionCwd, ".pi", "gentle-ai"), { recursive: true });
+	copyFileSync(base.declarationPath, join(sessionCwd, ".pi", "gentle-ai", "profile.json"));
+	ctx.sessionManager.getCwd = () => sessionCwd;
+	await fire("session_start", ctx);
+	return {
+		launch: async () => {
+			await tools.get("subagent_run")!.execute("source", { agent: "explore", task: "Map", mode: "background" }, undefined, undefined, ctx);
+			await tick();
+		},
+		shutdown: async () => {
+			await fire("session_shutdown", ctx);
+			await tick();
+		},
+	};
+}
+
+test("a bound session launch records the binding as the model source on the task record", async t => {
+	t.after(() => resetSessionProfileBindingsForTesting());
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-binding");
+	base.writeStore({ pinned: { explore: { model: "openai/alpha", thinking: "minimal" } } });
+	base.writePin("pinned");
+	bindSessionProfile("s1", "bound", { explore: { model: "openai/beta" } });
+	const session = await launchSession(base);
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "binding", "the explicit Enter binding wins per the chain precedence");
+	assert.equal(captures[0]!.record.modelSource, "binding", "the record copies the request's layer token");
+});
+
+test("a frozen global-active launch records frozen:global as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-freeze-global");
+	base.writeStore(DRIFT_PROFILES, "frontier");
+	const session = await launchSession(base);
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "frozen:global");
+});
+
+test("a frozen local-pin launch records frozen:local as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-freeze-local");
+	base.writeStore(DRIFT_PROFILES);
+	base.writePin("frontier");
+	const session = await launchSession(base);
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "frozen:local");
+});
+
+test("a session frozen on a non-Git declaration records frozen:repo as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-freeze-declaration");
+	base.writeStore({ declared: { explore: { model: "openai/alpha", thinking: "minimal" } } });
+	base.writeDeclaration("declared");
+	const session = await launchNonGitSession(base);
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "frozen:repo");
+});
+
+test("an agent outside every profile records its frontmatter as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-definition");
+	// The pinned profile replaces routing wholesale and does not name explore,
+	// so explore's model comes from its own frontmatter.
+	base.writeStore({ helper: { model: "openai/beta" } });
+	base.writePin("helper");
+	const session = await launchSession(base);
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "definition");
+});
+
+test("a follow launch through the globally active profile records profile as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-follow-global");
+	base.writeStore(DRIFT_PROFILES, "frontier");
+	const session = await launchSession(base, { GENTLE_PI_PROFILE_FOLLOW: "1" });
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "profile");
+});
+
+test("a follow launch through the local pin records pin:local as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-follow-pin");
+	base.writeStore(DRIFT_PROFILES);
+	base.writePin("frontier");
+	const session = await launchSession(base, { GENTLE_PI_PROFILE_FOLLOW: "1" });
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "pin:local");
+});
+
+test("a follow launch through a committed repository declaration records pin:repo as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-follow-declaration");
+	base.writeStore({ declared: { explore: { model: "openai/alpha", thinking: "minimal" } } });
+	base.writeDeclaration("declared");
+	const session = await launchSession(base, { GENTLE_PI_PROFILE_FOLLOW: "1" });
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "pin:repo");
+});
+
+test("a follow launch through a non-Git repository declaration records declaration as the model source", async t => {
+	const captures = captureLaunches(t);
+	const base = pinFixture("source-follow-nongit");
+	base.writeStore({ declared: { explore: { model: "openai/alpha", thinking: "minimal" } } });
+	base.writeDeclaration("declared");
+	const session = await launchNonGitSession(base, { GENTLE_PI_PROFILE_FOLLOW: "1" });
+	t.after(session.shutdown);
+	await session.launch();
+	assert.equal(captures[0]!.request.modelSource, "declaration");
+});
+
+test("the agents task card shows the winning layer next to the model, and renders unchanged without one (#2180)", () => {
+	const record = {
+		id: "task", agent: "explore", mode: "task", prompt: "Map the repo", label: "Map", cwd: "/repo", parentSessionId: "s1",
+		status: TASK_STATUS.RUNNING, createdAt: 60_000, startedAt: 60_000, endedAt: null, model: "nan/glm5.3",
+		thinking: undefined, sessionPath: null, error: null, result: null, lastStep: "", lastActivityAt: 60_000,
+		turns: 0, toolCalls: 0, tokens: 0, cost: 0,
+	} as TaskRecord;
+	assert.equal(taskHeader({ ...record, modelSource: "binding" }, 61_000), "explore · running · nan/glm5.3 · binding · 1s");
+	assert.equal(taskHeader(record, 61_000), "explore · running · nan/glm5.3 · 1s", "absent modelSource renders exactly as today");
 });
 
 test("agentsEnabled and agentsCollapseKey read their flags and stay off inside a child", () => {

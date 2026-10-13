@@ -1116,6 +1116,8 @@ The notice appears once per distinct change: further launches stay quiet until t
 
 **Subagent children** never freeze, compare, or warn: their model comes from the parent's launch.
 
+**Task card layer token.** Every agents task card shows which layer supplied the launch's model, right after the model itself (for example `nan/glm5.3 · binding`): `binding` (selected in this session), `frozen:local` / `frozen:repo` / `frozen:global` (the startup snapshot and its origin), `pin:local` / `pin:repo` (a repository pin won), `declaration` (a non-Git repository declaration won), `profile` (the globally active profile routing), `definition` (the agent's own frontmatter), or `default` (Pi's default model). This makes staleness visible: a launch through a frozen session keeps showing its frozen token even after the editable layers below it change on disk.
+
 **Current limits.** The frozen profile is kept in memory for the life of the Pi process, so `/reload` keeps it. Resuming a session in a new process (`--resume`, `--continue`, `--session`), `/new`, and `/fork` freeze again from the defaults current at that moment, and the drift notice memory starts empty, so a pending change is announced once more. Persisting the frozen profile in the session file is planned.
 
 ## Commands
