@@ -977,7 +977,8 @@ test("a kept version that current does not name keeps the ordinary Pi override a
 	const update = spawnSync(process.execPath, [prefix.entry, "update"], options);
 	assert.equal(update.status, 1);
 	assert.equal(update.stdout, "");
-	assert.match(update.stderr, /ownership could not be verified.*No installation changed\./);
+	// The fake override is a plain script: neither a Pi entry nor a package-manager shim.
+	assert.match(update.stderr, /ownership selected executable is not a Pi entry or shim.*No installation changed\./);
 });
 
 test("gentle-shell upgrade in a bundled install refuses the main channel and rolls back to the kept version", { skip: posixHost }, (t) => {
