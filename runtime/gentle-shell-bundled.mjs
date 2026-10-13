@@ -214,6 +214,8 @@ export function bundledPi(install                , input                        
 // memory is allowed locally; otherwise the Shell-owned guard, so no provider,
 // whatever loaded it, runs an Engram binary against an unverified store.
 export const ENGRAM_COMPANION_SOURCE = "npm:gentle-engram@0.4.2";
+export const ENGRAM_PRIVATE_REQUIRED_NOTICE = "Engram memory disabled: session-owned servers require a supporting published bundled core and companion. This bundle does not establish both capabilities; it will not fall back to a detached shared server. Install a supporting published bundle and restart Shell. Existing shared services are not stopped or adopted as session-owned.";
+export const ENGRAM_CORE_CHANGED_NOTICE = "Engram memory disabled: the bundled core changed since Shell recorded this store. Install a published bundle supporting migrate-copy, stop every Engram client, retain a complete backup, then run gentle-shell memory migrate --confirm-quiescent. The command verifies and migrates a copy before updating provenance; older bundles refuse safely. Do not edit coreSha256 or delete the original store. Shell remains usable without memory.";
 export const ENGRAM_RECOVERY_NOTICE = "Engram memory disabled: Shell could not verify safe store or server reuse. Matching versions or updating alone do not prove compatibility. Reuse requires a server with verified /compatibility evidence or matching Shell-provisioned store identity. Back up existing Engram data before manual changes; do not delete it or bypass the safety check. Shell rechecks on every launch and remains usable without memory.";
 // `gentle-shell setup` publishes the verified core (ensureEngram) on every run.
 export const ENGRAM_PROVISION_FAILED_NOTICE = "Engram memory disabled for this launch: Shell could not provision a new Engram store identity, so it cannot vouch for that store. Restart Shell to retry. If Shell keeps reporting unknown compatibility and ~/.engram holds only .instance-id files, back it up and remove it, then restart Shell. Shell remains usable without memory.";
@@ -237,7 +239,7 @@ function outdatedServerVersion(version                    )                     
 // The default endpoint gentle-engram uses without ENGRAM_URL or ENGRAM_PORT.
 export const ENGRAM_DEFAULT_PORT = 7437;
 export const ENGRAM_DEFAULT_URL = `http://127.0.0.1:${ENGRAM_DEFAULT_PORT}`;
-const ENGRAM_SELECTIONS = ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_DATABASE_URL"];
+const ENGRAM_SELECTIONS = ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_SOCKET", "ENGRAM_DATABASE_URL"];
 const HEX32 = /^[a-f0-9]{32}$/;
 
 
@@ -271,7 +273,7 @@ export function classifyEngramStartup(input
 	// Shell's own store, created by this exact core: offline, the provider starts
 	// that core; a running server must be that store and that exact core.
 	if (endpoint.kind === "refused") return { policy: "allow" };
-	if (endpoint.kind === "listening" && endpoint.healthInstanceId === own.instanceId && endpoint.healthVersion === input.coreVersion) return { policy: "allow" };
+	if (endpoint.kind === "listening" && endpoint.healthInstanceId === own.instanceId && endpoint.healthVersion === input.coreVersion) return { policy: "allow", url: ENGRAM_DEFAULT_URL };
 	return unknown;
 }
 
@@ -402,6 +404,11 @@ export function supportsEngramStartupPolicy(metadata                    )       
 	return pkg?.name === "gentle-engram" && pkg.engram?.startupPolicy === 1;
 }
 
+export function supportsEngramSessionOwned(metadata                    )          {
+	const pkg = parseJson(metadata);
+	return supportsEngramStartupPolicy(metadata) && pkg?.engram?.sessionOwned === 1;
+}
+
 export function bundledChildEnv(base     , input                                                                                                        )      {
 	const env      = { ...base, PI_SKIP_VERSION_CHECK: "1", [GENTLE_SHELL_PREFIX_ENV]: input.prefix };
 	delete env.GENTLE_SHELL_PI;
@@ -426,6 +433,12 @@ export function bundledChildEnv(base     , input                                
 	if (memory.url !== undefined) env.ENGRAM_URL = memory.url;
 	const local = memory.policy === "allow" && memory.url === undefined ? input.engram : undefined;
 	env.ENGRAM_BIN = local ?? input.guard;
+	if (local && memory.owned) {
+		env.ENGRAM_SERVER_MODE = "session-owned";
+		delete env.ENGRAM_URL;
+		delete env.ENGRAM_PORT;
+		delete env.ENGRAM_SOCKET;
+	}
 	return env;
 }
 
