@@ -39,7 +39,7 @@ function fakeFs({ real = {}, files = {}, links = {} }: { real?: Record<string, s
 	};
 }
 
-const ID = "4.1.0-1.1.0";
+const ID = "4.1.0-1.2.0";
 const POSIX_ROOT = "/home/ana/.gentle-shell";
 const POSIX_VERSION = posix.join(POSIX_ROOT, "versions", ID);
 const POSIX_PACKAGE = posix.join(POSIX_VERSION, "node_modules", ".pnpm", "gentle-pi@4.1.0", "node_modules", "gentle-pi");
@@ -106,25 +106,25 @@ const install = { root: POSIX_ROOT, id: ID, versionDir: POSIX_VERSION };
 const messageOf = (pi: BundledPi) => ("message" in pi ? pi.message : "");
 
 test("bundledPi returns only the Pi the version pins, inside the version folder", () => {
-	assert.deepEqual(bundledPi(install, { platform: "linux", fs: fakeFs({ files: piFiles("1.1.0", "1.1.0") }) }),
-		{ ok: true, version: "1.1.0", cli: posix.join(PI_PACKAGE(POSIX_VERSION), "dist", "bundle", "cli.js") });
+	assert.deepEqual(bundledPi(install, { platform: "linux", fs: fakeFs({ files: piFiles("1.2.0", "1.2.0") }) }),
+		{ ok: true, version: "1.2.0", cli: posix.join(PI_PACKAGE(POSIX_VERSION), "dist", "bundle", "cli.js") });
 	const windows = { root: "C:\\G", id: ID, versionDir: `C:\\G\\versions\\${ID}` };
-	assert.deepEqual(bundledPi(windows, { platform: "win32", fs: fakeFs({ files: piFiles("1.1.0", "1.1.0", win32, windows.versionDir) }) }),
-		{ ok: true, version: "1.1.0", cli: win32.join(PI_PACKAGE(windows.versionDir, win32), "dist", "bundle", "cli.js") });
+	assert.deepEqual(bundledPi(windows, { platform: "win32", fs: fakeFs({ files: piFiles("1.2.0", "1.2.0", win32, windows.versionDir) }) }),
+		{ ok: true, version: "1.2.0", cli: win32.join(PI_PACKAGE(windows.versionDir, win32), "dist", "bundle", "cli.js") });
 });
 
 test("bundledPi fails with the version, the pinned Pi and the way to repair it", () => {
-	const repair = /Gentle Shell 4\.1\.0-1\.1\.0 .*Pi 1\.1\.0.*gentle-shell upgrade.*installer/s;
-	const mismatch = bundledPi(install, { platform: "linux", fs: fakeFs({ files: piFiles("1.1.0", "1.0.0") }) });
+	const repair = /Gentle Shell 4\.1\.0-1\.2\.0 .*Pi 1\.2\.0.*gentle-shell upgrade.*installer/s;
+	const mismatch = bundledPi(install, { platform: "linux", fs: fakeFs({ files: piFiles("1.2.0", "1.0.0") }) });
 	assert.equal(mismatch.ok, false);
 	assert.match(messageOf(mismatch), repair);
 	assert.match(messageOf(mismatch), /found Pi 1\.0\.0/);
-	const files = piFiles("1.1.0", "1.1.0");
+	const files = piFiles("1.2.0", "1.2.0");
 	delete files[posix.join(PI_PACKAGE(POSIX_VERSION), "dist", "bundle", "cli.js")];
 	const missing = bundledPi(install, { platform: "linux", fs: fakeFs({ files }) });
 	assert.match(messageOf(missing), repair);
 	// A Pi linked from outside the version folder is not the bundled one.
-	const outside = fakeFs({ real: { [PI_PACKAGE(POSIX_VERSION)]: "/usr/lib/node_modules/@earendil-works/pi-coding-agent" }, files: piFiles("1.1.0", "1.1.0") });
+	const outside = fakeFs({ real: { [PI_PACKAGE(POSIX_VERSION)]: "/usr/lib/node_modules/@earendil-works/pi-coding-agent" }, files: piFiles("1.2.0", "1.2.0") });
 	assert.equal(bundledPi(install, { platform: "linux", fs: outside }).ok, false);
 });
 
@@ -205,10 +205,10 @@ test("bundledUpdateNext still updates extensions when the upgrade did not comple
 });
 
 test("bundledUpdateNotice explains the pinned Pi and runs or names gentle-shell upgrade", () => {
-	const interactive = bundledUpdateNotice({ piVersion: "1.1.0", interactive: true }).join("\n");
-	assert.match(interactive, /Pi ships pinned with Gentle Shell \(Pi 1\.1\.0\)/);
+	const interactive = bundledUpdateNotice({ piVersion: "1.2.0", interactive: true }).join("\n");
+	assert.match(interactive, /Pi ships pinned with Gentle Shell \(Pi 1\.2\.0\)/);
 	assert.match(interactive, /Running 'gentle-shell upgrade'/);
-	assert.match(bundledUpdateNotice({ piVersion: "1.1.0", interactive: false }).join("\n"), /Run 'gentle-shell upgrade'/);
+	assert.match(bundledUpdateNotice({ piVersion: "1.2.0", interactive: false }).join("\n"), /Run 'gentle-shell upgrade'/);
 });
 
 test("parseBundledUpgradeArgs accepts the release channel and --rollback and refuses the main channel", () => {
@@ -233,7 +233,7 @@ test("parseBundledUpgradeArgs accepts the release channel and --rollback and ref
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const posixHost = process.platform === "win32" ? "the bundled prefix fixture uses a POSIX current symlink" : false;
 const SHELL = JSON.parse(readFileSync(join(repository, "package.json"), "utf8")).version;
-const FIXTURE_ID = `${SHELL}-1.1.0`;
+const FIXTURE_ID = `${SHELL}-1.2.0`;
 const FAKE_PI = [
 	"import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs'; import {join, dirname} from 'node:path';",
 	"const args = process.argv.slice(2);",
@@ -244,7 +244,7 @@ const FAKE_PI = [
 	" if (process.env.FIXTURE_INSTALL_CAPABILITY !== 'metadata-only') { const packages = settings.packages ?? []; const index = packages.findIndex(p => /^npm:gentle-engram(?:@|$)/.test(typeof p === 'string' ? p : p.source));",
 	" if (index < 0) packages.push(args[1]); else packages[index] = typeof packages[index] === 'string' ? args[1] : {...packages[index], source:args[1]}; settings.packages = packages; writeFileSync(path, JSON.stringify(settings)); }",
 	"}",
-	"if (args.includes('--version')) { console.log('1.1.0'); process.exit(0); }",
+	"if (args.includes('--version')) { console.log('1.2.0'); process.exit(0); }",
 	// Stands in for gentle-engram creating the store through the bundled core during the session.
 	"if (process.env.FIXTURE_CREATE_STORE && args[0] !== 'install' && args[0] !== 'list') {",
 	" const data = join(process.env.HOME, '.engram');",
@@ -273,7 +273,7 @@ const FIXTURE_CORE = [
 	"",
 ].join("\n");
 
-function bundledPrefix(t: TestContext, { pi = "1.1.0", core = true } = {}) {
+function bundledPrefix(t: TestContext, { pi = "1.2.0", core = true } = {}) {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "gentle-shell-bundled-")));
 	t.after(() => rmSync(base, { recursive: true, force: true }));
 	const home = join(base, "home");
@@ -295,7 +295,7 @@ function bundledPrefix(t: TestContext, { pi = "1.1.0", core = true } = {}) {
 	mkdirSync(join(piDir, "dist", "bundle"), { recursive: true });
 	writeFileSync(join(piDir, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: pi, bin: { pi: "dist/bundle/cli.js" } }));
 	writeFileSync(join(piDir, "dist", "bundle", "cli.js"), FAKE_PI);
-	writeFileSync(join(version, "package.json"), JSON.stringify({ dependencies: { "gentle-pi": SHELL, "@earendil-works/pi-coding-agent": "1.1.0" } }));
+	writeFileSync(join(version, "package.json"), JSON.stringify({ dependencies: { "gentle-pi": SHELL, "@earendil-works/pi-coding-agent": "1.2.0" } }));
 	writeFileSync(join(version, ".gentle-shell-version"), `${FIXTURE_ID}\n`);
 	symlinkSync(`versions/${FIXTURE_ID}`, join(root, "current"));
 	// The bundled npm the npmCommand entry loads.
@@ -796,7 +796,7 @@ test("the bundled launcher runs only its version's Pi, with the user's environme
 	const prefix = bundledPrefix(t);
 	const version = prefix.run(["--version"]);
 	assert.equal(version.status, 0, version.stderr);
-	assert.match(version.stdout, new RegExp(`^gentle-shell ${SHELL.replaceAll(".", "\\.")}\npi 1\\.1\\.0\n`));
+	assert.match(version.stdout, new RegExp(`^gentle-shell ${SHELL.replaceAll(".", "\\.")}\npi 1\\.2\\.0\n`));
 	const launched = prefix.run(["list"]);
 	assert.equal(launched.status, 0, launched.stderr);
 	const seen = JSON.parse(launched.stdout.trim().split("\n").at(-1) ?? "{}");
@@ -922,19 +922,19 @@ test("the version check before activation runs that version in bundled mode, nev
 		encoding: "utf8", input: "" });
 	const good = verify({ [BUNDLED_VERIFY_ENV]: FIXTURE_ID });
 	assert.equal(good.status, 0, good.stderr);
-	assert.match(good.stdout, /\npi 1\.1\.0\n/);
+	assert.match(good.stdout, /\npi 1\.2\.0\n/);
 	// The version's own Pi is broken, and the user's Pi prints the expected version.
-	writeFileSync(join(prefix.userBin, "pi"), "#!/bin/sh\necho 1.1.0\n", { mode: 0o755 });
+	writeFileSync(join(prefix.userBin, "pi"), "#!/bin/sh\necho 1.2.0\n", { mode: 0o755 });
 	rmSync(join(prefix.piDir, "dist", "bundle", "cli.js"));
 	const broken = verify({ [BUNDLED_VERIFY_ENV]: FIXTURE_ID });
 	assert.equal(broken.status, 1);
-	assert.match(broken.stderr, /bundled Pi 1\.1\.0/);
+	assert.match(broken.stderr, /bundled Pi 1\.2\.0/);
 	// Without the verification input, the same entry is an ordinary launcher that would pass.
-	assert.match(verify({}).stdout, /\npi 1\.1\.0\n/);
+	assert.match(verify({}).stdout, /\npi 1\.2\.0\n/);
 	// Only --version honors it.
 	const list = spawnSync(process.execPath, [prefix.entry, "list"], { env: { HOME: prefix.home, PATH: `${prefix.userBin}:/usr/bin:/bin`, [BUNDLED_VERIFY_ENV]: FIXTURE_ID,
 		GENTLE_SHELL_NO_AUTO_SETUP: "1" }, encoding: "utf8", input: "" });
-	assert.equal(list.stdout, "1.1.0\n");
+	assert.equal(list.stdout, "1.2.0\n");
 });
 
 test("the bundled launcher refuses a Pi that is not the pinned one", { skip: posixHost }, (t) => {
@@ -947,7 +947,7 @@ test("the bundled launcher refuses a Pi that is not the pinned one", { skip: pos
 test("gentle-shell update in a bundled install explains the pinned Pi instead of updating it", { skip: posixHost }, (t) => {
 	const result = bundledPrefix(t).run(["update"]);
 	assert.equal(result.status, 0, result.stderr);
-	assert.match(result.stdout, /Pi ships pinned with Gentle Shell \(Pi 1\.1\.0\)/);
+	assert.match(result.stdout, /Pi ships pinned with Gentle Shell \(Pi 1\.2\.0\)/);
 	assert.match(result.stdout, /Run 'gentle-shell upgrade'/);
 	assert.doesNotMatch(result.stdout, /"args"/);
 });
@@ -956,7 +956,7 @@ test("gentle-shell update pi --extensions in a bundled install redirects Pi's pa
 	const prefix = bundledPrefix(t);
 	const result = prefix.run(["update", "pi", "--extensions"]);
 	assert.equal(result.status, 0, result.stderr);
-	assert.match(result.stdout, /Pi ships pinned with Gentle Shell \(Pi 1\.1\.0\)/);
+	assert.match(result.stdout, /Pi ships pinned with Gentle Shell \(Pi 1\.2\.0\)/);
 	const seen = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}");
 	assert.deepEqual(seen.args, ["update", "--extensions"]);
 	assert.ok(JSON.parse(readFileSync(join(prefix.home, ".gentle-shell", "agent", "settings.json"), "utf8")).npmCommand);

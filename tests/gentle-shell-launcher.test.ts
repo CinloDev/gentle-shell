@@ -683,10 +683,10 @@ test("checkPeerVersionPin passes for a matching pin", () => {
 	assert.deepEqual(result, { ok: true, pinned: ">=0.85.1" });
 });
 
-test("Pi 1.0.0 baseline and host peers follow the open development range policy", () => {
+test("Pi 1.2.0 baseline and host peers follow the open development range policy", () => {
 	const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-	assert.equal(MIN_PI_VERSION, "1.0.0");
-	assert.equal(pkg.peerDependencies["@earendil-works/pi-coding-agent"], ">=1.0.0");
+	assert.equal(MIN_PI_VERSION, "1.2.0");
+	assert.equal(pkg.peerDependencies["@earendil-works/pi-coding-agent"], ">=1.2.0");
 	assert.equal(pkg.engines.node, ">=22.19.0");
 	for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-tui"]) {
 		assert.equal(pkg.peerDependencies[name], "*");
@@ -696,37 +696,38 @@ test("Pi 1.0.0 baseline and host peers follow the open development range policy"
 	// Development ranges are policy specifiers; their floor never drops below
 	// the runtime minimum the launcher enforces.
 	for (const name of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "@earendil-works/pi-tui"]) {
-		assert.equal(pkg.devDependencies[name], ">=1.0.0", name);
+		assert.equal(pkg.devDependencies[name], ">=1.2.0", name);
 		assert.equal(checkPiVersion(pkg.devDependencies[name].slice(2)).ok, true, name);
 	}
 });
 
 test("checkPiVersion accepts a version equal to the minimum", () => {
-	assert.deepEqual(checkPiVersion("1.0.0"), { ok: true, version: "1.0.0" });
+	assert.deepEqual(checkPiVersion("1.2.0"), { ok: true, version: "1.2.0" });
 });
 
 test("checkPiVersion accepts a version above the minimum", () => {
-	for (const version of ["1.1.0", "1.2.0", "2.0.0"]) {
+	for (const version of ["1.2.1", "1.3.0", "2.0.0"]) {
 		assert.deepEqual(checkPiVersion(version), { ok: true, version });
 	}
 });
 
 test("checkPiVersion accepts a v-prefixed version", () => {
-	assert.deepEqual(checkPiVersion("v1.0.0"), { ok: true, version: "1.0.0" });
+	assert.deepEqual(checkPiVersion("v1.2.0"), { ok: true, version: "1.2.0" });
 });
 
 test("checkPiVersion accepts a prerelease suffix at the minimum", () => {
-	assert.deepEqual(checkPiVersion("pi version 1.0.0-rc.2"), { ok: true, version: "1.0.0" });
+	assert.deepEqual(checkPiVersion("pi version 1.2.0-rc.2"), { ok: true, version: "1.2.0" });
 });
 
 test("checkPiVersion rejects a version below the minimum and names both versions", () => {
-	const result = checkPiVersion("0.99.1");
+	const result = checkPiVersion("1.1.0");
 	assert.equal(result.ok, false);
 	if (result.ok) throw new Error("expected a failing result");
-	assert.equal(result.version, "0.99.1");
-	assert.match(result.message, /0\.99\.1/);
-	assert.match(result.message, /1\.0\.0/);
-	assert.equal(checkPiVersion("0.100.0").ok, false);
+	assert.equal(result.version, "1.1.0");
+	assert.match(result.message, /1\.1\.0/);
+	assert.match(result.message, /1\.2\.0/);
+	assert.equal(checkPiVersion("1.0.0").ok, false);
+	assert.equal(checkPiVersion("0.99.1").ok, false);
 });
 
 test("checkPiVersion rejects a prerelease below the minimum", () => {
@@ -740,7 +741,7 @@ test("checkPiVersion reports unparsable output with the raw text and the minimum
 	if (result.ok) throw new Error("expected a failing result");
 	assert.equal(result.version, undefined);
 	assert.match(result.message, /not a version/);
-	assert.match(result.message, /1\.0\.0/);
+	assert.match(result.message, /1\.2\.0/);
 });
 
 test("checkPiVersion accepts a custom minimum", () => {
@@ -2019,7 +2020,7 @@ test("the isolated-home bootstrap creates ~/.gentle-shell as 0700 under umask 00
 	const root = mkdtempSync(join(tmpdir(), "gentle-shell-umask-"));
 	try {
 		const piScript = join(root, "fake-pi.mjs");
-		writeFileSync(piScript, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('1.0.0');\n");
+		writeFileSync(piScript, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('1.2.0');\n");
 		chmodSync(piScript, 0o755);
 		const binPath = fileURLToPath(new URL("../bin/gentle-shell.mjs", import.meta.url));
 		const env = { HOME: root, USERPROFILE: root, PATH: process.env.PATH ?? "/usr/bin:/bin", GENTLE_SHELL_PI: piScript, GENTLE_SHELL_NO_AUTO_SETUP: "1" };

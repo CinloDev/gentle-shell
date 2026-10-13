@@ -16,13 +16,13 @@ importers:
         version: 1.1.38
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: '>=1.0.0'
+        specifier: '>=1.2.0'
         version: 1.2.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)
       '@earendil-works/pi-coding-agent':
-        specifier: '>=1.0.0'
+        specifier: '>=1.2.0'
         version: 1.2.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
       '@earendil-works/pi-tui':
-        specifier: '>=1.0.0'
+        specifier: '>=1.2.0'
         version: 1.2.0
       '@types/node':
         specifier: ^24.13.3
