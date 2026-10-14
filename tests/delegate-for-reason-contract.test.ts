@@ -73,13 +73,19 @@ test("AC1: the lazy writer trigger names its reasons and keeps the logbook on th
 	assert.ok(skill.includes("a writer reason (parallel units or context)"), "the skill must name the writer reasons");
 });
 
-test("AC2: parallelism needs 2+ independent units, disjoint files, each heavier than a subagent start", () => {
-	assert.ok(
-		delegationWriter.includes(
-			"(a) parallelism — 2+ independent units with disjoint files, each clearly heavier than starting a subagent; medium tasks included",
-		),
-		"lazy Writer trigger must state the parallelism threshold",
-	);
+// S9 canon change (gentle-ai 87a3b2eb): the lazy trigger mirrors the canon's
+// behavior unit and size threshold instead of "clearly heavier than starting a
+// subagent; medium tasks included".
+test("AC2: parallelism needs 2+ independent behavior units, disjoint surfaces, each worth several minutes", () => {
+	for (const clause of [
+		"(a) parallelism — 2+ independent units of behavior with disjoint edit surfaces, each needing several minutes of work (several files or ~100+ changed lines; a subagent spends 1-2 minutes reading before it writes), launched together",
+		"A unit is one independent piece of behavior with its code, tests, and docs together: never split one behavior into test, docs, and code writers",
+		"a delivery that depends on another is not independent",
+		"several small independent changes run inline, one after another",
+	]) {
+		assert.ok(delegationWriter.includes(clause), `lazy Writer trigger is missing: ${clause}`);
+	}
+	assert.ok(!delegationWriter.includes("medium tasks included"), "lazy Writer trigger keeps the retired medium-task clause");
 	assert.ok(writer.includes("parallel units"), "the writer module must name the parallelism reason");
 });
 
@@ -115,7 +121,8 @@ test("AC4: verification stays risk-gated and the writer reasons never include ri
 	);
 	assert.ok(
 		delegation.includes(
-			"3. **Verification rule** (gentle-pi#661/#662, RDD-aware): a high-risk change (Task Size) gets an independent `gentle-ai-verify` run after the change's own checks; otherwise whoever made the change runs its focused test and suite inline, small tasks included.",
+			// S9 canon change (gentle-ai 6b9a71ef): only a named high-risk item adds the verifier.
+			"3. **Verification rule** (gentle-pi#661/#662, RDD-aware): only a change whose Risk line names a high-risk item (Task Size, assess `escalate`) gets an independent `gentle-ai-verify` run after the change's own checks, as rarely as possible; otherwise whoever made the change runs its focused test and suite inline, small tasks included.",
 		),
 		"lazy Verification rule changed",
 	);

@@ -136,7 +136,9 @@ test("AC5: the high-risk list lives once in the core, native tier wins, unclear 
 const MODULE_BUDGETS: Record<string, number> = {
 	// gentle-shell#1731 merge with main: main's session subject/state guidance plus the reason-based Writer rule (20,000 -> 20,500 B).
 	// gentle-shell#1269: capability-compatible routing rule checked before delegation (20,500 -> 20,800 B).
-	"orchestrator-delegation.md": 20_800,
+	// S9 canon change: conditional triggers, behavior-unit writer threshold, named-risk verifier, invariants,
+	// and the PRESERVE differential pointer mirrored from gentle-ai 5f6faa16 (20,800 -> 21,900 B).
+	"orchestrator-delegation.md": 21_900,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
 	"orchestrator-tracking.md": 12_600,
 	// gentle-shell#1731 T3: parallel review protocol; lazy (delegation or high risk only), core and normative rule untouched.

@@ -104,10 +104,11 @@ test("trigger 5 never restates the retired #661 off/unknown non-trivial judgment
 	assert.doesNotMatch(delegation, /purely passive documentation with no behavior to verify/);
 });
 
+// S9 canon change (gentle-ai 87a3b2eb): the trigger section heading dropped "Mandatory".
 test("the Simple Delegation paragraph references trigger 3 instead of restating the on/off/unknown routing", () => {
 	assert.match(
 		delegation,
-		/per the RDD-aware Verification rule \(trigger 3 under Mandatory Delegation Triggers, gentle-pi#661\)/,
+		/per the RDD-aware Verification rule \(trigger 3 under Delegation Triggers, gentle-pi#661\)/,
 	);
 	assert.match(delegation, /the normative on\/off\/unknown routing lives in `orchestrator-verification.md`, not here/);
 });
