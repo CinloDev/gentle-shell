@@ -30,7 +30,7 @@ function lineStarting(text: string, prefix: string): string {
 const coreWriter = lineStarting(core, "5. **Writer rule**");
 const delegationWriter = lineStarting(delegation, "5. **Writer trigger (Writer rule):**");
 
-// Writer-rule fix (pain-point bench L8): a low-effort orchestrator read "2+
+// Writer-rule fix (benchmark finding): a low-effort orchestrator read "2+
 // independent units, disjoint files" as tests vs README and split one behavior
 // across writers. The core rule now defines a unit as independent behavior,
 // keeps tests, docs, and code of one behavior together, and sets a size floor.
@@ -342,7 +342,7 @@ test("AC6: parallel writers need disjoint Allowed edit surfaces (runtime-enforce
 	}
 });
 
-// Writer-rule fix (pain-point bench L8): "Mandatory Delegation Triggers ...
+// Writer-rule fix (benchmark finding): "Mandatory Delegation Triggers ...
 // and is then mandatory" read as a default to delegate. The core heading now
 // says a trigger holds only when its condition truly holds, inline when in doubt.
 test("the core delegation triggers hold only when their condition truly holds, none by default", () => {

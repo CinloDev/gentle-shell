@@ -111,7 +111,7 @@ test("T31: high-risk item 3 is about unrequested breaks, not the requested chang
 	);
 });
 
-// T33 (L74): in p31 x5 both runs declared `Risk: none` after adding --year to
+// T33 (L74): in a benchmark run both cells declared `Risk: none` after adding --year to
 // the shared budget options; one shipped `budget set --year` silently saving a
 // wrong budget, the regression verify used to catch. The Risk line must check
 // shared code before claiming none.
@@ -123,7 +123,7 @@ test("T33: the Close step checks shared code before Risk: none", () => {
 	}
 });
 
-// C8 (pain-point bench L9): the PRESERVE test alone missed the `budget set
+// C8 (benchmark finding): the PRESERVE test alone missed the `budget set
 // --year` regression in 1 of 2 runs. A differential run of every existing
 // command that shares the changed code, old code against new, caught it in
 // 2 of 2. Inline work and the worker carry the same check.
@@ -137,7 +137,7 @@ test("C8: inline test-first and the worker PRESERVE step run the differential ch
 	assert.ok(step?.includes(DIFFERENTIAL), "worker step 3 must run the differential check");
 });
 
-// C3 (pain-point bench x6): parallel workers appended a shared `Fees` entry
+// C3 (benchmark finding): parallel workers appended a shared `Fees` entry
 // inline, unsorted, instead of reusing the helper that keeps the order. The
 // worker reuses the existing function for shared state, and each writer prompt
 // names the helpers to reuse, because parallel units cannot see each other.

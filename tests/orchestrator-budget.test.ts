@@ -32,7 +32,7 @@ const REAL_ASSETS_DIR = join(REPO_ROOT, "assets");
 const FIXTURE_PATH = join(import.meta.dirname, "fixtures", "orchestrator.pre-diet.md");
 // gentle-shell#1731 T10 (user decision): 8,192 -> 8,400 B for the narrowed high-risk items 1 and 3.
 // Verification by named risk (escalate-only rule 3) and the writer-rule fix (triggers hold only when
-// their condition holds; a unit is independent behavior over a size floor): 8,400 -> 9,100 B.
+// their condition holds; a unit is independent behavior over a size floor), user decision 2026-10-14: 8,400 -> 9,100 B.
 const BUDGET_BYTES = 9100;
 const MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS = 93;
 

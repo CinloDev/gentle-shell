@@ -487,9 +487,9 @@ const SMALL_MODEL_ID_TOKEN = /(?:^|[-_./:\s])mini(?:$|[-_./:\s])/i;
  *   `SMALL_MODEL_ID_TOKEN`), or
  * - it carries NO signal at all -- no profile object, or a profile with
  *   neither a model id nor a resolved effort. An unknown or omitted writer
- *   profile fails closed to small rather than defaulting to large, so a
- *   caller that cannot resolve the writer's profile never gets a weaker
- *   verification plan than a known small model would (gentle-pi#662).
+ *   profile fails closed to small rather than defaulting to large. The
+ *   result is reported in the assessment only: the verification plan never
+ *   reads the writer profile, so it cannot add or remove a verifier.
  *
  * A profile that carries a model id or an effort, just not a matching one
  * (for example `{model: {id: "claude-sonnet-5"}, thinking: "high"}`), is
