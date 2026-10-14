@@ -57,7 +57,10 @@ const ANCHORS: readonly RoutingAnchor[] = [
 		canonical: "### Mandatory Delegation Triggers",
 		mirrors: [
 			{ surface: DELEGATION, includes: "#### Mandatory Delegation Triggers" },
-			{ surface: CORE, includes: "Mandatory Delegation Triggers" },
+			// Writer-rule fix: the core names them "Delegation Triggers" and says
+			// each holds only when its condition truly holds; the lazy port keeps
+			// the canonical heading.
+			{ surface: CORE, includes: "Delegation Triggers — each mechanism turns on only when its own trigger condition truly holds" },
 		],
 	},
 	{
@@ -117,7 +120,8 @@ const ANCHORS: readonly RoutingAnchor[] = [
 		label: "verification trigger is reserved for high risk",
 		canonical: "**Verification trigger:** a high-risk change gets an independent verifier",
 		mirrors: [
-			{ surface: CORE, includes: "**Verification rule** — high risk → independent `gentle-ai-verify`" },
+			// Verification by named risk: the core row names the escalate-only verifier.
+			{ surface: CORE, includes: "**Verification rule** — only a named high-risk item (assess `escalate`) → independent `gentle-ai-verify`" },
 			{ surface: DELEGATION, includes: "a high-risk change (Task Size) gets an independent `gentle-ai-verify` run" },
 		],
 	},
@@ -184,7 +188,7 @@ const ANCHORS: readonly RoutingAnchor[] = [
 // rows, so they are mirror-only and not fixture-derived anchors.
 const CORE_ONLY_TRIGGERS = [
 	"**Incident rule** — diagnose wrong cwd/worktree/git/tooling incidents separately",
-	"**Verification rule** — high risk → independent `gentle-ai-verify`",
+	"**Verification rule** — only a named high-risk item (assess `escalate`) → independent `gentle-ai-verify`",
 ] as const;
 
 function fixtureBody(): string {
