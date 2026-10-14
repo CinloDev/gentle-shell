@@ -1347,6 +1347,19 @@ test("candidate view repairs owner-only directories reset by macOS File Provider
 	}
 });
 
+test("candidate view does not repair owner-only directories carrying special mode bits", { skip: process.platform === "win32" }, (t) => {
+	const contributorRoot = repository(t);
+	mkdirSync(join(contributorRoot, "nested"), { recursive: true });
+	writeFileSync(join(contributorRoot, "nested", "candidate.txt"), "candidate\n");
+	const view = createCandidateView({ contributorRoot });
+	try {
+		chmodSync(join(view.root, "nested"), 0o1700);
+		assert.throws(() => view.verify(), /candidate view directory is unsafe or writable/);
+	} finally {
+		view.cleanup();
+	}
+});
+
 test("candidate view refuses an ignored entry injected into an owner-only directory it would repair", { skip: process.platform === "win32" }, (t) => {
 	const contributorRoot = repository(t);
 	mkdirSync(join(contributorRoot, "nested"), { recursive: true });

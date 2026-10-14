@@ -658,7 +658,7 @@ function makeReadonly(root: string, entries: readonly CandidateViewEntry[]): voi
 // chmod anyway, and the caller then proves the directory holds exactly the
 // frozen children, closing the ignored-file injection the untracked scan misses.
 function repairFileProviderDirectoryMode(directory: string, metadata: Stats, platform: NodeJS.Platform): boolean {
-	if (platform === "win32" || !metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700) return false;
+	if (platform === "win32" || !metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o7777) !== 0o700) return false;
 	if (typeof process.getuid !== "function" || metadata.uid !== process.getuid()) return false;
 	chmodSync(directory, 0o555);
 	return true;
