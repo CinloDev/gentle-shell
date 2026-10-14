@@ -305,6 +305,10 @@ const SUPERSEDED_LIFECYCLE_REVIEW_LINES = new Set([
 	154,
 	160,
 	166,
+	// 280: S11 T3 made the Safety commit line consistent with ODD step 6: it now
+	// excepts the work-unit commits of authorized large ODD implementation
+	// (asserted verbatim in tests/odd-routing-contract.test.ts).
+	280,
 	// 282: gentle-shell#1731 T4 relaxed the single-writer Safety line to disjoint
 	// Allowed edit surfaces (runtime-enforced) or isolated worktrees.
 	282,

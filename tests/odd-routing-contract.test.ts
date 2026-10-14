@@ -19,9 +19,16 @@ function containsAll(text: string, clauses: readonly string[]): void {
 test("organic entry stays read-only without authorization and loads detail before work", () => {
 	containsAll(core, [
 		"large tasks get ODD tracking and workers only by the Writer rule, else inline",
-		"ODD (Default Workflow, harness section above) is mandatory on every request",
 		"orchestrator-delegation.md",
 		"orchestrator-memory.md",
+	]);
+	// S11 T3: deduplicated. The core's "ODD (Default Workflow, harness section
+	// above) is mandatory on every request" pointer restated the harness; the
+	// mandatory workflow and its detail pointers are stated once in the harness.
+	containsAll(wrapper, [
+		"Default workflow: Organic Driven Development (MANDATORY)",
+		"Every request enters it",
+		"Detail for steps 3–7: \\`orchestrator-delegation.md\\` and \\`orchestrator-memory.md\\`.",
 	]);
 	containsAll(delegation, [
 		"Investigation, explanation, review, comparison, and proposal-only requests remain read-only",
@@ -115,8 +122,16 @@ test("ODD closes each task with a work-unit commit and reviews the commit or PR 
 		"record the commit identity in the feature document as evidence",
 		"Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions",
 		"The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch",
-		"close each tracked task with a work-unit commit",
 	]);
+	// S11 T3: deduplicated. The harness principle that re-listed the ODD steps
+	// ("close each tracked task with a work-unit commit") is gone; step 6 above is
+	// the single statement. Core Safety allows exactly those commits and no others.
+	assert.ok(!wrapper.includes("close each tracked task with a work-unit commit"), "the ODD steps are re-listed outside step 6");
+	assert.ok(
+		core.includes("- Never commit unless the user explicitly asks, except the work-unit commits authorized large ODD implementation makes on its feature branch (ODD step 6)."),
+		"core Safety must allow only the ODD step 6 work-unit commits without an explicit ask",
+	);
+	assert.ok(!core.includes("- Never commit unless the user explicitly asks."), "core Safety contradicts ODD step 6 work-unit commits");
 	containsAll(delegation, [
 		'after each work-unit commit, assess it with that same call and `{"baseRef":"<last reviewed boundary>","committedOnly":true}`',
 		"Passive/low: silent structural checks, no reviewer or consent ceremony, and the boundary advances",
@@ -267,13 +282,17 @@ test("ODD defaults to applicable test-first without chat or TUI activation", () 
 	const verify = read("assets/agents/gentle-ai-verify.md");
 	const support = read("assets/support/strict-tdd.md") + read("assets/support/strict-tdd-verify.md");
 	const skill = read("skills/gentle-ai/SKILL.md");
-	for (const text of [core, delegation, worker, verify, support, skill, wrapper]) {
+	// S11 T3: deduplicated. The core sits after the harness in the same system
+	// prompt; its pointer sentence restated the harness test-first policy, so the
+	// rendered parent prompt (harness + core) now carries that policy exactly
+	// once, from the harness, instead of the core carrying its own copy.
+	const rendered = __testing.buildGentlePrompt("gentleman");
+	for (const text of [rendered, delegation, worker, verify, support, skill, wrapper]) {
 		containsAll(text, ["applicable", "RED", "GREEN"]);
 		assert.doesNotMatch(text, /(?:configured TDD mode|Strict TDD Mode is enabled|explicit user choice|test presence does not enable it|tests existing does not activate it)/i);
 	}
-	// The core sits after the harness in the same system prompt, so it points at
-	// the harness test-first policy instead of restating it (gentle-shell#1494).
-	assert.ok(core.includes("the harness's applicable test-first policy"), "core must point at the harness test-first policy");
+	assert.equal(rendered.split("use test-first by default").length - 1, 1, "the parent prompt states the test-first policy once");
+	assert.ok(!core.includes("GREEN"), "core restates the harness test-first policy");
 	for (const [actor, text] of [["delegation", delegation], ["extension", wrapper], ["skill", skill]] as const) {
 		assert.match(text, /behavior changes with applicable runnable deterministic tests and a clear expected outcome/i, `${actor} must require applicability, not test presence`);
 		assert.match(text, /passive documentation/i, `${actor} must handle passive docs`);
@@ -412,15 +431,14 @@ test("ODD protocol is always-on in the rendered system prompt and runs by defaul
 		}
 	}
 
-	assert.ok(
-		wrapper.includes("Organic Driven Development (ODD) is the predefined workflow for every request"),
-		"missing contract: extensions/gentle-ai.ts harness principle",
-	);
-	// The parent owns the injected identity; its migration is outside this suite's edit surface.
-	assert.ok(
-		core.includes("ODD (Default Workflow, harness section above) is mandatory on every request"),
-		"missing contract: assets/orchestrator.md pointer sentence",
-	);
+	// S11 T3: deduplicated. The harness principle and the core pointer sentence
+	// both restated the mandatory workflow; the steps' own header (asserted in
+	// order above as "predefined workflow of this orchestrator") is the one statement.
+	for (const persona of ["gentleman", "neutral"] as const) {
+		const prompt = __testing.buildGentlePrompt(persona);
+		assert.equal(prompt.split("is the predefined workflow").length - 1, 1, `[${persona}] the ODD workflow is declared more than once`);
+		assert.ok(!prompt.includes("ODD (Default Workflow, harness section above)"), `[${persona}] the core restates the ODD workflow`);
+	}
 	containsAll(core, ["orchestrator-delegation.md", "orchestrator-memory.md"]);
 	assert.doesNotMatch(core + delegation + memory, /SDD|sdd-|OpenSpec|openspec/i);
 });

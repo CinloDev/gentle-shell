@@ -40,8 +40,6 @@ Small path: inline (parent; `bash_background` policy); observe RED inline before
 
 **Risk line**: close every code change, small path or delegated, with `Risk: item N (reason)` or `Risk: none` per the list; any item → Verification rule.
 
-ODD (Default Workflow, harness section above) is mandatory on every request, with the harness's applicable test-first policy (RED, GREEN, refactor); detail: `orchestrator-delegation.md`, `orchestrator-memory.md`.
-
 ## Delegation Rules
 
 Core question: does this inflate parent context without need?
@@ -83,7 +81,7 @@ This package injects the mirrored provider-bundle review execution contract into
 ## Safety
 
 - An eligible interactive Pi host may resolve `gentle-ai.review-integration.consent/v3` before the envelope reaches the model. Permission: host-owned. If `gentle_review` returns the envelope unresolved, it is still the original provider-owned two-choice contract. Use `ask_user_choice` exactly or relay losslessly and stop. Never add the host action to a decoded or relayed provider envelope.
-- Never commit unless the user explicitly asks.
+- Never commit unless the user explicitly asks, except the work-unit commits authorized large ODD implementation makes on its feature branch (ODD step 6).
 - Ask before destructive git operations, publishing, or irreversible file changes.
 - Parallel writers only with disjoint Allowed edit surfaces (runtime-enforced) or isolated worktrees.
 - Keep session work inside the project root and registered same-clone worktrees; ask before any read or write outside it, naming the absolute path. Grants are per-target, per-session, never blanket: in-project scripts naming outside paths are not standing consent.
