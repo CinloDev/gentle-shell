@@ -16,7 +16,7 @@ ODD runs on every request, without the user asking for a workflow, a plan, or ta
 3. **Resolve uncertainty** — optional research or one focused product question only for a real unresolved decision.
 4. **Classify** — by the Task Size section: small when understood, risk is contained, and the work could be resumed from the request plus `git diff`; large only when that resume test fails. Counts never classify.
 5. **Track before the first write** — create the feature document and Engram mirror automatically for large work, and tell the user in one line.
-6. **Implement task by task** — route each task through the smallest safe workflow, with configured TDD and applicable checks. Every task closes with at least one work-unit commit on the feature branch (branch first when on the default branch), with tests and docs alongside the behavior, using a Conventional Commit message; the feature document records the commit identity as evidence.
+6. **Implement task by task** — route each task through the smallest safe workflow, with configured TDD and applicable checks. Commit work units in reviewable slices of about 400 authored changed lines on the feature branch (branch first when on the default branch), with tests and docs alongside the behavior and a Conventional Commit message; a unit whose Risk line names a high-risk item gets its own commit so native review can take it alone, and the last slice closes the feature; the feature document records the commit that holds each task as evidence.
 7. **Close** — report the verified outcome, failed/pending checks, and the next step. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch.
 
 - **One feature document:** `odd/tasks/<feature-name>.md` holds objective, problem, why, scope, constraints, actionable checklist with stable IDs and acceptance criteria, verification evidence, progress, and next step. Project-scoped Engram topic `odd/<feature-name>/tasks` mirrors the full document and repository-relative locator. Keep concise rationale for meaningful accepted changes here, not a separate plan or exhaustive journal. Accepted user, review, or verification changes update intent and tasks together; preserve valid completed work, add new tasks or reopen invalidated items with reasons. Findings alone do not authorize expansion or acceptance. Routine corrections stay with their tasks; checkoffs require observed proof.
@@ -57,7 +57,7 @@ flowchart TD
     TC --> M[Implement next authorized task]
     M --> N[Applicable functional checks]
     N --> O[Record truthful results; update tracked intent, tasks and mirror]
-    O --> OC[Close task with a work-unit commit]
+    O --> OC[Commit at a slice boundary; a high-risk unit alone]
     OC --> P{Authorized work remains?}
     P -->|Yes| M
     P -->|No| Q{RDD enabled at work-unit commit boundary?}

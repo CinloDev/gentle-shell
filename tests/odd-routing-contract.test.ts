@@ -115,11 +115,33 @@ test("assumption challenge and task checks do not activate or duplicate native r
 	]);
 });
 
-test("ODD closes each task with a work-unit commit and reviews the commit or PR slice", () => {
+// S14: commit per reviewable slice. The exact canon sentence for ODD step 6,
+// identical in gentle-ai routing.go and this harness.
+const S14_COMMIT_SENTENCE =
+	"Commit work units in reviewable slices of about 400 authored changed lines on the feature branch (branch first when on the default branch), with tests and docs alongside the behavior and a Conventional Commit message; a unit whose Risk line names a high-risk item gets its own commit so native review can take it alone, and the last slice closes the feature. Record the commit that holds each task in the feature document as evidence.";
+const PER_TASK_COMMIT_SENTENCE =
+	"Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence.";
+
+test("S14: the rendered parent prompt commits per reviewable slice, not per task", () => {
+	for (const persona of ["gentleman", "neutral"] as const) {
+		const prompt = __testing.buildGentlePrompt(persona);
+		assert.equal(prompt.split(S14_COMMIT_SENTENCE).length - 1, 1, `[${persona}] the parent prompt must carry the S14 sentence once`);
+		assert.ok(!prompt.includes(PER_TASK_COMMIT_SENTENCE), `[${persona}] the parent prompt keeps the per-task commit sentence`);
+		assert.ok(
+			prompt.includes(`${S14_COMMIT_SENTENCE} Work-unit commits on the feature branch are part of authorized large ODD implementation;`),
+			`[${persona}] step 6 must keep its authorization sentence right after the S14 sentence`,
+		);
+	}
+});
+
+// S14: commit per reviewable slice. Step 6 commits slices of about 400 authored
+// changed lines (a high-risk unit alone) instead of closing every task with a commit.
+test("ODD commits work units in reviewable slices and reviews the commit or PR slice", () => {
 	containsAll(wrapper, [
-		"Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch",
-		"with tests and docs alongside the behavior, using a Conventional Commit message",
-		"record the commit identity in the feature document as evidence",
+		"Commit work units in reviewable slices of about 400 authored changed lines on the feature branch (branch first when on the default branch)",
+		"with tests and docs alongside the behavior and a Conventional Commit message",
+		"a unit whose Risk line names a high-risk item gets its own commit so native review can take it alone",
+		"Record the commit that holds each task in the feature document as evidence",
 		"Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions",
 		"The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch",
 	]);
@@ -152,18 +174,28 @@ test("ODD closes each task with a work-unit commit and reviews the commit or PR 
 		"never hardcode their paths",
 		"The delivery budget below reads the accumulated branch, not this per-task heuristic",
 	]);
+	assert.ok(!wrapper.includes("Every tracked task closes with at least one work-unit commit"), "step 6 keeps the per-task commit rule");
 	const docs = read("docs/readme-reference.md");
 	containsAll(docs, [
-		"Every task closes with at least one work-unit commit on the feature branch (branch first when on the default branch)",
-		"the feature document records the commit identity as evidence",
+		"Commit work units in reviewable slices of about 400 authored changed lines on the feature branch (branch first when on the default branch)",
+		"a unit whose Risk line names a high-risk item gets its own commit so native review can take it alone",
+		"the feature document records the commit that holds each task as evidence",
 		"The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch",
 		"**Delivery:**",
-		"Close task with a work-unit commit",
+		"Commit at a slice boundary; a high-risk unit alone",
 		"RDD enabled at work-unit commit boundary",
 		"Running authored lines over 400",
 		"Apply selected delivery strategy",
 		"Single PR; no chain artifacts",
 	]);
+	assert.ok(!docs.includes("Every task closes with at least one work-unit commit"), "docs keep the per-task commit rule");
+	const skill = read("skills/work-unit-commits/SKILL.md");
+	containsAll(skill, [
+		"Committing ODD work in reviewable slices of about 400 authored changed lines.",
+		"ODD commits work units in reviewable slices of about 400 authored changed lines, not one commit per task:",
+		"A unit whose Risk line names a high-risk item gets its own commit, so native review takes it alone.",
+	]);
+	assert.ok(!skill.includes("Every ODD task closes with at least one work-unit commit"), "the skill keeps the per-task commit rule");
 });
 
 test("delivery instructions and docs preserve localized ordered outcomes and override chaining", () => {
