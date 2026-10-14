@@ -790,6 +790,7 @@ const rddStatusMemo = new Map<string, { readonly status: NativeReviewModeStatus 
 /** @internal test seam: clears the per-cwd RDD status memo. */
 function clearRddStatusMemoForTesting(): void {
 	rddStatusMemo.clear();
+	rddStatusUnavailableWarned = false;
 }
 
 // gentle-pi#668 (corrected): last-known outcome for ONE candidate, keyed by
@@ -854,14 +855,46 @@ async function readRddModeStatusOnce(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<NativeReviewModeStatus | undefined> {
-	if (!nativeReviewCli?.reviewMode) return undefined;
+	const read = await readRddModeStatusWithCause(nativeReviewCli, cwd, signal);
+	return "status" in read ? read.status : undefined;
+}
+
+// gentle-shell#2250: the same read, keeping why it failed so the one-shot
+// unavailable notice can tell a timeout from a native refusal (for example a
+// repository on a network share that Git or gentle-ai rejects by ownership).
+async function readRddModeStatusWithCause(
+	nativeReviewCli: Pick<NativeReviewCli, "reviewMode"> | null | undefined,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ readonly status: NativeReviewModeStatus } | { readonly cause: string }> {
+	if (!nativeReviewCli?.reviewMode) return { cause: "the native gentle-ai review CLI is not available" };
 	try {
 		const call = nativeReviewCli.reviewMode({ cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS, signal });
 		const result = signal === undefined ? await call : await Promise.race([call, rddAbortRejection(signal)]);
-		return result.status;
-	} catch {
-		return undefined;
+		return { status: result.status };
+	} catch (error) {
+		return { cause: describeRddStatusFailure(error, signal) };
 	}
+}
+
+const RDD_STATUS_CAUSE_LIMIT = 300;
+
+function describeRddStatusFailure(error: unknown, signal: AbortSignal | undefined): string {
+	const command = "native `gentle-ai review mode status`";
+	if (signal?.aborted || (error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.TIMEOUT)) {
+		return `${command} did not answer within ${RDD_STATUS_TIMEOUT_MS} ms`;
+	}
+	if (error instanceof NativeReviewCliError) {
+		const exit = error.diagnostics.exit_code === undefined ? "" : `, exit ${error.diagnostics.exit_code}`;
+		const detail = (error.diagnostics.stderr ?? "").replace(/\s+/g, " ").trim() || error.message;
+		return `${command} failed (${error.code}${exit}): ${boundRddStatusCause(detail)}`;
+	}
+	return boundRddStatusCause(error instanceof Error ? error.message : String(error));
+}
+
+function boundRddStatusCause(text: string): string {
+	const trimmed = text.replace(/[.\s]+$/, "");
+	return trimmed.length <= RDD_STATUS_CAUSE_LIMIT ? trimmed : `${trimmed.slice(0, RDD_STATUS_CAUSE_LIMIT - 1)}…`;
 }
 
 // gentle-pi#662: read-only combined native risk assessment plus the computed
@@ -1123,14 +1156,15 @@ async function resolveRddModeStatus(
 	// read status instead of flipping the prompt to "unknown" and back, which
 	// would invalidate the provider's prefix cache for the whole conversation.
 	// Only a status the native reader actually reports replaces a known one.
-	const read = await readRddModeStatusOnce(nativeReviewCli, cwd, signal);
+	const outcome = await readRddModeStatusWithCause(nativeReviewCli, cwd, signal);
+	const read = "status" in outcome ? outcome.status : undefined;
 	const status = read ?? cached?.status;
 	rddStatusMemo.set(cwd, { status, expiresAt: nowMs + RDD_STATUS_MEMO_TTL_MS });
-	if (read === undefined && !rddStatusUnavailableWarned) {
+	if ("cause" in outcome && !rddStatusUnavailableWarned) {
 		rddStatusUnavailableWarned = true;
 		if (ctx?.hasUI) {
 			ctx.ui.notify(
-				"Gentle AI: receipt-driven-development status is unavailable (native review CLI absent, timed out, or failed). The parent prompt keeps the last known status, or renders \"unknown\" when none was read; this notice will not repeat this session.",
+				`Gentle AI: receipt-driven-development status is unavailable: ${outcome.cause}. The parent prompt keeps the last known status, or renders "unknown" when none was read; this notice will not repeat this session.`,
 				"warning",
 			);
 		}
