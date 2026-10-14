@@ -141,7 +141,9 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// Pain-point iteration S11 T2: the parent read this module in most runs and kept ~5K tokens of it in the
 	// transcript on every later call, so it became the lean delegation card (21,900 -> 7,000 B) and the
 	// reference material moved to orchestrator-delegation-reference.md, read only when a situation names it.
-	"orchestrator-delegation.md": 7_000,
+	// Pain-point iteration S13 (C10): the Preparation trigger tells the parent not to read what the worker will
+	// read and to pass paths, not content (7,000 -> 7,100 B; every other card sentence is pinned by a contract).
+	"orchestrator-delegation.md": 7_100,
 	"orchestrator-delegation-reference.md": 14_800,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
 	"orchestrator-tracking.md": 12_600,

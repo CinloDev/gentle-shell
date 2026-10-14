@@ -29,7 +29,7 @@ These are parent-orchestrator routing boundaries; do not pass these rules to chi
 
 **Differential check (PRESERVE):** forward the harness test-first policy's differential check to writers.
 
-**Preparation trigger:** reading that prepares a delegated write goes with the writer; inline writes read inline.
+**Preparation trigger:** reading that prepares a delegated write goes with the writer; inline writes read inline. When delegating, read only what decides the route, never the files the worker will read; pass paths, the spec reference, and what to change, not file contents.
 
 **Route declaration:** for large work, record the chosen route per task and its trigger evidence in the feature document, so skipped delegation is observable instead of silent.
 
