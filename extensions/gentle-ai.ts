@@ -1155,6 +1155,34 @@ function pinRddStatusLine(pinned: string | undefined, next: string): string {
 	return pinned !== undefined && isRddStatusLineOff(pinned) === isRddStatusLineOff(next) ? pinned : next;
 }
 
+/**
+ * gentle-pi S11 T1: while the pinned line reads off, no review can start and
+ * the orchestrator only calls ASSESS, so the primary request swaps the review
+ * family's long guidance for this lean loadout: one short gentle_review
+ * snippet, guideline, and description, with the capture, capture-group, and
+ * scope declarations hidden (they stay registered and active). It follows the
+ * pinned line, so it changes only when that line's off state flips, together
+ * with the review execution contract; on and unknown keep the registered text.
+ */
+const RDD_OFF_REVIEW_SNIPPET = "Assess an authorized change and return its verification plan (read-only)";
+const RDD_OFF_REVIEW_GUIDELINES: readonly string[] = [
+	'Receipt-driven development is off, so use gentle_review only for {"operation":"assess"} (read-only): after an authorized implementation, delegated or inline, call it over the diff and follow the returned plan; pass input {"escalate":{"item":1-6,"reason":"<one line>"}} only when the change touches a Task Size high-risk item, or {"baseRef":"<ref>","committedOnly":true} to assess a committed range.',
+	"When ASSESS returns reviewDue or a native continuation, relay it unchanged and follow it; tests, builds, and functional checks still run when applicable, and no assessment authorizes delivery.",
+];
+const RDD_OFF_REVIEW_DESCRIPTION = "Assess the current changes, or a committed range, and return the verification plan. Read-only; review outcomes never authorize delivery: commit, push, pull-request, and release commands follow ordinary repository policy.";
+const RDD_OFF_HIDDEN_REVIEW_TOOLS: readonly string[] = ["gentle_review_scope", "gentle_review_capture_group", "gentle_review_capture"];
+
+interface ReviewToolPromptOptions {
+	toolSnippets?: Record<string, string>;
+	toolGuidelines?: Record<string, string[]>;
+}
+
+/** Replaces gentle_review's snippet and guidelines in this run's prompt options only. */
+function applyRddOffReviewPrompt(options: ReviewToolPromptOptions | null | undefined): void {
+	if (options?.toolSnippets?.gentle_review !== undefined) options.toolSnippets.gentle_review = RDD_OFF_REVIEW_SNIPPET;
+	if (options?.toolGuidelines?.gentle_review !== undefined) options.toolGuidelines.gentle_review = [...RDD_OFF_REVIEW_GUIDELINES];
+}
+
 /** Resolves and renders the RDD status line for a production call site in one call. */
 async function resolveRddStatusLine(
 	nativeReviewCli: Pick<NativeReviewCli, "reviewMode"> | null | undefined,
@@ -9626,12 +9654,17 @@ function createGentleAiExtensionForTesting(
 		reviewSidebar.reset(ctx);
 		statusTiming.reset(ctx);
 	});
+	// Lean RDD-off review loadout (applyRddOffReviewPrompt): every
+	// before_agent_start sets it from the pinned line before Pi prepares that
+	// run's tool loadout, so gentle_review's prepareLoadout reads this run's value.
+	let rddOffReviewLoadout = false;
 	let reminderSessionActive = true;
 	let reminderEpoch = 0;
 	let reminderManager: ExtensionContext["sessionManager"] | undefined;
 	let unbindPreparation: (() => void) | undefined;
 	pi.on("session_shutdown", (event, context) => {
 		pinnedRddStatusLines.delete(pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey));
+		rddOffReviewLoadout = false;
 		auto.reset();
 		yolo.reset(context);
 		reviewSidebar.reset();
@@ -9883,6 +9916,16 @@ function createGentleAiExtensionForTesting(
 		],
 		parameters: REVIEW_CONTROLLER_PARAMETERS,
 		executionMode: "sequential",
+		// Hidden declarations stay active and callable; Pi leaves their
+		// declarations and guidelines out of the request.
+		prepareLoadout(loadout) {
+			if (!rddOffReviewLoadout) return undefined;
+			const declared = new Set(loadout.declared.map((tool) => tool.name));
+			return {
+				descriptions: { gentle_review: RDD_OFF_REVIEW_DESCRIPTION },
+				hiddenDeclarations: RDD_OFF_HIDDEN_REVIEW_TOOLS.filter((name) => declared.has(name)),
+			};
+		},
 		renderCall(args, theme, context) {
 			return renderGentleAiLifecycleCall(
 				reviewToolOperationPath(args),
@@ -10164,6 +10207,8 @@ function createGentleAiExtensionForTesting(
 				await resolveRddStatusLine(nativeReviewCli, ctx.cwd, rddStatusSignal, undefined, ctx),
 			);
 		if (rddStatusLine !== undefined) pinnedRddStatusLines.set(subagentDepthKey, rddStatusLine);
+		rddOffReviewLoadout = isPrimarySession && isRddStatusLineOff(rddStatusLine);
+		if (rddOffReviewLoadout) applyRddOffReviewPrompt(event.systemPromptOptions as ReviewToolPromptOptions | undefined);
 		const gentlePrompt = rddStatusLine === undefined
 			? ""
 			: `\n\n${buildGentlePrompt(
