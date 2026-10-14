@@ -149,7 +149,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	"orchestrator-verification.md": 7_500,
 	// Writer-rule fix (size threshold, one behavior per unit) and C3 (writer prompts name the helpers and
 	// invariants to reuse): 4,500 -> 5,300 B.
-	"orchestrator-writer.md": 5_300,
+	// Pain-point iteration S10 (C7): writer handoffs keep test scratch outside the worktree (5,300 -> 5,500 B).
+	"orchestrator-writer.md": 5_500,
 	"orchestrator-prompts.md": 13_000,
 };
 
