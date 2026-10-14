@@ -73,15 +73,16 @@ test("S10: no shipped guidance points test temp state into the repository", () =
 // own `mktemp -d` printed; the worker, which may not delete, has tests clean up in
 // teardown and names any leftover outside directory so the parent removes it.
 test("S10: scratch outside the worktree is removed after use", () => {
+	// Independent verification of C7 found child safety blocks `rm -rf` in every
+	// subagent (lib/destructive-command-guard.ts), so a verifier told to delete its
+	// own scratch always failed and nobody removed it. Subagents now report exact
+	// scratch paths and the parent, where deletion is only confirmed, removes them.
 	containsAll(
 		verifier,
-		[
-			"Before returning, remove only the exact scratch directory your own `mktemp -d` printed",
-			"never any other path",
-			"name it in your result if removal fails",
-		],
-		"gentle-ai-verify scratch cleanup",
+		["list every scratch directory you created by exact path in your result so the parent removes it", "never delete it yourself"],
+		"gentle-ai-verify scratch report",
 	);
+	assert.ok(!/\brm\s+-r/.test(verifier), "gentle-ai-verify must not instruct a deletion child safety blocks");
 	containsAll(
 		section(worker, "Test discipline"),
 		[
@@ -89,5 +90,11 @@ test("S10: scratch outside the worktree is removed after use", () => {
 			"name any scratch directory you created outside the worktree in `risks` so the parent removes it",
 		],
 		"worker scratch cleanup",
+	);
+	containsAll(writer, ["the parent removes the exact scratch paths a worker or verifier reports"], "writer parent cleanup");
+	containsAll(
+		read("assets/orchestrator-verification.md"),
+		["the parent removes the scratch paths the verifier reports"],
+		"verification parent cleanup",
 	);
 });
