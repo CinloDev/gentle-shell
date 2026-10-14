@@ -1143,6 +1143,18 @@ function isRddStatusLineOff(line: string | undefined): boolean {
 	return line !== undefined && line.startsWith("Receipt-driven development: off ");
 }
 
+/**
+ * gentle-shell#2195: the rendered line sits in the cached system-prompt
+ * prefix, so a session keeps the first line it rendered and re-renders only
+ * when the off state changes, because that also adds or drops the review
+ * execution contract (gentle-shell#1494). An unknown-to-on flip or a
+ * deciding-source change keeps the prefix; review tools still read the live
+ * mode whenever they run, so the pinned text never grants or blocks anything.
+ */
+function pinRddStatusLine(pinned: string | undefined, next: string): string {
+	return pinned !== undefined && isRddStatusLineOff(pinned) === isRddStatusLineOff(next) ? pinned : next;
+}
+
 /** Resolves and renders the RDD status line for a production call site in one call. */
 async function resolveRddStatusLine(
 	nativeReviewCli: Pick<NativeReviewCli, "reviewMode"> | null | undefined,
@@ -6615,6 +6627,8 @@ const processRetainedNativeStatusSelections = new Map<PendingReviewConsentSessio
 // named-agent start increments the depth, a matching end decrements it,
 // and a fresh primary-loop start resets it to 0.
 const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, number>();
+// gentle-shell#2195: the RDD status line each primary session last rendered into its system prompt.
+const pinnedRddStatusLines = new Map<PendingReviewConsentSessionKey, string>();
 
 // gentle-shell#1064 slice 1: the parent-session profile binding store lives in
 // lib/session-profile-binding.ts (in-process, keyed by parent session id). The
@@ -9490,6 +9504,7 @@ export const __testing = {
 	readActiveToolNames,
 	renderBackgroundSubagentsStatusLine,
 	renderRddStatusLine,
+	pinRddStatusLine,
 	isValidRddModeStatus,
 	resolveRddModeStatus,
 	resolveRddStatusLine,
@@ -9616,6 +9631,7 @@ function createGentleAiExtensionForTesting(
 	let reminderManager: ExtensionContext["sessionManager"] | undefined;
 	let unbindPreparation: (() => void) | undefined;
 	pi.on("session_shutdown", (event, context) => {
+		pinnedRddStatusLines.delete(pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey));
 		auto.reset();
 		yolo.reset(context);
 		reviewSidebar.reset();
@@ -10143,7 +10159,11 @@ function createGentleAiExtensionForTesting(
 		if (inFlightModeRead !== undefined) await Promise.race([inFlightModeRead, rddAbortRejection(rddStatusSignal)]).catch(() => undefined);
 		const rddStatusLine = !isPrimarySession
 			? undefined
-			: await resolveRddStatusLine(nativeReviewCli, ctx.cwd, rddStatusSignal, undefined, ctx);
+			: pinRddStatusLine(
+				pinnedRddStatusLines.get(subagentDepthKey),
+				await resolveRddStatusLine(nativeReviewCli, ctx.cwd, rddStatusSignal, undefined, ctx),
+			);
+		if (rddStatusLine !== undefined) pinnedRddStatusLines.set(subagentDepthKey, rddStatusLine);
 		const gentlePrompt = rddStatusLine === undefined
 			? ""
 			: `\n\n${buildGentlePrompt(

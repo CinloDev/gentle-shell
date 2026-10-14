@@ -31,6 +31,7 @@ import {
 
 const {
 	renderRddStatusLine,
+	pinRddStatusLine,
 	resolveRddModeStatus,
 	resolveRddStatusLine,
 	getOrchestratorPrompt,
@@ -357,4 +358,21 @@ test("resolveRddModeStatus stays unknown when no status was ever read", async ()
 	clearRddStatusMemoForTesting();
 	const cli = fakeReviewMode(() => { throw new Error("never available"); });
 	assert.equal(await resolveRddModeStatus(cli, "/repo-never-known"), undefined);
+});
+
+test("pinRddStatusLine keeps the session's first line until the off state changes (#2195)", () => {
+	const unknown = "Receipt-driven development: unknown (native status unavailable)";
+	const onGlobal = "Receipt-driven development: on (decided by global)";
+	const onClone = "Receipt-driven development: on (decided by clone)";
+	const off = "Receipt-driven development: off (decided by clone)";
+	const offGlobal = "Receipt-driven development: off (decided by global)";
+	assert.equal(pinRddStatusLine(undefined, onGlobal), onGlobal, "the first render of a session is the resolved line");
+	assert.equal(pinRddStatusLine(unknown, onGlobal), unknown, "unknown to on keeps the cached prompt prefix");
+	assert.equal(pinRddStatusLine(onGlobal, unknown), onGlobal, "on to unknown keeps the cached prompt prefix");
+	assert.equal(pinRddStatusLine(onGlobal, onClone), onGlobal, "a deciding-source change alone keeps the prefix");
+	assert.equal(pinRddStatusLine(off, offGlobal), off, "a source change while off keeps the prefix");
+	assert.equal(pinRddStatusLine(onGlobal, off), off, "turning RDD off re-renders, since it drops the review contract");
+	assert.equal(pinRddStatusLine(unknown, off), off, "unknown to off re-renders");
+	assert.equal(pinRddStatusLine(off, onGlobal), onGlobal, "turning RDD back on re-renders");
+	assert.equal(pinRddStatusLine(off, unknown), unknown, "off to unknown re-renders, since unknown keeps the review contract");
 });
