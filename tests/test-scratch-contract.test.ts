@@ -13,6 +13,7 @@ const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 const worker = read("assets/agents/gentle-ai-worker.md");
 const writer = read("assets/orchestrator-writer.md");
+const verifier = read("assets/agents/gentle-ai-verify.md");
 
 function section(text: string, heading: string): string {
 	const start = text.indexOf(`\n## ${heading}\n`);
@@ -64,4 +65,29 @@ test("S10: no shipped guidance points test temp state into the repository", () =
 	};
 	for (const dir of ["assets", "extensions", "docs"]) walk(join(ROOT, dir));
 	assert.deepEqual(offenders, []);
+});
+
+// S10 follow-up (user, 2026-10-14: "lo de los temporales tambien hacemos limpieza luego?"):
+// scratch outside the worktree was never removed; verifier scratch copies piled up
+// in the system temp directory. The verifier removes only the exact directory its
+// own `mktemp -d` printed; the worker, which may not delete, has tests clean up in
+// teardown and names any leftover outside directory so the parent removes it.
+test("S10: scratch outside the worktree is removed after use", () => {
+	containsAll(
+		verifier,
+		[
+			"Before returning, remove only the exact scratch directory your own `mktemp -d` printed",
+			"never any other path",
+			"name it in your result if removal fails",
+		],
+		"gentle-ai-verify scratch cleanup",
+	);
+	containsAll(
+		section(worker, "Test discipline"),
+		[
+			"Tests delete the temp directories they create in teardown",
+			"name any scratch directory you created outside the worktree in `risks` so the parent removes it",
+		],
+		"worker scratch cleanup",
+	);
 });
