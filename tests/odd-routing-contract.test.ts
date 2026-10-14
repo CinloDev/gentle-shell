@@ -161,7 +161,8 @@ test("ODD commits work units in reviewable slices and reviews the commit or PR s
 		"Medium: defer to the PR slice",
 		"bounded by the delivery budget of about 400 authored changed lines",
 		"The first boundary is the branch point, and every reviewed boundary becomes the next base",
-		"Record per task the assessed tier and outcome: granted, declined, passive, deferred to slice, or unavailable",
+		// S14: commit per reviewable slice; one commit may hold several tasks, so outcomes are recorded per commit.
+		"Record per commit the assessed tier and outcome: granted, declined, passive, deferred to slice, or unavailable",
 		"Delivery follows work units",
 		"forecast authored changed lines (additions plus deletions, generated files excluded) from the task list",
 		"keep a running count from work-unit commits",
@@ -473,4 +474,17 @@ test("ODD protocol is always-on in the rendered system prompt and runs by defaul
 	}
 	containsAll(core, ["orchestrator-delegation.md", "orchestrator-memory.md"]);
 	assert.doesNotMatch(core + delegation + memory, /SDD|sdd-|OpenSpec|openspec/i);
+});
+
+// S14: commit per reviewable slice. Mirrors gentle-ai 06ad2776: a high-risk unit that follows pending medium commits
+// closes the open slice first, so native review takes the high-risk commit alone; outcomes are recorded per commit,
+// since one commit may hold several tasks.
+test("S14: RDD tracking closes the open slice before a high-risk commit and records outcomes per commit", () => {
+	const tracking = readFileSync(join(import.meta.dirname, "..", "assets", "orchestrator-tracking.md"), "utf8");
+	assert.ok(
+		tracking.includes("When a high-risk unit follows pending medium commits still under the slice budget, close the open slice first, assessing and reviewing it as the slice, so the high-risk commit is then reviewed alone against the new boundary."),
+		"tracking must close the open slice before a high-risk commit",
+	);
+	assert.ok(tracking.includes("Record per commit the assessed tier and outcome"), "tracking must record outcomes per commit");
+	assert.ok(!tracking.includes("Record per task the assessed tier and outcome"), "tracking must not record outcomes per task");
 });

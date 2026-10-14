@@ -146,7 +146,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	"orchestrator-delegation.md": 7_100,
 	"orchestrator-delegation-reference.md": 14_800,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
-	"orchestrator-tracking.md": 12_600,
+	// S14: close the open slice before a high-risk commit; outcomes per commit (12,600 -> 12,850 B).
+	"orchestrator-tracking.md": 12_850,
 	// gentle-shell#1731 T3: parallel review protocol; lazy (delegation or high risk only), core and normative rule untouched.
 	// gentle-shell#1731 T11/T12: verify-per-unit timing and the every-S# verify handoff (6,000 -> 6,400 B).
 	// gentle-shell#1731 T15: one end-of-feature verify for same-model inline deliveries (6,400 -> 6,500 B).
