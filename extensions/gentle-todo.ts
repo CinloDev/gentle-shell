@@ -265,6 +265,13 @@ export default function gentleTodo(pi: ExtensionAPI, env: NodeJS.ProcessEnv = pr
 					current.toolTurnsSinceWrite = 0;
 					current.reminded = false;
 					current.wroteThisTurn = true;
+					const state = todoStateMessage(current.state);
+					if (state !== undefined) {
+						pi.sendMessage?.(
+							{ customType: "gentle-todo-state", content: state, display: false },
+							{ triggerTurn: false },
+						);
+					}
 				}
 				if (current.tui) invalidateSidebar(current.tui);
 			}
@@ -339,17 +346,27 @@ export default function gentleTodo(pi: ExtensionAPI, env: NodeJS.ProcessEnv = pr
 
 	pi.on("context", (event, ctx) => {
 		const current = session(ctx);
-		// Context transforms are request-local: no transcript entry, UI
-		// notification, continuation or provider-specific wake is needed. The
-		// current list trails the transcript (gentle-shell#1662), then the
-		// one-shot reminder when it is due.
+		// gentle-shell#1662, #2195: The current list reaches the model in context,
+		// but if the transcript already carries the byte-identical state message from
+		// a prior turn or write, we must not append a redundant trailing message
+		// that invalidates prompt prefix caching on every intermediate turn.
 		const trailing: Array<{ role: "custom"; customType: string; content: string; display: false; timestamp: number }> = [];
 		const state = todoStateMessage(current.state);
-		if (state !== undefined) trailing.push({ role: "custom", customType: "gentle-todo-state", content: state, display: false, timestamp: Date.now() });
+		const lastStateMessage = [...event.messages].reverse().find(
+			(m) => (m as { role?: string; customType?: string }).customType === "gentle-todo-state",
+		);
+		if (state !== undefined && (lastStateMessage as { content?: string } | undefined)?.content !== state) {
+			trailing.push({ role: "custom", customType: "gentle-todo-state", content: state, display: false, timestamp: Date.now() });
+		}
 		const actionable = current.state.tasks.some((task) => task.status === "pending" || task.status === "in_progress");
 		if (!current.reminded && current.toolTurnsSinceWrite >= REMIND_AFTER_TOOL_TURNS && actionable) {
 			current.reminded = true;
-			trailing.push({ role: "custom", customType: "gentle-todo-reminder", content: TODO_REMINDER, display: false, timestamp: Date.now() });
+			const lastReminder = [...event.messages].reverse().find(
+				(m) => (m as { role?: string; customType?: string }).customType === "gentle-todo-reminder",
+			);
+			if ((lastReminder as { content?: string } | undefined)?.content !== TODO_REMINDER) {
+				trailing.push({ role: "custom", customType: "gentle-todo-reminder", content: TODO_REMINDER, display: false, timestamp: Date.now() });
+			}
 		}
 		if (trailing.length === 0) return undefined;
 		return { messages: [...event.messages, ...trailing] };

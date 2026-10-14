@@ -497,6 +497,74 @@ test("the system prompt carries only a byte-stable todo block; the current list 
 	assert.equal(finishedEvent.systemPromptOptions.appendSystemPrompt, emptyEvent.systemPromptOptions.appendSystemPrompt, "finishing the list must not change the system prompt");
 });
 
+test("consecutive context requests with an unchanged Todo list preserve prefix stability (#2195)", async () => {
+	const { pi, tools, fire } = fakePi();
+	gentleTodo(pi, {});
+	const { ctx } = fakeContext();
+	await fire("session_start", ctx);
+	await tools.get("todo")!.execute("c1", { action: "write", tasks: [{ title: "Fix the bug" }] }, undefined, undefined, ctx);
+
+	// Request 1: first model request
+	const userMsg = { role: "user", content: "Work on it", timestamp: 100 };
+	const req1 = await fire("context", ctx, { messages: [userMsg] }) as { messages: Array<{ role: string; customType?: string }> };
+	assert.ok(req1, "req1 must return context messages");
+	assert.ok(req1.messages.some((m) => (m as { customType?: string }).customType === "gentle-todo-state"), "req1 must include gentle-todo-state");
+
+	// Model executes a tool (read), producing assistant message and tool result
+	const assistantMsg = { role: "assistant", content: [{ type: "toolCall", id: "read-1", name: "read", arguments: {} }], timestamp: 200 };
+	const toolResultMsg = { role: "toolResult", toolCallId: "read-1", content: [{ type: "text", text: "file content" }], timestamp: 300 };
+
+	// Request 2: next model request with unchanged todo list.
+	// The input messages to context include the transcript with the already-delivered state message
+	const inputReq2 = [...req1.messages, assistantMsg, toolResultMsg];
+	const req2 = await fire("context", ctx, { messages: inputReq2 }) as { messages: Array<{ role: string; customType?: string }> } | undefined;
+
+	// req2 must not append a redundant trailing gentle-todo-state that would invalidate prefix caching
+	const effectiveReq2 = req2?.messages ?? inputReq2;
+	assert.deepEqual(
+		effectiveReq2.slice(0, req1.messages.length),
+		req1.messages,
+		"req1 must be an exact prefix of req2 to preserve prompt caching",
+	);
+	// No duplicate trailing state message at the end of req2
+	const stateMessages = effectiveReq2.filter((m) => (m as { customType?: string }).customType === "gentle-todo-state");
+	assert.equal(stateMessages.length, 1, "must not append duplicate gentle-todo-state when unchanged");
+});
+
+test("todo write and update persist gentle-todo-state custom message to transcript (#2195)", async () => {
+	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const base = fakePi();
+	const pi = {
+		...base.pi,
+		sendMessage(message: unknown, options: unknown) {
+			sent.push({ message, options });
+		},
+	} as unknown as ExtensionAPI;
+	gentleTodo(pi, {});
+	const { ctx } = fakeContext();
+	await base.fire("session_start", ctx);
+
+	// 1. todo write persists state
+	await base.tools.get("todo")!.execute("c1", { action: "write", tasks: [{ title: "Task 1" }] }, undefined, undefined, ctx);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(sent[0]!.options, { triggerTurn: false });
+	const firstMsg = sent[0]!.message as { role: string; customType: string; content: string; display: boolean };
+	assert.equal(firstMsg.customType, "gentle-todo-state");
+	assert.equal(firstMsg.display, false);
+	assert.match(firstMsg.content, /1\. \[pending\] Task 1/);
+
+	// 2. todo update persists new state
+	await base.tools.get("todo")!.execute("c2", { action: "update", id: 1, status: "in_progress", note: "doing" }, undefined, undefined, ctx);
+	assert.equal(sent.length, 2);
+	assert.deepEqual(sent[1]!.options, { triggerTurn: false });
+	const secondMsg = sent[1]!.message as { content: string };
+	assert.match(secondMsg.content, /1\. \[in_progress\] Task 1 — doing/);
+
+	// 3. todo list does NOT persist extra messages
+	await base.tools.get("todo")!.execute("c3", { action: "list" }, undefined, undefined, ctx);
+	assert.equal(sent.length, 2, "read actions must not emit state messages");
+});
+
 test("before_agent_start is idempotent: a todo block already present in appendSystemPrompt is not duplicated", async () => {
 	const { pi, tools, fire } = fakePi();
 	gentleTodo(pi, {});
