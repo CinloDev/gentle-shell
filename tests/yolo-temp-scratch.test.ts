@@ -21,13 +21,16 @@ test("temp roots are /tmp, /var/tmp and the resolved tmpdir, never the root itse
 	}
 });
 
-test("a tmpdir that is /, home or an ancestor of home is not a temp root", () => {
-	for (const tmpdir of ["/", "/home/user", "/home"]) {
+test("a tmpdir that is /, home, an ancestor or a descendant of home is not a temp root", () => {
+	for (const tmpdir of ["/", "/home/user", "/home", "/home/user/work/repo"]) {
 		const fs = mock({ tmpdir });
-		for (const target of ["/tmp.abcdef", "/home/user/tmp.abcdef", "/home/tmp.abcdef"]) {
+		for (const target of ["/tmp.abcdef", "/home/user/tmp.abcdef", "/home/tmp.abcdef", "/home/user/work/repo/tmp.abcdef"]) {
 			assert.equal(isTempScratchTarget(target, fs), false, `${tmpdir}: ${target}`);
 		}
 	}
+	const ownFile = { uid: 1000, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
+	assert.equal(isTempScratchTarget("/home/gentleman/work/repo/README.md", mock({ home: "/home/gentleman", tmpdir: "/home/gentleman/work/repo", lstat: () => ownFile })), false);
+	assert.equal(isTempScratchTarget("/home/gentleman-tmp/x.log", mock({ home: "/home/gentleman", tmpdir: "/home/gentleman-tmp", lstat: () => ownFile })), true, "sibling prefix is not a descendant");
 });
 
 test("only mktemp-named own directories qualify; files need ownership, symlinks and missing paths always qualify", () => {

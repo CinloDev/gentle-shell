@@ -37,11 +37,12 @@ export function defaultTempScratchFs(): TempScratchFs {
 	return { lstat: (path) => lstatSync(path), uid: process.getuid?.(), tmpdir: resolvedTmpdir, home: homedir() };
 }
 
+/** A temp root equal to, above or below home would expose home entries as scratch. */
 function tempRoots(fs: TempScratchFs): string[] {
 	const home = posix.normalize(fs.home);
 	return [...FIXED_TEMP_ROOTS, fs.tmpdir].filter((root): root is string =>
 		root !== undefined && posix.isAbsolute(root) && posix.normalize(root) === root && root !== "/" &&
-		root !== home && !home.startsWith(`${root}/`));
+		root !== home && !home.startsWith(`${root}/`) && !root.startsWith(`${home}/`));
 }
 
 /** One literal path component directly under a temp root, proven own scratch by an admission-time lstat. */

@@ -6,7 +6,10 @@ export interface DestructiveCommandMatch {
 	kind: DestructionKind;
 	triggerIndex: number;
 	hardDeny: boolean;
-	/** Literal targets of a direct, top-level, unwrapped and unquoted recursive `rm`; absent otherwise. */
+	/**
+	 * Literal targets of a direct, top-level, unwrapped and unquoted recursive
+	 * `rm` that runs before every other segment of the command; absent otherwise.
+	 */
 	removalTargets?: readonly string[];
 }
 interface Token {
@@ -16,6 +19,10 @@ interface Token {
 	index: number;
 }
 const separators = new Set([";", "&&", "||", "|", "&", "\n", "(", ")"]);
+// Separators after which the next segment starts only once this one finished.
+// Pipes, background jobs and subshell parentheses run segments concurrently or
+// out of textual order.
+const SEQUENTIAL_SEPARATORS = new Set(["", ";", "&&", "||", "\n"]);
 
 /** Literal, named heredocs are data, not executable shell segments; offsets are preserved. */
 function blankHeredocs(command: string): string {
@@ -169,6 +176,8 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 	const matches: DestructiveCommandMatch[] = [];
 	let previous: Token[] = [];
 	let previousSeparator = "";
+	// True while every earlier segment was a leading literal recursive `rm`.
+	let leadingRemovals = depth === 0;
 	let start = 0;
 	for (let end = 0; end <= tokens.length; end++) {
 		if (end < tokens.length && !tokens[end].operator) continue;
@@ -199,8 +208,13 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 		if (name === "rm" && args.some((arg) => /^-[^-]*[rR]/.test(arg) || arg === "--recursive")) {
 			const rootTarget = args.some((arg) => /^(?:\/(?:\*+)?$|\.{1,2}\/?$|~(?:\/|$)|\$\{?HOME\}?(?:\/|$))/.test(arg));
 			add(DESTRUCTION_KIND.FILESYSTEM, rootTarget);
-			const targets = depth === 0 && cursor === 0 && head.raw === "rm" ? removalTargets(segment.slice(1)) : undefined;
+			const sequential = SEQUENTIAL_SEPARATORS.has(tokens[end]?.raw ?? "");
+			const targets = leadingRemovals && sequential && cursor === 0 && head.raw === "rm" ? removalTargets(segment.slice(1)) : undefined;
 			if (targets !== undefined) matches[matches.length - 1].removalTargets = targets;
+			else leadingRemovals = false;
+		} else if (segment.length > 0 || tokens[end]?.raw !== "\n") {
+			// Only blank lines may sit between leading removals.
+			leadingRemovals = false;
 		}
 		if (name === "find") {
 			if (args.includes("-delete")) add(DESTRUCTION_KIND.FILESYSTEM);

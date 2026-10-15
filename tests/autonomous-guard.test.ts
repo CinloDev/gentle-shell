@@ -69,6 +69,7 @@ test("YOLO waives recursive removal of own temp scratch only", () => {
 		"rm -rf /tmp/tmp.8phya1BpFr /tmp/tmp.LKd1kBX8Rw /tmp/tmp.C94OVzf01o /tmp/ctx-backstop-pnpm-test.log; cd /home/gentleman/work/gentle-pi-worktrees/harness-r1 && git log --oneline -1",
 		"rm -rf /tmp/tmp.abcdef1234", "rm -rf /tmp/ctx-backstop-pnpm-test.log", "rm -rf /tmp/latest", "rm -rf /tmp/tmp.gone1234",
 		"rm -r -f -- /var/tmp/tmp.zzzzzz", "rm -rf /tmp/tmp.abcdef1234 && git push -u origin feature/x",
+		"rm -rf /tmp/tmp.abcdef1234 && rm -rf /tmp/tmp.gone1234\nrm -rf /tmp/latest || git log --oneline -1",
 	]) assert.equal(waived(command), true, command);
 	for (const command of [
 		"rm -rf /tmp", "rm -rf /tmp/", "rm -rf /tmp/*", "rm -rf /tmp/tmp.x/", "rm -rf /tmp/tmp.x/../..", "rm -rf /tmp/./tmp.x",
@@ -80,7 +81,16 @@ test("YOLO waives recursive removal of own temp scratch only", () => {
 		"rm -rf /tmp/tmp.abcdef1234 && git stash drop", "rm -rf /tmp/cache", "rm -rf /tmp/tmp.other1234", "rm -rf /tmp/shared.log",
 		"rm -rf /tmp/tmp.denied99", "rm -rf /home/user/tmp.abcdef1234", "sh -c 'rm -rf /tmp/tmp.abcdef1234'",
 		"find /tmp -maxdepth 1 -name 'tmp.*' -exec rm -rf {} +", "rm -rf /tmp/tmp.gone1234>important.txt", "rm -rf /tmp/tmp.gone1234 2>/dev/null",
+		// Ordering: an earlier segment can move data into a target the lstat saw as scratch.
+		"mv /home/u/data /tmp/tmp.missingZZ619976 && rm -rf /tmp/tmp.missingZZ619976", "mv /home/u/data /tmp/tmp.abcdef1234 && rm -rf /tmp/tmp.abcdef1234",
+		"cp -r x /tmp/tmp.abcdef1234; rm -rf /tmp/tmp.abcdef1234", "echo hi; rm -rf /tmp/tmp.abcdef1234", "ln -s /home/u/data /tmp/tmp.gone1234 && rm -rf /tmp/tmp.gone1234",
+		"(mv /home/u/data /tmp/tmp.abcdef1234) && rm -rf /tmp/tmp.abcdef1234", "(rm -rf /tmp/tmp.abcdef1234)",
+		"rm -rf /tmp/tmp.abcdef1234 & mv /home/u/data /tmp/tmp.abcdef1234", "rm -rf /tmp/tmp.abcdef1234 | cat",
+		"rm -rf /tmp/tmp.gone1234; mv /home/u/data /tmp/tmp.abcdef1234; rm -rf /tmp/tmp.abcdef1234",
 	]) assert.equal(waived(command), false, command);
+	// A tmpdir under home would make top-level repository files look like scratch.
+	const underHome = { ...fs, home: "/home/gentleman", tmpdir: "/home/gentleman/work/repo", lstat: () => entry("file") };
+	assert.equal(isReversibleYoloCommand("rm -rf /home/gentleman/work/repo/README.md", evaluateGuardedCommand("rm -rf /home/gentleman/work/repo/README.md", config), underHome), false);
 	// A missing uid (no POSIX ownership) never proves own scratch.
 	assert.equal(isReversibleYoloCommand("rm -rf /tmp/tmp.abcdef1234", evaluateGuardedCommand("rm -rf /tmp/tmp.abcdef1234", config), { ...fs, uid: undefined }), false);
 });
