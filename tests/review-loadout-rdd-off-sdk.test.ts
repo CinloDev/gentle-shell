@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AssistantMessage, Tool, ToolCall } from "@earendil-works/pi-ai";
+import type { AssistantMessage, JsonObject, Tool, ToolCall } from "@earendil-works/pi-ai";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 
 // gentle-pi S11 T1: with receipt-driven development off, the orchestrator only
@@ -60,7 +60,7 @@ async function runSession(
 	execFileSync("git", ["init", "--initial-branch=fixture"], { cwd, env: gitEnv, stdio: "ignore" });
 	execFileSync("git", ["-c", "user.name=SDK Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"], { cwd, env: gitEnv, stdio: "ignore" });
 	const run: SessionRun = { requests: [], registered: new Map(), assessResults: [], errors: [] };
-	let next: { name: string; arguments: Record<string, unknown> } | undefined;
+	let next: { name: string; arguments: JsonObject } | undefined;
 	let calls = 0;
 	const model = { id: "driver", name: "Local driver", provider: "loadout-fixture", api: "loadout-fixture", baseUrl: "http://invalid.local", reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } as const;
 	const manager = sdk.SessionManager.inMemory(cwd);
