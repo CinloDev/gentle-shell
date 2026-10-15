@@ -32,6 +32,10 @@ export interface ScratchLedger {
 	pid: number;
 	processStartedAt: string;
 	cwd: string;
+	/** The real temp root the scratch was created directly under (the inherited TMPDIR or os.tmpdir()). */
+	tempRoot: string | null;
+	/** The temp variables before the session changed them (null: unset), restored at shutdown. */
+	inherited: Record<string, string | null>;
 	scratchDir: string | null;
 	artifacts: ScratchArtifact[];
 }
@@ -61,6 +65,8 @@ function isLedger(value: unknown): value is ScratchLedger {
 	const ledger = value as Partial<ScratchLedger> | null;
 	return typeof ledger === "object" && ledger !== null && ledger.version === LEDGER_VERSION && typeof ledger.sessionId === "string" &&
 		typeof ledger.pid === "number" && typeof ledger.processStartedAt === "string" && typeof ledger.cwd === "string" &&
+		(ledger.tempRoot === null || typeof ledger.tempRoot === "string") && typeof ledger.inherited === "object" && ledger.inherited !== null &&
+		Object.values(ledger.inherited).every((value) => value === null || typeof value === "string") &&
 		(ledger.scratchDir === null || typeof ledger.scratchDir === "string") && Array.isArray(ledger.artifacts) && ledger.artifacts.every(isArtifact);
 }
 
@@ -130,14 +136,28 @@ export function createSessionScratch(base: string | undefined, sessionId: string
 	}
 }
 
-const isWithin = (path: string, dir: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+export const isWithin = (path: string, dir: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
 
-/** Why a recorded scratch dir is not ours to remove, "absent" when it is gone, or undefined when it is. */
-function scratchRefusal(ledger: ScratchLedger): string | undefined {
+/** The real path of a temp root, or undefined when it does not exist. */
+export function realTempRoot(path: string | undefined): string | undefined {
+	if (!path || !isAbsolute(path)) return undefined;
+	try { return realpathSync(path); } catch { return undefined; }
+}
+
+/**
+ * Why a recorded scratch dir is not ours to remove, "absent" when it is gone,
+ * or undefined when it is. `ownRoot` is the temp root of the session asking:
+ * a ledger's temp root inside the home is trusted only when it is that root.
+ */
+export function scratchRefusal(ledger: ScratchLedger, ownRoot: string | undefined): string | undefined {
 	const dir = ledger.scratchDir;
 	if (!dir || !isAbsolute(dir)) return "not recorded";
 	// Prefix and ledger match: only the directory created for this session id.
 	if (!basename(dir).startsWith(`${SCRATCH_PREFIX}${safeSessionId(ledger.sessionId)}-`)) return "not this session's scratch";
+	// Created directly under the temp root recorded with it, which is a temp root.
+	const root = ledger.tempRoot;
+	if (!root || !isAbsolute(root) || dirname(dir) !== root) return "outside its temp root";
+	if (isWithin(root, resolve(homedir())) && root !== ownRoot) return "temp root inside the home";
 	let stat;
 	try { stat = lstatSync(dir); } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable"; }
 	if (stat.isSymbolicLink() || !stat.isDirectory()) return "not a directory";
@@ -155,8 +175,8 @@ export type ScratchRemoval = "removed" | "absent" | "kept" | "refused";
  * subagent TMPDIRs. A dir or entry holding a recorded artifact is kept: the
  * artifact is removed only through its own checks. Symlinks are never followed.
  */
-export function removeSessionScratch(ledger: ScratchLedger, artifactPaths: readonly string[], options: { contentsOnly?: boolean } = {}): ScratchRemoval {
-	const refusal = scratchRefusal(ledger);
+export function removeSessionScratch(ledger: ScratchLedger, artifactPaths: readonly string[], options: { contentsOnly?: boolean; ownRoot: string | undefined }): ScratchRemoval {
+	const refusal = scratchRefusal(ledger, options.ownRoot);
 	if (refusal === "absent") return "absent";
 	if (refusal) return "refused";
 	const dir = ledger.scratchDir!;

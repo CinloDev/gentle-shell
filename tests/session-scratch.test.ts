@@ -26,19 +26,31 @@ function fixture(t: TestContext): Fixture {
 	return fx;
 }
 
-interface Options { sessionId?: string; child?: boolean; hasUI?: boolean; confirm?: boolean; isProcessAlive?: (pid: number) => boolean; now?: () => number; platform?: NodeJS.Platform; tmp?: string }
+type ExtensionFactory = typeof createSessionScratchExtension;
+
+interface Options {
+	sessionId?: string; child?: boolean; hasUI?: boolean; confirm?: boolean; isProcessAlive?: (pid: number) => boolean; now?: () => number; platform?: NodeJS.Platform; tmp?: string;
+	/** A shared process environment, as a reload re-runs the extension against the same `process.env`. */
+	env?: NodeJS.ProcessEnv;
+	/** The factory of a separately loaded module instance. */
+	factory?: ExtensionFactory;
+}
+
+interface BashOptions { isError?: boolean; toolName?: string }
+
+let toolCallCount = 0;
 
 function session(fx: Fixture, options: Options = {}) {
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, Command>();
 	const notes: string[] = [];
 	const confirms: string[] = [];
-	const env: NodeJS.ProcessEnv = { TMPDIR: options.tmp ?? fx.base, GENTLE_PI_CONFIG_HOME: fx.configHome, ...(options.child ? { GENTLE_PI_AGENTS_CHILD: "1" } : {}) };
+	const env: NodeJS.ProcessEnv = options.env ?? { TMPDIR: options.tmp ?? fx.base, GENTLE_PI_CONFIG_HOME: fx.configHome, ...(options.child ? { GENTLE_PI_AGENTS_CHILD: "1" } : {}) };
 	const pi = {
 		on: (name: string, handler: Handler) => { handlers.set(name, handler); },
 		registerCommand: (name: string, command: Command) => { commands.set(name, command); },
 	} as unknown as ExtensionAPI;
-	createSessionScratchExtension({ env, isProcessAlive: options.isProcessAlive, now: options.now, platform: options.platform })(pi);
+	(options.factory ?? createSessionScratchExtension)({ env, isProcessAlive: options.isProcessAlive, now: options.now, platform: options.platform })(pi);
 	const ctx = {
 		cwd: fx.cwd,
 		hasUI: options.hasUI ?? true,
@@ -53,7 +65,13 @@ function session(fx: Fixture, options: Options = {}) {
 		env, handlers, commands, notes, confirms, ctx,
 		start: (reason = "startup") => emit("session_start", { type: "session_start", reason }),
 		shutdown: (reason = "quit") => emit("session_shutdown", { type: "session_shutdown", reason }),
-		bash: (command: string, isError = false, toolName = "bash") => emit("tool_result", { type: "tool_result", toolName, toolCallId: "c1", input: { command }, content: [], isError }),
+		// The call event, then the command's effect on disk, then its result, as Pi runs a tool.
+		bash: async (command: string, effect?: () => void, { isError = false, toolName = "bash" }: BashOptions = {}) => {
+			const toolCallId = `c${++toolCallCount}`;
+			await emit("tool_call", { type: "tool_call", toolName, toolCallId, input: { command } });
+			effect?.();
+			return await emit("tool_result", { type: "tool_result", toolName, toolCallId, input: { command }, content: [], isError });
+		},
 		run: async (args: string) => { await commands.get("gentle:scratch")!.handler(args, ctx); return notes.at(-1) ?? ""; },
 	};
 }
@@ -77,7 +95,7 @@ function origin(fx: Fixture): string {
 
 function writeForeignLedger(fx: Fixture, ledger: Partial<ScratchLedger> & { sessionId: string }): void {
 	mkdirSync(join(fx.configHome, "scratch"), { recursive: true });
-	const full: ScratchLedger = { version: LEDGER_VERSION, pid: 999_999, processStartedAt: new Date(0).toISOString(), cwd: fx.cwd, scratchDir: null, artifacts: [], ...ledger };
+	const full: ScratchLedger = { version: LEDGER_VERSION, pid: 999_999, processStartedAt: new Date(0).toISOString(), cwd: fx.cwd, tempRoot: fx.base, inherited: { TMPDIR: fx.base }, scratchDir: null, artifacts: [], ...ledger };
 	writeFileSync(ledgerFile(fx, ledger.sessionId), JSON.stringify(full));
 }
 
@@ -150,6 +168,51 @@ test("S2/S5: reload keeps the same scratch; quit removes it and restores TMPDIR"
 	assert.equal(existsSync(ledgerFile(fx, "s-1")), false, "a ledger without artifacts is deleted");
 });
 
+// Pi's /reload re-evaluates every extension module (jiti `moduleCache: false`
+// after `clearExtensionCache()`), so the module-level state is new; a fresh
+// import with a cache-busting query string is a separate module instance.
+const loadInstance = async (tag: string): Promise<ExtensionFactory> =>
+	((await import(`../extensions/session-scratch.ts?instance=${tag}-${Date.now()}`)) as { createSessionScratchExtension: ExtensionFactory }).createSessionScratchExtension;
+
+test("S2/S5: a reload into a fresh module instance recovers the live scratch from the ledger and quit removes it once", async (t) => {
+	const fx = fixture(t);
+	const env: NodeJS.ProcessEnv = { TMPDIR: fx.base, GENTLE_PI_CONFIG_HOME: fx.configHome };
+	const first = session(fx, { env, factory: await loadInstance("first") });
+	await first.start();
+	const scratch = env.TMPDIR!;
+	assert.notEqual(scratch, fx.base);
+	writeFileSync(join(scratch, "work.txt"), "x");
+	await first.shutdown("reload");
+	const second = session(fx, { env, factory: await loadInstance("second") });
+	assert.notEqual(second.handlers.get("session_start"), first.handlers.get("session_start"), "the second instance is a separate module evaluation");
+	await second.start("reload");
+	assert.equal(env.TMPDIR, scratch, "TMPDIR is unchanged");
+	assert.equal(readFileSync(join(scratch, "work.txt"), "utf8"), "x", "the live scratch survives the reload");
+	assert.deepEqual(readdirSync(fx.base), [basename(scratch)], "no second scratch is created");
+	assert.equal(readLedger(fx, "s-1").scratchDir, scratch);
+	await second.shutdown("quit");
+	assert.deepEqual(readdirSync(fx.base), [], "quit removes the one scratch");
+	assert.equal(env.TMPDIR, fx.base, "the inherited TMPDIR recorded in the ledger is restored");
+	assert.equal(existsSync(ledgerFile(fx, "s-1")), false);
+	// The first instance saw only the reload shutdown and removes nothing more.
+	await first.shutdown("quit");
+	assert.equal(env.TMPDIR, fx.base);
+});
+
+test("S5: startup never removes a scratch of this process that TMPDIR no longer points into", async (t) => {
+	const fx = fixture(t);
+	const env: NodeJS.ProcessEnv = { TMPDIR: fx.base, GENTLE_PI_CONFIG_HOME: fx.configHome };
+	const first = session(fx, { env, factory: await loadInstance("keep-a") });
+	await first.start();
+	const scratch = env.TMPDIR!;
+	writeFileSync(join(scratch, "work.txt"), "x");
+	env.TMPDIR = fx.base;
+	const second = session(fx, { env, factory: await loadInstance("keep-b") });
+	await second.start("reload");
+	assert.ok(existsSync(join(scratch, "work.txt")), "a scratch owned by this pid is never removed at startup");
+	await second.shutdown();
+});
+
 test("S5: a session replacement removes the old scratch and the new session gets its own", async (t) => {
 	const fx = fixture(t);
 	let id = "first";
@@ -210,10 +273,8 @@ test("S4: a successful foreground bash clone or worktree add is recorded with it
 	const s = session(fx);
 	await s.start();
 	const clone = `cd ${fx.work} && git clone -q ${source} copy`;
-	git(fx.work, "clone", "-q", source, "copy");
-	await s.bash(clone);
-	git(source, "worktree", "add", "-q", "-b", "feat", join(fx.work, "wt"));
-	await s.bash(`git -C ${source} worktree add -q -b feat ../wt`);
+	await s.bash(clone, () => git(fx.work, "clone", "-q", source, "copy"));
+	await s.bash(`git -C ${source} worktree add -q -b feat ../wt`, () => git(source, "worktree", "add", "-q", "-b", "feat", join(fx.work, "wt")));
 	const ledger = readLedger(fx, "s-1");
 	assert.deepEqual(ledger.artifacts.map(({ kind, path, command }) => ({ kind, path, command })), [
 		{ kind: "clone", path: join(fx.work, "copy"), command: clone },
@@ -221,7 +282,7 @@ test("S4: a successful foreground bash clone or worktree add is recorded with it
 	]);
 	assert.ok(ledger.artifacts.every((artifact) => !Number.isNaN(Date.parse(artifact.recordedAt))));
 	// The same path is recorded once.
-	await s.bash(clone);
+	await s.bash(clone, () => { rmSync(join(fx.work, "copy"), { recursive: true, force: true }); git(fx.work, "clone", "-q", source, "copy"); });
 	assert.equal(readLedger(fx, "s-1").artifacts.length, 2);
 	await s.shutdown();
 	assert.equal(readLedger(fx, "s-1").scratchDir, null, "the ledger survives shutdown while artifacts remain");
@@ -233,14 +294,37 @@ test("S4: failed, missing, non-bash, and child results are not recorded", async 
 	git(fx.work, "clone", "-q", source, "copy");
 	const s = session(fx);
 	await s.start();
-	await s.bash(`cd ${fx.work} && git clone ${source} copy`, true);
+	await s.bash(`cd ${fx.work} && git clone ${source} failed`, () => git(fx.work, "clone", "-q", source, "failed"), { isError: true });
 	await s.bash(`cd ${fx.work} && git clone ${source} never-created`);
-	await s.bash(`cd ${fx.work} && git clone ${source} copy`, false, "bg_start");
+	await s.bash(`cd ${fx.work} && git clone ${source} background`, () => git(fx.work, "clone", "-q", source, "background"), { toolName: "bg_start" });
+	// A result without its call event has no before-state, so nothing is recorded.
+	git(fx.work, "clone", "-q", source, "no-call");
+	await s.handlers.get("tool_result")?.({ type: "tool_result", toolName: "bash", toolCallId: "unseen", input: { command: `cd ${fx.work} && git clone ${source} no-call` }, content: [], isError: false }, s.ctx);
 	assert.deepEqual(readLedger(fx, "s-1").artifacts, []);
 	const child = session(fx, { child: true, sessionId: "child" });
 	await child.start();
-	await child.bash(`cd ${fx.work} && git clone ${source} copy`);
+	await child.bash(`cd ${fx.work} && git clone ${source} child-copy`, () => git(fx.work, "clone", "-q", source, "child-copy"));
 	assert.equal(existsSync(ledgerFile(fx, "child")), false);
+	await s.shutdown();
+});
+
+test("S4: a clone fallback over an existing user clone records nothing and clean keeps it", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	// The user's own clean, fully pushed clone, made before the session.
+	git(fx.work, "clone", "-q", source, "dir");
+	writeFileSync(join(fx.work, "dir", ".git", "info", "exclude"), "ignored.txt\n");
+	writeFileSync(join(fx.work, "dir", "ignored.txt"), "user data");
+	const s = session(fx);
+	await s.start();
+	await s.bash(`cd ${fx.work} && git clone ${source} dir || (cd dir && git pull)`, () => git(join(fx.work, "dir"), "pull", "-q"));
+	assert.deepEqual(readLedger(fx, "s-1").artifacts, [], "a destination that existed before the command is not the session's");
+	await s.run("clean");
+	assert.equal(s.confirms.length, 0);
+	assert.equal(readFileSync(join(fx.work, "dir", "ignored.txt"), "utf8"), "user data");
+	// Control: the same fallback creating the clone is recorded.
+	await s.bash(`cd ${fx.work} && git clone ${source} fresh || (cd fresh && git pull)`, () => git(fx.work, "clone", "-q", source, "fresh"));
+	assert.deepEqual(readLedger(fx, "s-1").artifacts.map((artifact) => artifact.path), [join(fx.work, "fresh")]);
 	await s.shutdown();
 });
 
@@ -249,8 +333,7 @@ test("S4: a clone into the session directory or an ancestor of it is never recor
 	const source = origin(fx);
 	const s = session(fx);
 	await s.start();
-	git(fx.cwd, "clone", "-q", source, ".");
-	await s.bash(`git clone ${source} .`);
+	await s.bash(`git clone ${source} .`, () => git(fx.cwd, "clone", "-q", source, "."));
 	await s.bash(`git clone ${source} ..`);
 	assert.deepEqual(readLedger(fx, "s-1").artifacts, []);
 	await s.shutdown();
@@ -268,8 +351,7 @@ test("S5: startup sweeps the scratch of dead sessions past the grace period and 
 	const deadB = session(fx, { sessionId: "dead-b" });
 	await deadB.start();
 	const scratchB = deadB.env.TMPDIR!;
-	git(fx.work, "clone", "-q", source, "kept");
-	await deadB.bash(`cd ${fx.work} && git clone ${source} kept`);
+	await deadB.bash(`cd ${fx.work} && git clone ${source} kept`, () => git(fx.work, "clone", "-q", source, "kept"));
 	// Neither session shut down (crash). A later session finds both owners dead.
 	const next = session(fx, { sessionId: "next", isProcessAlive: () => false, now: later });
 	await next.start();
@@ -320,14 +402,52 @@ test("S5: the sweep refuses a symlinked scratch, a scratch outside the recorded 
 	await s.shutdown();
 });
 
+test("S5: a forged ledger naming a session-prefixed directory outside its recorded temp root is refused", async (t) => {
+	const fx = fixture(t);
+	const forged = join(fx.work, `${SCRATCH_PREFIX}evil-abc`);
+	mkdirSync(forged);
+	writeFileSync(join(forged, "keep.txt"), "precious");
+	writeForeignLedger(fx, { sessionId: "evil", tempRoot: fx.base, scratchDir: forged });
+	const rootless = join(fx.base, `${SCRATCH_PREFIX}rootless-abc`);
+	mkdirSync(rootless);
+	writeForeignLedger(fx, { sessionId: "rootless", tempRoot: null, scratchDir: rootless });
+	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => false, now: later });
+	await s.start();
+	await s.run("clean");
+	assert.equal(readFileSync(join(forged, "keep.txt"), "utf8"), "precious");
+	assert.ok(existsSync(rootless), "a ledger without a recorded temp root names no removable scratch");
+	assert.equal(readLedger(fx, "evil").scratchDir, forged);
+	await s.shutdown();
+});
+
+test("S5: a recorded temp root inside the home is accepted only when it is the session's own temp root", async (t) => {
+	const fx = fixture(t);
+	const home = process.env.HOME;
+	process.env.HOME = fx.root;
+	t.after(() => { if (home === undefined) delete process.env.HOME; else process.env.HOME = home; });
+	// fx.base and fx.work are now inside the home; fx.base is this session's inherited TMPDIR.
+	const foreign = join(fx.work, `${SCRATCH_PREFIX}home-abc`);
+	mkdirSync(foreign);
+	writeForeignLedger(fx, { sessionId: "home", tempRoot: fx.work, scratchDir: foreign });
+	const dead = join(fx.base, `${SCRATCH_PREFIX}dead-abc`);
+	mkdirSync(dead);
+	writeForeignLedger(fx, { sessionId: "dead", tempRoot: fx.base, scratchDir: dead });
+	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => false, now: later });
+	await s.start();
+	assert.ok(existsSync(foreign), "a forged root inside the home is refused");
+	assert.equal(existsSync(dead), false, "an ended session under the same temp root is swept");
+	const scratch = s.env.TMPDIR!;
+	await s.shutdown();
+	assert.equal(existsSync(scratch), false, "the session's own scratch under a home temp root is removed");
+});
+
 test("S5: shutdown keeps a scratch that holds a recorded clone", async (t) => {
 	const fx = fixture(t);
 	const source = origin(fx);
 	const s = session(fx);
 	await s.start();
 	const scratch = s.env.TMPDIR!;
-	git(scratch, "clone", "-q", source, "inside");
-	await s.bash(`cd ${scratch} && git clone ${source} inside`);
+	await s.bash(`cd ${scratch} && git clone ${source} inside`, () => git(scratch, "clone", "-q", source, "inside"));
 	await s.shutdown();
 	assert.ok(existsSync(join(scratch, "inside", "a.txt")));
 	assert.equal(readLedger(fx, "s-1").scratchDir, scratch);
@@ -338,7 +458,6 @@ test("S5: shutdown keeps a scratch that holds a recorded clone", async (t) => {
 test("S6: list shows the session scratch with its size and the artifacts of this and dead sessions only", async (t) => {
 	const fx = fixture(t);
 	const source = origin(fx);
-	git(fx.work, "clone", "-q", source, "mine");
 	git(fx.work, "clone", "-q", source, "dead");
 	git(fx.work, "clone", "-q", source, "live");
 	writeForeignLedger(fx, { sessionId: "dead-1", pid: 1_111_111, artifacts: [{ kind: "clone", path: join(fx.work, "dead"), command: "git clone", recordedAt: new Date().toISOString() }] });
@@ -346,7 +465,7 @@ test("S6: list shows the session scratch with its size and the artifacts of this
 	const s = session(fx, { isProcessAlive: (pid) => pid === 2_222_222 });
 	await s.start();
 	writeFileSync(join(s.env.TMPDIR!, "f.bin"), Buffer.alloc(2048));
-	await s.bash(`cd ${fx.work} && git clone ${source} mine`);
+	await s.bash(`cd ${fx.work} && git clone ${source} mine`, () => git(fx.work, "clone", "-q", source, "mine"));
 	const out = await s.run("list");
 	assert.match(out, new RegExp(`Session scratch: ${s.env.TMPDIR!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(2\\.0 KiB\\)`));
 	assert.match(out, /clone .*\/work\/mine \(this session\)/);
@@ -364,22 +483,21 @@ test("S6: clean removes scratch without asking and, after one confirmation, only
 	const scratch = s.env.TMPDIR!;
 	writeFileSync(join(scratch, "junk.txt"), "x");
 	mkdirSync(join(scratch, "gentle-pi-subagent-tmp-live"));
-	const add = async (args: string[], command: string) => { git(fx.work, ...args); await s.bash(`cd ${fx.work} && ${command}`); };
+	const add = async (args: string[], command: string) => { await s.bash(`cd ${fx.work} && ${command}`, () => git(fx.work, ...args)); };
 	await add(["clone", "-q", source, "pushed"], `git clone ${source} pushed`);
 	await add(["clone", "-q", source, "unpushed"], `git clone ${source} unpushed`);
 	git(join(fx.work, "unpushed"), "commit", "-q", "--allow-empty", "-m", "local");
 	await add(["clone", "-q", source, "dirty-clone"], `git clone ${source} dirty-clone`);
 	writeFileSync(join(fx.work, "dirty-clone", "new.txt"), "x");
-	git(source, "worktree", "add", "-q", "-b", "clean-wt", join(fx.work, "wt-clean"));
-	await s.bash(`cd ${source} && git worktree add -b clean-wt ../wt-clean`);
-	git(source, "worktree", "add", "-q", "-b", "dirty-wt", join(fx.work, "wt-dirty"));
-	await s.bash(`cd ${source} && git worktree add -b dirty-wt ../wt-dirty`);
+	await s.bash(`cd ${source} && git worktree add -b clean-wt ../wt-clean`, () => git(source, "worktree", "add", "-q", "-b", "clean-wt", join(fx.work, "wt-clean")));
+	await s.bash(`cd ${source} && git worktree add -b dirty-wt ../wt-dirty`, () => git(source, "worktree", "add", "-q", "-b", "dirty-wt", join(fx.work, "wt-dirty")));
 	writeFileSync(join(fx.work, "wt-dirty", "a.txt"), "changed\n");
 	git(fx.work, "clone", "-q", source, "unrecorded");
 	const out = await s.run("clean");
 	assert.equal(s.confirms.length, 1);
 	assert.match(s.confirms[0], /pushed/);
 	assert.match(s.confirms[0], /wt-clean/);
+	assert.match(s.confirms[0], /ignored files inside these paths are deleted too/);
 	assert.doesNotMatch(s.confirms[0], /work\/(unpushed|dirty-clone|wt-dirty)/);
 	assert.equal(existsSync(join(fx.work, "pushed")), false);
 	assert.equal(existsSync(join(fx.work, "wt-clean")), false);
@@ -401,22 +519,21 @@ test("S6: clean removes scratch without asking and, after one confirmation, only
 test("S6: a declined confirmation keeps every artifact; without UI clean removes scratch only and reports artifacts", async (t) => {
 	const fx = fixture(t);
 	const source = origin(fx);
-	git(fx.work, "clone", "-q", source, "pushed");
 	const declined = session(fx, { confirm: false });
 	await declined.start();
-	await declined.bash(`cd ${fx.work} && git clone ${source} pushed`);
+	await declined.bash(`cd ${fx.work} && git clone ${source} pushed`, () => git(fx.work, "clone", "-q", source, "pushed"));
 	await declined.run("clean");
 	assert.ok(existsSync(join(fx.work, "pushed", "a.txt")));
 	await declined.shutdown();
 	const headless = session(fx, { hasUI: false, sessionId: "headless" });
 	await headless.start();
 	writeFileSync(join(headless.env.TMPDIR!, "junk.txt"), "x");
-	await headless.bash(`cd ${fx.work} && git clone ${source} pushed`);
+	await headless.bash(`cd ${fx.work} && git clone ${source} headless-pushed`, () => git(fx.work, "clone", "-q", source, "headless-pushed"));
 	const out = await headless.run("clean");
 	assert.equal(headless.confirms.length, 0);
-	assert.ok(existsSync(join(fx.work, "pushed", "a.txt")));
+	assert.ok(existsSync(join(fx.work, "headless-pushed", "a.txt")));
 	assert.equal(existsSync(join(headless.env.TMPDIR!, "junk.txt")), false);
-	assert.match(out, /pushed/);
+	assert.match(out, /headless-pushed/);
 	await headless.shutdown();
 });
 
@@ -424,10 +541,9 @@ test("S6: clean refuses a recorded clone replaced by a symlink and leaves live s
 	const fx = fixture(t);
 	const source = origin(fx);
 	git(fx.work, "clone", "-q", source, "real");
-	git(fx.work, "clone", "-q", source, "copy");
 	const s = session(fx, { isProcessAlive: (pid) => pid === 3_333_333 });
 	await s.start();
-	await s.bash(`cd ${fx.work} && git clone ${source} copy`);
+	await s.bash(`cd ${fx.work} && git clone ${source} copy`, () => git(fx.work, "clone", "-q", source, "copy"));
 	renameSync(join(fx.work, "copy"), join(fx.work, "moved"));
 	symlinkSync(join(fx.work, "real"), join(fx.work, "copy"), "dir");
 	git(fx.work, "clone", "-q", source, "theirs");
@@ -449,8 +565,7 @@ test("S6: clean keeps a detached worktree whose commits are on no branch", async
 	const source = origin(fx);
 	const s = session(fx);
 	await s.start();
-	git(source, "worktree", "add", "-q", "--detach", join(fx.work, "detached"));
-	await s.bash(`cd ${source} && git worktree add --detach ../detached`);
+	await s.bash(`cd ${source} && git worktree add --detach ../detached`, () => git(source, "worktree", "add", "-q", "--detach", join(fx.work, "detached")));
 	git(join(fx.work, "detached"), "commit", "-q", "--allow-empty", "-m", "orphan");
 	const out = await s.run("clean");
 	assert.equal(s.confirms.length, 0);
@@ -474,9 +589,10 @@ test("S8: the reference documents the scratch dir, ledger, automatic cleanup, sw
 	const section = reference.split("### Session scratch and artifact ledger\n")[1]?.split("\n### ")[0] ?? "";
 	for (const term of [
 		"`gentle-pi-session-<session id>-XXXXXX`", "`TMPDIR`", "`<config home>/scratch/<session id>.json`", "atomically",
-		"`version`", "`sessionId`", "`pid`", "`processStartedAt`", "`cwd`", "`scratchDir`", "`artifacts`", "`git clone ... [<dir>]`", "`git worktree add ... <path>`",
-		"At session shutdown", "older than one hour", "never follows symlinks",
-		"`/gentle:scratch list`", "`/gentle:scratch clean`", "no uncommitted changes and no unpushed commits", "`git worktree remove`", "Without a UI",
+		"`version`", "`sessionId`", "`pid`", "`processStartedAt`", "`cwd`", "`tempRoot`", "`inherited`", "`scratchDir`", "`artifacts`", "`git clone ... [<dir>]`", "`git worktree add ... <path>`",
+		"did not exist before the command", "recovers the live scratch from the ledger", "never removes a scratch of its own process",
+		"At session shutdown", "older than one hour", "never follows symlinks", "directly under the temp root its ledger recorded",
+		"`/gentle:scratch list`", "`/gentle:scratch clean`", "no uncommitted changes and no unpushed commits", "ignored files inside them are deleted too", "`git worktree remove`", "Without a UI",
 	]) assert.ok(section.includes(term), `scratch reference missing ${term}`);
 	assert.match(reference, /\| `\/gentle:scratch` +\| Lists \(`list`, the default\) or cleans \(`clean`\)/);
 	for (const line of SCRATCH_COMMAND_USAGE.split("\n").slice(1)) {

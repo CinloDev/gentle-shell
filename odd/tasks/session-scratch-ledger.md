@@ -47,7 +47,7 @@ gentle-shell#2290). Runner: `pnpm test`.
 
 | ID | Specs | Work | Route | Status |
 |---|---|---|---|---|
-| T1 | S2-S8 | session scratch, ledger, capture, cleanup, command, prompt, docs, tests | delegated (context backstop) | implemented, uncommitted (L2-L3); verifier and native review pending |
+| T1 | S2-S8 | session scratch, ledger, capture, cleanup, command, prompt, docs, tests | delegated (context backstop) | committed (L2-L3); correction batch for L4 uncommitted (L5-L9); re-verification and native review pending |
 
 ## Log
 
@@ -75,3 +75,50 @@ gentle-shell#2290). Runner: `pnpm test`.
   home, ledger cwd, or process cwd (or an ancestor) are never recorded or removed. A resumed session id carries the
   artifacts of its earlier ledger. `assets/orchestrator-verification.md` (outside the surfaces) still says the parent
   removes verifier scratch paths; verifier scratch now lives in the child TMPDIR the runner removes.
+- L4 (2026-10-15) Independent verifier: 2 blockers, 3 advisories. B1 `/reload` deletes the live scratch: Pi reloads
+  extensions with jiti `moduleCache:false` after `clearExtensionCache()`, so module state (the `activeSessions`
+  WeakMap) is new; `startSession(reason=reload)` creates a nested scratch and `removeSessionScratch(previous)` (same
+  pid) deletes the old one with its contents; the reload test passed only because it reused the module instance.
+  B2 `git clone URL dir || (cd dir && git pull)` over an existing user clone exits 0, S4 records `dir`, and `clean`
+  removes the user's repo (ignored files included) after one confirmation. Advisories: a forged ledger can name any
+  `.../gentle-pi-session-<id>-*` path outside a temp root; shutdown removes nested quarantined subagent TMPDIRs
+  (win32 risk; POSIX quarantine follows SIGKILL); assets/orchestrator-verification.md still says the parent removes
+  verifier scratch. Branch rebased onto origin/main after gentle-shell#2290 merged (`4372ff2d`).
+- L5 (evidence, T1 B1) The ledger now records `tempRoot` (the real dir the scratch was created directly under) and
+  `inherited` (temp variables before the session, `null` when unset; shutdown restores them from the ledger).
+  `session_start` reuses the ledger's scratch when the ledger names this pid, its scratch passes the removal checks,
+  and `TMPDIR` is that dir or inside it; startup never removes a scratch whose ledger names this pid. RED:
+  "S2/S5: a reload into a fresh module instance recovers the live scratch from the ledger and quit removes it once"
+  (two module instances via `import("../extensions/session-scratch.ts?instance=...")`) failed with `TMPDIR` nested
+  (`.../gentle-pi-session-s-1-pg5PtU/gentle-pi-session-s-1-jlVjJB`); "S5: startup never removes a scratch of this
+  process that TMPDIR no longer points into" failed (`work.txt` gone). GREEN after the fix; the same-instance reload
+  test is kept. TRIANGULATE: disabling the ledger reuse or restoring the same-pid removal fails exactly the
+  corresponding test (restored).
+- L6 (evidence, T1 B2) Capture is split: `tool_call` resolves the clone/worktree destinations of a foreground `bash`
+  command and keeps, by tool call id, only those that do not exist (ENOENT); `tool_result` records a kept one only
+  when the command succeeded and it is a directory afterwards. A result without its call records nothing. The clean
+  confirmation now says ignored files inside the listed paths are deleted too. RED: "S4: a clone fallback over an
+  existing user clone records nothing and clean keeps it" failed (the user's `dir` was recorded); "S4: failed,
+  missing, non-bash, and child results are not recorded" failed (a result without a call recorded `no-call`); the
+  S6 clean test failed on the confirmation text. GREEN after the fix. TRIANGULATE: treating an existing
+  destination as absent fails the fallback test (restored). The test helper now emits `tool_call`, runs the command's
+  effect, then `tool_result`; existing tests create their clones inside that effect.
+- L7 (evidence, T1 A1) A scratch dir is accepted for removal only when `dirname(scratchDir)` equals the ledger's
+  `tempRoot`, and a `tempRoot` inside `$HOME` only when it equals the asking session's own recorded temp root
+  (interpretation of "unless it equals the ledger's recorded root": a forged ledger can forge its root too, so a
+  home-internal root is trusted only when it is ours). A ledger without `tempRoot` names no removable scratch. RED:
+  "S5: a forged ledger naming a session-prefixed directory outside its recorded temp root is refused" (ENOENT:
+  `.../work/gentle-pi-session-evil-abc/keep.txt` removed) and "S5: a recorded temp root inside the home is accepted
+  only when it is the session's own temp root" failed; GREEN after the fix. TRIANGULATE: dropping the parent check,
+  the missing-root check, or the home check each fails its test (restored).
+- L8 (evidence, T1 A2/S8) `assets/orchestrator-verification.md`: "after the verdict, the parent removes the scratch
+  paths the verifier reports" became "the runtime removes each subagent's own TMPDIR, which holds that copy" (7496 to
+  7489 B, budget 7500); `tests/test-scratch-contract.test.ts` pins the new text and the absence of the old (RED:
+  "S10: scratch outside the worktree is removed after use" failed on the missing text, GREEN after). Reference:
+  `tempRoot`, `inherited`, reload recovery, before/after capture, the temp-root rule, and the ignored-files warning;
+  the S8 test pins them (RED: missing `tempRoot`; GREEN after). Checks: `tests/session-scratch.test.ts` 27/27 and
+  `tests/test-scratch-contract.test.ts` 4/4; `pnpm test` all three stages PASS (unit 6961 tests, 6889 pass, 0 fail,
+  72 skipped); `pnpm -s typecheck` 0 diagnostics; `node scripts/verify-package-files.mjs` passed (214 files).
+- L9 (decision, T1) Quarantine advisory documented only: shutdown removing a nested quarantined subagent TMPDIR is a
+  win32 risk (POSIX quarantine only follows SIGKILL); not changed in this batch. Known residual: a scratch of this
+  pid that `TMPDIR` no longer points into is kept, not tracked, when the same session id starts a new scratch.
