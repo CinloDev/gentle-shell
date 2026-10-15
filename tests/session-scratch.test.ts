@@ -610,6 +610,25 @@ test("S6: clean checks a clone again after the confirmation and keeps it if it c
 	assert.match(out, /late: uncommitted changes/);
 });
 
+// PR #2300 review: a different directory put at the recorded path while the
+// confirmation was open is not the one that was checked, so it stays.
+test("S6: clean keeps a directory that replaced the checked clone at the same path", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	const clone = join(fx.work, "swap");
+	const s = session(fx, { duringConfirm: () => {
+		renameSync(clone, join(fx.work, "swap-old"));
+		git(fx.work, "clone", "-q", source, "swap");
+		writeFileSync(join(clone, ".git", "marker"), "replacement\n");
+	} });
+	await s.start();
+	await s.bash(`cd ${fx.work} && git clone ${source} swap`, () => git(fx.work, "clone", "-q", source, "swap"));
+	const out = await s.run("clean");
+	assert.equal(s.confirms.length, 1, "the checked clone was offered");
+	assert.equal(readFileSync(join(clone, ".git", "marker"), "utf8"), "replacement\n", "the replacement stays");
+	assert.match(out, /swap: replaced after the check/);
+});
+
 // PR #2300 review: a recorded path whose parent became a file (ENOTDIR) is gone, not foreign.
 test("S6: a recorded clone whose parent is no longer a directory is reported gone and dropped", async (t) => {
 	const fx = fixture(t);

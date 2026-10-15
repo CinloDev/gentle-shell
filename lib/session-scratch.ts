@@ -334,6 +334,8 @@ export async function checkArtifact(artifact: ScratchArtifact, keep: readonly st
 		if (code === "ENOENT" || code === "ENOTDIR") return { state: "missing" };
 	}
 	if (!sameDirectory(path)) return { state: "kept", reason: "not the recorded directory" };
+	// Taken before any Git call, so a directory swapped in during the checks is not the one removed.
+	const identity = identityOf(path);
 	if (isProtectedPath(path, keep)) return { state: "kept", reason: "protected directory" };
 	const top = await git(["rev-parse", "--show-toplevel"], path);
 	if (top === undefined || resolve(top) !== path) return { state: "kept", reason: "not a Git work tree root" };
@@ -348,13 +350,13 @@ export async function checkArtifact(artifact: ScratchArtifact, keep: readonly st
 		// Every ref, stashes included, must already be on a remote.
 		const local = await git(["rev-list", "-n", "1", "--all", "--not", "--remotes"], path);
 		if (local === undefined) return { state: "kept", reason: "Git history unavailable" };
-		return local === "" ? { state: "removable", identity: identityOf(path) } : { state: "kept", reason: "commits not on any remote" };
+		return local === "" ? { state: "removable", identity } : { state: "kept", reason: "commits not on any remote" };
 	}
 	const detached = await git(["rev-list", "-n", "1", "HEAD", "--not", "--branches", "--tags", "--remotes"], path);
 	if (detached === undefined) return { state: "kept", reason: "Git history unavailable" };
 	if (detached !== "") return { state: "kept", reason: "commits on no branch" };
 	const commonDir = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], path);
-	return commonDir ? { state: "removable", commonDir, identity: identityOf(path) } : { state: "kept", reason: "Git repository unavailable" };
+	return commonDir ? { state: "removable", commonDir, identity } : { state: "kept", reason: "Git repository unavailable" };
 }
 
 /** Removes a checked artifact: a worktree through git (which refuses dirty ones), a clone by its recorded path only. */
