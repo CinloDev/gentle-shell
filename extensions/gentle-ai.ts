@@ -2,7 +2,7 @@ import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
-import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
+import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -10364,6 +10364,12 @@ function createGentleAiExtensionForTesting(
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
 			if (writerScopeDenied) return writerScopeDenied;
+			if (primaryToolCall) {
+				const launch = event.input as Record<string, unknown>;
+				const root = typeof launch.workspace_root === "string" ? launch.workspace_root : typeof launch.repository_root === "string" ? launch.repository_root : ctx.cwd;
+				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextTokens: ctx.getContextUsage?.()?.tokens });
+				if (undocumentedWriter) return undocumentedWriter;
+			}
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;
