@@ -1,0 +1,252 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { lstatSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { gentlePiConfigHome } from "../lib/agent-home.ts";
+import {
+	checkArtifact,
+	createSessionScratch,
+	deleteLedger,
+	directorySize,
+	formatSize,
+	gitArtifactTargets,
+	isProcessAlive,
+	isProtectedPath,
+	LEDGER_VERSION,
+	ledgerPath,
+	listLedgers,
+	readLedger,
+	removeArtifact,
+	removeSessionScratch,
+	SWEEP_GRACE_MS,
+	type ArtifactCheck,
+	type ScratchArtifact,
+	type ScratchLedger,
+	writeLedger,
+} from "../lib/session-scratch.ts";
+
+// Session scratch and artifact ledger (odd/tasks/session-scratch-ledger.md):
+// the primary session gets its own TMPDIR, the runtime records the clones and
+// worktrees its bash commands create, removes the scratch at shutdown (and the
+// scratch of crashed sessions at the next start), and /gentle:scratch lists or
+// cleans the rest. Delegated children (GENTLE_PI_AGENTS_CHILD=1) do none of it:
+// their own TMPDIR comes from the runner and nests under the parent's scratch.
+
+export const SCRATCH_COMMAND_USAGE = [
+	"Usage: /gentle:scratch [list|clean]",
+	"  list   this session's scratch dir with its size, and the clones and worktrees recorded by this and ended sessions",
+	"  clean  remove scratch dirs; after one confirmation, remove recorded worktrees and clones with no uncommitted changes and no unpushed commits",
+].join("\n");
+
+export interface SessionScratchOptions {
+	env?: NodeJS.ProcessEnv;
+	configHome?: string;
+	now?: () => number;
+	isProcessAlive?: (pid: number) => boolean;
+	graceMs?: number;
+	platform?: NodeJS.Platform;
+}
+
+interface ActiveSession {
+	sessionId: string;
+	path: string;
+	ledger: ScratchLedger;
+	inherited: Record<string, string | undefined>;
+}
+
+// Keyed by the environment the session scratch was applied to: /reload re-runs
+// this factory against the same process.env and must find the live session.
+const activeSessions = new WeakMap<NodeJS.ProcessEnv, ActiveSession>();
+
+export function createSessionScratchExtension(options: SessionScratchOptions = {}): (pi: ExtensionAPI) => void {
+	const env = options.env ?? process.env;
+	const now = options.now ?? Date.now;
+	const alive = options.isProcessAlive ?? isProcessAlive;
+	const graceMs = options.graceMs ?? SWEEP_GRACE_MS;
+	const tempVariables = (options.platform ?? process.platform) === "win32" ? ["TMPDIR", "TMP", "TEMP"] : ["TMPDIR"];
+	const configHome = () => options.configHome ?? gentlePiConfigHome(env);
+
+	const persist = (path: string, ledger: ScratchLedger) => {
+		try {
+			if (ledger.scratchDir === null && ledger.artifacts.length === 0) deleteLedger(path);
+			else writeLedger(path, ledger);
+		} catch { /* Best effort: an unwritable config home keeps the session running. */ }
+	};
+	// Paths the runtime never records or removes, whatever a ledger says.
+	const protectedDirs = (ledger: ScratchLedger) => [configHome(), ledger.cwd, process.cwd()];
+
+	const endSession = (session: ActiveSession) => {
+		const { ledger } = session;
+		const removal = removeSessionScratch(ledger, ledger.artifacts.map((artifact) => artifact.path));
+		if (removal === "removed" || removal === "absent") ledger.scratchDir = null;
+		for (const [key, value] of Object.entries(session.inherited)) {
+			if (value === undefined) delete env[key];
+			else env[key] = value;
+		}
+		persist(session.path, ledger);
+		activeSessions.delete(env);
+	};
+
+	// S5(b): scratch of ended sessions past the grace period; their artifacts stay for the command.
+	const sweep = (ownPath: string) => {
+		for (const { path, ledger, mtimeMs } of listLedgers(configHome())) {
+			if (path === ownPath || alive(ledger.pid) || now() - mtimeMs < graceMs) continue;
+			const artifacts = ledger.artifacts.filter((artifact) => { try { lstatSync(artifact.path); return true; } catch { return false; } });
+			const removal = ledger.scratchDir === null ? "absent" : removeSessionScratch(ledger, artifacts.map((artifact) => artifact.path));
+			persist(path, { ...ledger, scratchDir: removal === "removed" || removal === "absent" ? null : ledger.scratchDir, artifacts });
+		}
+	};
+
+	const startSession = (ctx: ExtensionContext, reason: string) => {
+		const sessionId = ctx.sessionManager.getSessionId?.();
+		if (!sessionId) return;
+		const current = activeSessions.get(env);
+		if (current?.sessionId === sessionId && reason === "reload") return;
+		if (current) endSession(current);
+		const path = ledgerPath(configHome(), sessionId);
+		const inherited = Object.fromEntries(tempVariables.map((key) => [key, env[key]]));
+		const inheritedTmp = env.TMPDIR?.trim();
+		const scratchDir = createSessionScratch(inheritedTmp ? inheritedTmp : tmpdir(), sessionId);
+		if (scratchDir) for (const key of tempVariables) env[key] = scratchDir;
+		// A resumed session keeps the artifacts an earlier run of it recorded.
+		const previous = readLedger(path);
+		const ledger: ScratchLedger = {
+			version: LEDGER_VERSION,
+			sessionId,
+			pid: process.pid,
+			processStartedAt: new Date(now() - process.uptime() * 1000).toISOString(),
+			cwd: ctx.cwd,
+			scratchDir: scratchDir ?? null,
+			artifacts: previous?.artifacts ?? [],
+		};
+		if (previous?.scratchDir && previous.scratchDir !== scratchDir && (previous.pid === process.pid || !alive(previous.pid))) {
+			removeSessionScratch(previous, ledger.artifacts.map((artifact) => artifact.path));
+		}
+		activeSessions.set(env, { sessionId, path, ledger, inherited });
+		persist(path, ledger);
+		sweep(path);
+	};
+
+	// S4: the destinations of a successful foreground clone or worktree add.
+	const capture = (command: string, ctx: ExtensionContext) => {
+		const session = activeSessions.get(env);
+		if (!session) return;
+		const { ledger } = session;
+		let changed = false;
+		for (const target of gitArtifactTargets(command, ctx.cwd)) {
+			let path: string;
+			try {
+				if (!lstatSync(target.path).isDirectory()) continue;
+				path = realpathSync(target.path);
+			} catch { continue; }
+			if (isProtectedPath(path, protectedDirs(ledger)) || ledger.artifacts.some((artifact) => artifact.path === path)) continue;
+			ledger.artifacts.push({ kind: target.kind, path, command, recordedAt: new Date(now()).toISOString() });
+			changed = true;
+		}
+		if (changed) persist(session.path, ledger);
+	};
+
+	const endedLedgers = (ownPath: string | undefined) =>
+		listLedgers(configHome()).filter(({ path, ledger }) => path !== ownPath && !alive(ledger.pid));
+
+	const describe = (artifact: ScratchArtifact) => `${artifact.kind} ${artifact.path}`;
+
+	const list = (): string => {
+		const session = activeSessions.get(env);
+		const lines: string[] = [];
+		const own = session?.ledger;
+		lines.push(own?.scratchDir
+			? `Session scratch: ${own.scratchDir} (${formatSize(directorySize(own.scratchDir))})`
+			: `Session scratch: none (TMPDIR ${env.TMPDIR ?? tmpdir()})`);
+		const ended = endedLedgers(session?.path);
+		for (const { ledger } of ended) if (ledger.scratchDir) lines.push(`Ended-session scratch: ${ledger.scratchDir} (session ${ledger.sessionId})`);
+		const artifacts = [
+			...(own?.artifacts ?? []).map((artifact) => `  ${describe(artifact)} (this session)`),
+			...ended.flatMap(({ ledger }) => ledger.artifacts.map((artifact) => `  ${describe(artifact)} (session ${ledger.sessionId}, ended)`)),
+		];
+		lines.push(artifacts.length > 0 ? "Recorded clones and worktrees:" : "Recorded clones and worktrees: none", ...artifacts);
+		return lines.join("\n");
+	};
+
+	const clean = async (ctx: ExtensionContext): Promise<string> => {
+		const session = activeSessions.get(env);
+		const groups = [
+			...(session ? [{ path: session.path, ledger: session.ledger, own: true }] : []),
+			...endedLedgers(session?.path).map(({ path, ledger }) => ({ path, ledger, own: false })),
+		];
+		const lines: string[] = [];
+		const entries = groups.flatMap((group) => group.ledger.artifacts.map((artifact) => ({ group, artifact })));
+		const drop = (entry: (typeof entries)[number]) => {
+			entry.group.ledger.artifacts = entry.group.ledger.artifacts.filter((artifact) => artifact !== entry.artifact);
+		};
+		if (entries.length > 0 && !ctx.hasUI) {
+			lines.push("Recorded clones and worktrees kept (no UI to confirm their removal):", ...entries.map(({ artifact }) => `  ${describe(artifact)}`));
+		} else if (entries.length > 0) {
+			const checked = await Promise.all(entries.map(async (entry) => ({ ...entry, check: await checkArtifact(entry.artifact, protectedDirs(entry.group.ledger)) })));
+			const removable: Array<(typeof entries)[number] & { check: Extract<ArtifactCheck, { state: "removable" }> }> = [];
+			for (const entry of checked) {
+				if (entry.check.state === "missing") { drop(entry); lines.push(`Already gone: ${describe(entry.artifact)}`); }
+				else if (entry.check.state === "kept") lines.push(`Kept ${describe(entry.artifact)}: ${entry.check.reason}`);
+				else removable.push(entry as (typeof removable)[number]);
+			}
+			if (removable.length > 0) {
+				const confirmed = await ctx.ui.confirm(
+					`Remove ${removable.length} recorded clone${removable.length === 1 ? "" : "s"}/worktree${removable.length === 1 ? "" : "s"}?`,
+					`No uncommitted changes and no unpushed commits:\n${removable.map(({ artifact }) => `  ${describe(artifact)}`).join("\n")}`,
+				);
+				for (const entry of removable) {
+					if (!confirmed) { lines.push(`Kept ${describe(entry.artifact)}: not confirmed`); continue; }
+					const failure = await removeArtifact(entry.artifact, entry.check);
+					if (failure) lines.push(`Kept ${describe(entry.artifact)}: ${failure}`);
+					else { drop(entry); lines.push(`Removed ${describe(entry.artifact)}`); }
+				}
+			}
+		}
+		// Scratch goes without asking; the live session keeps its TMPDIR and empties it.
+		for (const group of groups) {
+			const { ledger } = group;
+			if (!ledger.scratchDir) continue;
+			const dir = ledger.scratchDir;
+			const removal = removeSessionScratch(ledger, ledger.artifacts.map((artifact) => artifact.path), { contentsOnly: group.own });
+			if (!group.own && (removal === "removed" || removal === "absent")) ledger.scratchDir = null;
+			if (removal === "refused") lines.push(`Kept scratch ${dir}: not a directory this runtime created`);
+			else if (removal === "kept") lines.push(`${group.own ? "Emptied" : "Kept"} scratch ${dir}${group.own ? " except live subagent scratch and recorded artifacts" : ": holds a recorded artifact"}`);
+			else lines.push(`${group.own ? "Emptied" : "Removed"} scratch ${dir}`);
+		}
+		for (const group of groups) persist(group.path, group.ledger);
+		return lines.length > 0 ? lines.join("\n") : "Nothing to clean.";
+	};
+
+	return (pi: ExtensionAPI) => {
+		if (env.GENTLE_PI_AGENTS_CHILD === "1") return;
+		pi.on("session_start", (event, ctx) => {
+			try { startSession(ctx, (event as { reason?: string }).reason ?? "startup"); } catch { /* The session keeps the inherited TMPDIR. */ }
+		});
+		pi.on("session_shutdown", (event) => {
+			// A reload continues the same session and keeps its scratch.
+			if ((event as { reason?: string }).reason === "reload") return;
+			const session = activeSessions.get(env);
+			try { if (session) endSession(session); } catch { /* best effort */ }
+		});
+		pi.on("tool_result", (event, ctx) => {
+			// Only foreground bash: a background job's result arrives before its clone exists.
+			const command = (event.input as { command?: unknown } | undefined)?.command;
+			if (event.toolName !== "bash" || event.isError !== false || typeof command !== "string") return undefined;
+			try { capture(command, ctx); } catch { /* Capture never changes a tool result. */ }
+			return undefined;
+		});
+		pi.registerCommand("gentle:scratch", {
+			description: "List or clean this session's scratch dir and the recorded clones and worktrees (list|clean).",
+			getArgumentCompletions: (prefix) => ["list", "clean"].filter((action) => action.startsWith(prefix.trim())).map((action) => ({ value: action, label: action })),
+			handler: async (args, ctx) => {
+				const action = args.trim() || "list";
+				if (action === "list") ctx.ui.notify(list(), "info");
+				else if (action === "clean") ctx.ui.notify(await clean(ctx), "info");
+				else ctx.ui.notify(SCRATCH_COMMAND_USAGE, "warning");
+			},
+		});
+	};
+}
+
+export default function sessionScratch(pi: ExtensionAPI): void {
+	createSessionScratchExtension()(pi);
+}
