@@ -2268,7 +2268,10 @@ test("default Node spawn adapter distinguishes IPC-only and permission-capable c
 			assert.equal(captured[index]?.command, "/fixture/pi");
 			assert.deepEqual(captured[index]?.args, args);
 			assert.equal(captured[index]?.options.cwd, permissionChannel ? canonicalGitCwd : nonGitCwd);
-			assert.deepEqual(captured[index]?.options.env, { PATH: "/bin", FIXTURE: fixture, GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME, GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: ownedIpc, ...(permissionChannel ? { GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3" } : {}), [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message" });
+			const scratch = captured[index]?.options.env.TMPDIR;
+			assert.match(scratch ?? "", /gentle-pi-subagent-tmp-/, "each child receives its own TMPDIR");
+			const scratchEnv = process.platform === "win32" ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : { TMPDIR: scratch };
+			assert.deepEqual(captured[index]?.options.env, { PATH: "/bin", FIXTURE: fixture, GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME, GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: ownedIpc, ...(permissionChannel ? { GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3" } : {}), [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message", ...scratchEnv });
 			assert.equal(captured[index]?.options.shell, undefined, "the adapter does not invoke a shell");
 			assert.equal(captured[index]?.options.windowsHide, true, "the adapter always hides a Windows console");
 			assert.equal(captured[index]?.options.detached, process.platform !== "win32", "the adapter forwards the runner's platform selection");

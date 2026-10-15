@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs, { existsSync, readFileSync, statSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
 import { basename, dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import { AGENT_MODE, parseAgentsConfig, resolveAgentProfile, type AgentDefinition } from "../lib/agents-config.ts";
@@ -1044,10 +1045,13 @@ for (const [platform, detached] of [["win32", false], ["linux", true]] as const)
 	await tick();
 	const ownedIpc = launches[0]?.options.env.GENTLE_PI_AGENTS_OWNED_IPC;
 	assert.match(ownedIpc ?? "", /^\d+-[a-z0-9]+$/, "the runner creates an opaque owned-IPC marker");
+	const scratch = launches[0]?.options.env.TMPDIR;
+	assert.match(scratch ?? "", /gentle-pi-subagent-tmp-/, "the child gets its own TMPDIR");
+	const scratchEnv = platform === "win32" ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : { TMPDIR: scratch };
 	assert.deepEqual(launches, [{
 		command: "pi-fixture",
 		args: ["--from-host", "--mode", "rpc", "--session-dir", "/sessions", "--model", "openai-codex/gpt-5.6-terra:high", "--tools", "read,grep,subagent_parent_message", "--append-system-prompt", "You map things."],
-		options: { cwd: "/repo", env: { PATH: "/fixture", KEEP: "yes", GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: ownedIpc, [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message" }, detached, windowsHide: true, stdio: ["pipe", "pipe", "pipe", "ipc"] },
+		options: { cwd: "/repo", env: { PATH: "/fixture", KEEP: "yes", GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: ownedIpc, [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message", ...scratchEnv }, detached, windowsHide: true, stdio: ["pipe", "pipe", "pipe", "ipc"] },
 	}]);
 	child.emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "platform checked" }], stopReason: "stop" }] });
 	child.emit({ type: "agent_settled" });
@@ -1130,7 +1134,8 @@ test("AgentRunner retains permission broker fd3 and assigns messaging IPC to fd4
 	const launch = spawnOptions[0];
 	const permissionChannelStdio = process.platform === "win32" ? "overlapped" : "pipe";
 	assert.match(launch?.env.GENTLE_PI_AGENTS_OWNED_IPC ?? "", /^\d+-[a-z0-9]+$/, "the owned-IPC marker has the runner's opaque shape");
-	assert.deepEqual(launch?.env, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: launch?.env.GENTLE_PI_AGENTS_OWNED_IPC, GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3", [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message" });
+	assert.deepEqual(launch?.env, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: launch?.env.GENTLE_PI_AGENTS_OWNED_IPC, GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3", [REQUESTED_TOOLS_ENV]: "read,grep,subagent_parent_message", TMPDIR: launch?.env.TMPDIR });
+	assert.match(launch?.env.TMPDIR ?? "", /gentle-pi-subagent-tmp-/);
 	assert.deepEqual(launch?.stdio, ["pipe", "pipe", "pipe", permissionChannelStdio, "ipc"]);
 	assert.equal(launch?.stdio?.length, 5);
 	children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "channel checked" }], stopReason: "stop" }] });
@@ -1792,4 +1797,67 @@ test("temporary instructions transport file is cleaned up if child emits an earl
 	assert.ok(capturedPromptPath, "should have captured a transport file path");
 	assert.ok(!existsSync(capturedPromptPath), "temporary transport file must be cleaned up on early child error");
 	assert.ok(!existsSync(dirname(capturedPromptPath)), "temporary transport directory must be cleaned up on early child error");
+});
+
+// Harness roadmap T3 (R1): asking the parent to remove a child's scratch failed
+// in 3 of 6 bench cells, so each child gets its own TMPDIR that the runtime
+// removes when the child ends.
+function scratchRunner(spawnImpl: (env: NodeJS.ProcessEnv) => ChildLike) {
+	let clock = 1000;
+	const deps: RunnerDeps = {
+		spawn: (_command, _args, options) => spawnImpl((options as { env: NodeJS.ProcessEnv }).env),
+		now: () => (clock += 1),
+		schedule: (_fn, _ms) => () => {},
+		pi: { command: "pi", args: [] },
+	};
+	return new AgentRunner(new TaskStore(), { maxConcurrency: 1, stallTimeoutMs: 10_000 }, deps, { askUser: async () => ({ value: "yes" }) });
+}
+
+test("each child gets its own TMPDIR under the parent's temp dir, removed with its contents on exit", async () => {
+	const fake = fakeChild();
+	let childTmp = "";
+	const runner = scratchRunner((env) => { childTmp = env.TMPDIR ?? ""; return fake.child; });
+	const task = runner.run(request({ env: { ...process.env, TMPDIR: tmpdir() } }));
+	await tick();
+	assert.ok(childTmp.startsWith(tmpdir()) && childTmp !== tmpdir(), `child TMPDIR ${childTmp} is a fresh dir under ${tmpdir()}`);
+	assert.ok(statSync(childTmp).isDirectory());
+	const scratch = fs.mkdtempSync(`${childTmp}/check-`);
+	fs.writeFileSync(`${scratch}/state.json`, "{}");
+	fake.exit(0);
+	await runner.waitFor(task.id);
+	assert.equal(existsSync(childTmp), false, "the child's TMPDIR and everything mktemp created in it are removed");
+});
+
+test("a child TMPDIR is removed when spawn throws", async () => {
+	let childTmp = "";
+	const runner = scratchRunner((env) => { childTmp = env.TMPDIR ?? ""; throw new Error("spawn failed intentionally"); });
+	const task = runner.run(request());
+	await tick();
+	assert.equal((await runner.waitFor(task.id)).status, TASK_STATUS.FAILED);
+	assert.ok(childTmp, "the failed launch still received a child TMPDIR");
+	assert.equal(existsSync(childTmp), false);
+});
+
+test("a quarantined child keeps its TMPDIR, since a descendant may still use it", async () => {
+	const timers: Array<{ fn: () => void; ms: number }> = [];
+	let now = 1_000;
+	let childTmp = "";
+	const store = new TaskStore();
+	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 10_000 }, {
+		spawn: (_command, _args, options) => { childTmp = (options as { env: NodeJS.ProcessEnv }).env.TMPDIR ?? ""; return fakeChild({ exitOnKill: false, pid: 91 }).child; },
+		now: () => now,
+		schedule: (fn, ms) => { timers.push({ fn, ms }); return () => {}; },
+		pi: { command: "pi", args: [] },
+		process: { platform: "win32", kill: () => {} },
+	}, { askUser: async () => ({ value: "yes" }) });
+	const task = runner.run(request());
+	await tick();
+	runner.cancel(task.id);
+	timers.find((timer) => timer.ms === 250)!.fn();
+	now = 5_000;
+	timers.filter((timer) => timer.ms === 25).at(-1)!.fn();
+	await tick();
+	assert.match(store.get(task.id)?.error ?? "", /capacity quarantined/);
+	assert.equal(existsSync(childTmp), true, "an unconfirmed exit must not delete files a live descendant may hold");
+	fs.rmSync(childTmp, { recursive: true, force: true });
 });

@@ -207,6 +207,8 @@ interface LiveTask {
 	childExit: number | null | undefined;
 	childExitSignal?: string | null;
 	instructionsTransportDir?: string;
+	/** The child's own TMPDIR, removed when the child ends unless its exit is unconfirmed. */
+	scratchDir?: string;
 	cleanupDeadlineAt: number | undefined;
 	quarantined: boolean;
 	nextId: number;
@@ -569,6 +571,17 @@ export class AgentRunner {
 				return;
 			}
 		}
+		// Harness roadmap T3: scratch the child makes with mktemp lands in its own
+		// TMPDIR, under the inherited one, so the runtime removes it at the end
+		// instead of asking the parent. Best effort: without it the child keeps
+		// the inherited TMPDIR.
+		let scratchDir: string | undefined;
+		try {
+			scratchDir = mkdtempSync(join(request.env.TMPDIR?.trim() || tmpdir(), "gentle-pi-subagent-tmp-"));
+			try { chmodSync(scratchDir, DIR_MODE); } catch { /* best effort */ }
+			env.TMPDIR = scratchDir;
+			if (this.processControl.platform === "win32") { env.TMP = scratchDir; env.TEMP = scratchDir; }
+		} catch { scratchDir = undefined; }
 		let child: ChildLike;
 		try {
 			const pi = this.deps.resolvePi?.() ?? this.deps.pi;
@@ -580,15 +593,15 @@ export class AgentRunner {
 				stdio: hasParentPermissionChannel ? ["pipe", "pipe", "pipe", permissionChannelStdio, "ipc"] : ["pipe", "pipe", "pipe", "ipc"],
 			});
 		} catch (error) {
-			if (instructionsTransportDir) {
-				try { rmSync(instructionsTransportDir, { recursive: true, force: true }); } catch { /* best effort */ }
+			for (const dir of [instructionsTransportDir, scratchDir]) {
+				if (dir) try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 			}
 			this.store.update(id, { status: TASK_STATUS.RUNNING, startedAt: this.deps.now(), lastStep: "starting" });
 			this.finish(id, TASK_STATUS.FAILED, `could not start pi: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
 		const processGroup = detached && typeof child.pid === "number" && child.pid > 0 ? child.pid : undefined;
-		const live: LiveTask = { child, sawRunEvent: false, mutationStarts: new Map(), inFlightTools: new Map(), argumentProgress: new ToolArgumentProgress(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, childExitSignal: undefined, instructionsTransportDir, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [], stderrTail: "" };
+		const live: LiveTask = { child, sawRunEvent: false, mutationStarts: new Map(), inFlightTools: new Map(), argumentProgress: new ToolArgumentProgress(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, childExitSignal: undefined, instructionsTransportDir, scratchDir, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [], stderrTail: "" };
 		if (request.prepareResponseObservations) {
 			let ready = false;
 			live.observationPreparation = () => ready;
@@ -1012,6 +1025,12 @@ export class AgentRunner {
 		if (live.instructionsTransportDir) {
 			try { rmSync(live.instructionsTransportDir, { recursive: true, force: true }); } catch { /* best effort */ }
 			live.instructionsTransportDir = undefined;
+		}
+		// A quarantined child's exit is unconfirmed: a live descendant may still
+		// hold files there, so its scratch stays under the system temp dir.
+		if (live.scratchDir && !live.quarantined) {
+			try { rmSync(live.scratchDir, { recursive: true, force: true }); } catch { /* best effort */ }
+			live.scratchDir = undefined;
 		}
 	}
 
