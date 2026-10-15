@@ -2,8 +2,12 @@ import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { defaultTempScratchFs, isTempScratchRemoval, type TempScratchFs } from "../lib/yolo-temp-scratch.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
+import { evaluateDeliveredTestTool } from "../lib/delivered-test-lint.ts";
+import { commitSliceToolResult } from "../lib/commit-slice-signal.ts";
+import { appendContextBackstopNotice, createContextBackstopSignal } from "../lib/context-backstop.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
+import { rejectUnriskedVerifierLaunch } from "../lib/verifier-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -40,6 +44,8 @@ import type {
 	Theme,
 	ThemeColor,
 	ToolCallEventResult,
+	ToolResultEvent,
+	ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { Key, Text, isKeyRelease, matchesKey, truncateToWidth, type KeybindingsManager, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { resolveGentlePiAgentHome, gentlePiConfigHome } from "../lib/agent-home.ts";
@@ -10354,7 +10360,7 @@ function createGentleAiExtensionForTesting(
 		consumeReviewMutation(pi, ctx.sessionManager, root, mutation, "nudged", targetIdentity);
 	});
 
-	pi.on("tool_result", async (event, ctx) => {
+	const recordWriteResult = async (event: ToolResultEvent, ctx: ExtensionContext): Promise<void> => {
 		if (!reminderSessionActive || (reminderManager && reminderManager !== ctx.sessionManager) || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
 		try {
@@ -10366,6 +10372,25 @@ function createGentleAiExtensionForTesting(
 			if (root) recordReviewMutation(pi, ctx.sessionManager, root, { source: "direct", toolName: event.toolName, toolCallId: event.toolCallId, ...directWriterProfile(pi, ctx) });
 			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && prospectiveRoot && !resolveSessionWorktree(ctx.cwd, ctx.cwd)) await prepareBoundSessionRepository(ctx.sessionManager, ctx.sessionManager.getCwd?.() ?? ctx.cwd, ctx.signal);
 		} catch { /* Preparation and receipt persistence cannot change a successful tool result. */ }
+	};
+	const contextBackstopSignal = createContextBackstopSignal(permissionEnvironment);
+	pi.on("tool_result", async (event, ctx) => {
+		// Harness roadmap R1: the primary session's measured context is checked
+		// against the backstop on every tool result; the first result at or past
+		// it carries one notice, after any other patch below.
+		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+		const primary = permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && (processAgentEndSubagentDepth.get(sessionKey) ?? 0) === 0;
+		let notice: string | undefined;
+		try { notice = primary ? contextBackstopSignal(sessionKey, ctx.getContextUsage?.()) : undefined; } catch { notice = undefined; }
+		const withNotice = (patch: ToolResultEventResult | undefined) => notice ? appendContextBackstopNotice(event, patch, notice) : patch;
+		// Harness roadmap T4: a parent commit reports the branch's authored
+		// changed lines so delivery slicing reads a number, not an estimate.
+		if (SHELL_COMMAND_TOOLS.has(event.toolName)) {
+			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return undefined;
+			try { return withNotice(await commitSliceToolResult(event, ctx.cwd)); } catch { return withNotice(undefined); }
+		}
+		await recordWriteResult(event, ctx);
+		return withNotice(undefined);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -10376,6 +10401,8 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		const deliveredTestDenied = evaluateDeliveredTestTool(event.toolName, event.input, ctx.cwd);
+		if (deliveredTestDenied) return deliveredTestDenied;
 		if (event.toolName === "subagent_run") {
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
@@ -10385,8 +10412,10 @@ function createGentleAiExtensionForTesting(
 				const launch = event.input as Record<string, unknown>;
 				const selected = [launch.workspace_root, launch.repository_root].find((value): value is string => typeof value === "string" && value.trim() !== "");
 				const root = selected ? resolve(ctx.cwd, selected) : ctx.cwd;
-				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextTokens: ctx.getContextUsage?.()?.tokens });
+				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextUsage: ctx.getContextUsage?.(), env: permissionEnvironment });
 				if (undocumentedWriter) return undocumentedWriter;
+				const unriskedVerifier = rejectUnriskedVerifierLaunch(event.input, { root, contextUsage: ctx.getContextUsage?.(), env: permissionEnvironment });
+				if (unriskedVerifier) return unriskedVerifier;
 			}
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
