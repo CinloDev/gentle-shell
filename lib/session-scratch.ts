@@ -305,7 +305,7 @@ const runGit: Git = (args, cwd) => new Promise((resolveResult) => {
 export type ArtifactCheck =
 	| { state: "missing" }
 	| { state: "kept"; reason: string }
-	| { state: "removable"; commonDir?: string; identity?: { dev: number; ino: number } };
+	| { state: "removable"; commonDir?: string; identity?: { dev: bigint; ino: bigint } };
 
 const sameDirectory = (path: string) => {
 	try {
@@ -318,7 +318,8 @@ const sameDirectory = (path: string) => {
 
 const identityOf = (path: string) => {
 	try {
-		const { dev, ino } = lstatSync(path);
+		// bigint: some filesystems report inode numbers above Number.MAX_SAFE_INTEGER.
+		const { dev, ino } = lstatSync(path, { bigint: true });
 		return { dev, ino };
 	} catch {
 		return undefined;
