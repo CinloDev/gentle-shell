@@ -6,6 +6,11 @@ export interface DestructiveCommandMatch {
 	kind: DestructionKind;
 	triggerIndex: number;
 	hardDeny: boolean;
+	/**
+	 * Literal targets of a direct, top-level, unwrapped and unquoted recursive
+	 * `rm` that runs before every other segment of the command; absent otherwise.
+	 */
+	removalTargets?: readonly string[];
 }
 interface Token {
 	value: string;
@@ -14,6 +19,10 @@ interface Token {
 	index: number;
 }
 const separators = new Set([";", "&&", "||", "|", "&", "\n", "(", ")"]);
+// Separators after which the next segment starts only once this one finished.
+// Pipes, background jobs and subshell parentheses run segments concurrently or
+// out of textual order.
+const SEQUENTIAL_SEPARATORS = new Set(["", ";", "&&", "||", "\n"]);
 
 /** Literal, named heredocs are data, not executable shell segments; offsets are preserved. */
 function blankHeredocs(command: string): string {
@@ -85,29 +94,63 @@ const DATA_COMMANDS = new Set([
 const INERT_COMMANDS = new Set(["cd", "pwd", "true", "false", "test", "[", "mkdir", "touch"]);
 const HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\2(?=\n|$)/g;
 
+type Ranges = Array<readonly [number, number]>;
+// A simple `$(...)`: no nested substitution, quoting, expansion or escapes in its body.
+const SIMPLE_SUBSTITUTION_RE = /\$\(([^()'"`$\\]*)\)/g;
+
+/**
+ * Replace each simple `$(...)` whose body is itself only data and inert
+ * commands with a same-length placeholder word, so offsets are preserved.
+ * Such a substitution runs nothing guarded; its output is only more words.
+ * Returns undefined when any substitution is not provably data, or when a
+ * heredoc could expand one in its body.
+ */
+function maskDataSubstitutions(command: string): { masked: string; ranges: Ranges } | undefined {
+	if (!command.includes("$(")) return { masked: command, ranges: [] };
+	if (command.includes("<<")) return undefined;
+	const ranges: Ranges = [];
+	let opaque = false;
+	const masked = command.replace(SIMPLE_SUBSTITUTION_RE, (raw: string, body: string, offset: number) => {
+		const inner = dataRanges(body);
+		if (inner === undefined) opaque = true;
+		else ranges.push(...inner.map(([from, to]) => [offset + 2 + from, offset + 2 + to] as const));
+		return "_".repeat(raw.length);
+	});
+	return opaque || masked.includes("$(") ? undefined : { masked, ranges };
+}
+
 /**
  * Byte ranges of the command that are plain arguments of a known data command
  * (gentle-shell#2174). A guarded or denied pattern matching only inside these
  * ranges is prose, not an operation. Returns no ranges, keeping every lexical
- * match, when the command is opaque: command or process substitution, an
+ * match, when the command is opaque: a command substitution that is not
+ * itself only data commands, process substitution or backticks, an
  * interpreter or remote shell anywhere, or quoting the tokenizer cannot
  * account for.
  */
-export function dataArgumentRanges(command: string): Array<readonly [number, number]> {
-	if (/\$\(|`|[<>]\(/.test(command)) return [];
+export function dataArgumentRanges(command: string): Ranges {
+	return dataRanges(command) ?? [];
+}
+
+/** Undefined means opaque; an empty list means only inert commands. */
+function dataRanges(original: string): Ranges | undefined {
+	const substitutions = maskDataSubstitutions(original);
+	if (substitutions === undefined) return undefined;
+	const command = substitutions.masked;
+	if (/`|[<>]\(/.test(command)) return undefined;
 	// A heredoc counts only when its `<<` starts an unquoted token of the raw
 	// command; quoted text such as `echo '<<x'` must not blank following lines.
 	const rawStarts = new Set(tokenize(command, false).filter((token) => token.raw.startsWith("<<")).map((token) => token.index));
 	const heredocs = [...command.matchAll(HEREDOC_RE)];
-	if (heredocs.some((heredoc) => !rawStarts.has(heredoc.index))) return [];
+	if (heredocs.some((heredoc) => !rawStarts.has(heredoc.index))) return undefined;
 	const blanked = blankHeredocs(command);
 	const tokens = tokenize(command);
 	const covered = new Uint8Array(blanked.length);
 	for (const token of tokens) covered.fill(1, token.index, token.index + token.raw.length);
 	for (let index = 0; index < blanked.length; index++) {
-		if (!covered[index] && !/\s/.test(blanked[index])) return [];
+		if (!covered[index] && !/\s/.test(blanked[index])) return undefined;
 	}
-	const ranges: Array<readonly [number, number]> = [];
+	const ranges: Ranges = [...substitutions.ranges];
 	let start = 0;
 	for (let end = 0; end <= tokens.length; end++) {
 		if (end < tokens.length && !tokens[end].operator) continue;
@@ -120,10 +163,12 @@ export function dataArgumentRanges(command: string): Array<readonly [number, num
 		if (segment[0].value === "env") cursor++;
 		while (cursor < segment.length && /^[A-Za-z_][A-Za-z_0-9]*=/.test(segment[cursor].value)) cursor++;
 		const head = segment[cursor];
-		if (head === undefined || head.value !== head.raw) return [];
+		// A segment of plain assignments only (`f=$(ls)`) runs no command.
+		if (head === undefined && cursor > 0 && segment[0].value !== "env") continue;
+		if (head === undefined || head.value !== head.raw) return undefined;
 		const name = head.value;
 		if (INERT_COMMANDS.has(name)) continue;
-		if (!DATA_COMMANDS.has(name)) return [];
+		if (!DATA_COMMANDS.has(name)) return undefined;
 		ranges.push([head.index + head.raw.length, tokens[end]?.index ?? command.length]);
 	}
 	// A heredoc body belongs to the segment of its `<<` header, which the
@@ -148,12 +193,27 @@ function sqlDestroys(sql: string): boolean {
 	});
 }
 
+/** Operands of a plain `rm` invocation, or undefined when any argument is quoted, escaped or disables root protection. */
+function removalTargets(args: readonly Token[]): string[] | undefined {
+	const targets: string[] = [];
+	let options = true;
+	for (const arg of args) {
+		if (arg.raw !== arg.value || arg.value === "--no-preserve-root") return undefined;
+		if (options && arg.value === "--") options = false;
+		else if (options && arg.value.startsWith("-")) continue;
+		else targets.push(arg.value);
+	}
+	return targets.length > 0 ? targets : undefined;
+}
+
 export function recognizeDestructiveCommands(command: string, depth = 0): DestructiveCommandMatch[] {
 	if (depth > 4) return [];
 	const tokens = tokenize(command);
 	const matches: DestructiveCommandMatch[] = [];
 	let previous: Token[] = [];
 	let previousSeparator = "";
+	// True while every earlier segment was a leading literal recursive `rm`.
+	let leadingRemovals = depth === 0;
 	let start = 0;
 	for (let end = 0; end <= tokens.length; end++) {
 		if (end < tokens.length && !tokens[end].operator) continue;
@@ -184,6 +244,13 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 		if (name === "rm" && args.some((arg) => /^-[^-]*[rR]/.test(arg) || arg === "--recursive")) {
 			const rootTarget = args.some((arg) => /^(?:\/(?:\*+)?$|\.{1,2}\/?$|~(?:\/|$)|\$\{?HOME\}?(?:\/|$))/.test(arg));
 			add(DESTRUCTION_KIND.FILESYSTEM, rootTarget);
+			const sequential = SEQUENTIAL_SEPARATORS.has(tokens[end]?.raw ?? "");
+			const targets = leadingRemovals && sequential && cursor === 0 && head.raw === "rm" ? removalTargets(segment.slice(1)) : undefined;
+			if (targets !== undefined) matches[matches.length - 1].removalTargets = targets;
+			else leadingRemovals = false;
+		} else if (segment.length > 0 || tokens[end]?.raw !== "\n") {
+			// Only blank lines may sit between leading removals.
+			leadingRemovals = false;
 		}
 		if (name === "find") {
 			if (args.includes("-delete")) add(DESTRUCTION_KIND.FILESYSTEM);

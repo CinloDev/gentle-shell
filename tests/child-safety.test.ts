@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createChildSafetyExtension } from "../extensions/child-safety.ts";
@@ -79,6 +82,25 @@ test("primary requires fresh confirmation, cancellation and missing UI block", a
 	assert.deepEqual(states, ["waiting", "approved", "waiting", "approved", "waiting", "denied", "waiting", "denied"]);
 	const blockers = h.events.filter((entry) => entry.name === "herdr:blocked").map((entry) => (entry.data as { active: boolean }).active);
 	assert.deepEqual(blockers, [true, false, true, false, true, false, true, false]);
+});
+
+// The YOLO temp-scratch waiver is primary-only: children still block it and
+// Normal mode still asks, whatever the targets look like on disk.
+test("temp scratch removal stays blocked in children and confirmed in Normal mode", async () => {
+	const scratch = mkdtempSync(join(tmpdir(), "tmp."));
+	try {
+		const command = `rm -rf ${scratch} /tmp/tmp.8phya1BpFr /tmp/ctx-backstop-pnpm-test.log; cd /tmp && git log --oneline -1`;
+		for (const primary of [false, true]) {
+			const result = await harness(true, primary).handlers[0](event(command), context(async () => { throw new Error("child must never prompt"); }));
+			assert.equal((result as { block?: boolean })?.block, true, `child via ${primary ? "primary" : "safety"} entry`);
+		}
+		const titles: string[] = [];
+		const normal = harness(false, true);
+		assert.equal(await normal.handlers[0](event(command), context(async (title) => { titles.push(title); return true; })), undefined);
+		assert.deepEqual(titles, ["Allow recognized data-loss command?"]);
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
+	}
 });
 
 test("children block recognized destructive commands sent to bash_background too", async () => {
