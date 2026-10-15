@@ -196,10 +196,12 @@ const ANCHORS: readonly RoutingAnchor[] = [
 		label: "long-session backstop",
 		canonical: "**Long-session backstop:**",
 		// Gentle Shell intentionally leads the canon here: a parent-context token
-		// backstop replaces the tool-call count (tracked by gentle-ai#5139).
+		// backstop replaces the tool-call count (tracked by gentle-ai#5139), and the
+		// runtime measures it and signals it instead of the canon's advisory ~150k
+		// estimate (harness roadmap R1), so the Pi anchor names the runtime signal.
 		mirrors: [
-			{ surface: DELEGATION, includes: "**Context backstop:** when the parent context passes ~150k tokens" },
-			{ surface: CORE, includes: "**Context backstop** — parent context past ~150k tokens" },
+			{ surface: DELEGATION, includes: "**Context backstop:** when the runtime signals it" },
+			{ surface: CORE, includes: "**Context backstop** — when the runtime signals it" },
 		],
 	},
 	{
