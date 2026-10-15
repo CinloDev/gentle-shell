@@ -305,7 +305,7 @@ const runGit: Git = (args, cwd) => new Promise((resolveResult) => {
 export type ArtifactCheck =
 	| { state: "missing" }
 	| { state: "kept"; reason: string }
-	| { state: "removable"; commonDir?: string };
+	| { state: "removable"; commonDir?: string; identity?: { dev: number; ino: number } };
 
 const sameDirectory = (path: string) => {
 	try {
@@ -316,11 +316,22 @@ const sameDirectory = (path: string) => {
 	}
 };
 
+const identityOf = (path: string) => {
+	try {
+		const { dev, ino } = lstatSync(path);
+		return { dev, ino };
+	} catch {
+		return undefined;
+	}
+};
+
 /** Whether a recorded clone or worktree can be removed without losing work. */
 export async function checkArtifact(artifact: ScratchArtifact, keep: readonly string[], git: Git = runGit): Promise<ArtifactCheck> {
 	const { path, kind } = artifact;
 	try { lstatSync(path); } catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "missing" };
+		// ENOTDIR: a path component is no longer a directory, so the artifact cannot exist there.
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return { state: "missing" };
 	}
 	if (!sameDirectory(path)) return { state: "kept", reason: "not the recorded directory" };
 	if (isProtectedPath(path, keep)) return { state: "kept", reason: "protected directory" };
@@ -337,18 +348,21 @@ export async function checkArtifact(artifact: ScratchArtifact, keep: readonly st
 		// Every ref, stashes included, must already be on a remote.
 		const local = await git(["rev-list", "-n", "1", "--all", "--not", "--remotes"], path);
 		if (local === undefined) return { state: "kept", reason: "Git history unavailable" };
-		return local === "" ? { state: "removable" } : { state: "kept", reason: "commits not on any remote" };
+		return local === "" ? { state: "removable", identity: identityOf(path) } : { state: "kept", reason: "commits not on any remote" };
 	}
 	const detached = await git(["rev-list", "-n", "1", "HEAD", "--not", "--branches", "--tags", "--remotes"], path);
 	if (detached === undefined) return { state: "kept", reason: "Git history unavailable" };
 	if (detached !== "") return { state: "kept", reason: "commits on no branch" };
 	const commonDir = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], path);
-	return commonDir ? { state: "removable", commonDir } : { state: "kept", reason: "Git repository unavailable" };
+	return commonDir ? { state: "removable", commonDir, identity: identityOf(path) } : { state: "kept", reason: "Git repository unavailable" };
 }
 
 /** Removes a checked artifact: a worktree through git (which refuses dirty ones), a clone by its recorded path only. */
 export async function removeArtifact(artifact: ScratchArtifact, check: Extract<ArtifactCheck, { state: "removable" }>, git: Git = runGit): Promise<string | undefined> {
 	if (!sameDirectory(artifact.path)) return "not the recorded directory";
+	// The directory checked must be the one removed, not a replacement at the same path.
+	const now = identityOf(artifact.path);
+	if (!check.identity || !now || now.dev !== check.identity.dev || now.ino !== check.identity.ino) return "replaced after the check";
 	if (artifact.kind === "worktree") {
 		if (await git(["worktree", "remove", artifact.path], artifact.path) === undefined) return "git worktree remove failed";
 		if (check.commonDir) await git([`--git-dir=${check.commonDir}`, "worktree", "prune"], dirname(check.commonDir));

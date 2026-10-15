@@ -233,7 +233,12 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 				);
 				for (const entry of removable) {
 					if (!confirmed) { lines.push(`Kept ${describe(entry.artifact)}: not confirmed`); continue; }
-					const failure = await removeArtifact(entry.artifact, entry.check);
+					// The clone may have changed while the confirmation was open: check it again.
+					const recheck = await checkArtifact(entry.artifact, protectedDirs(entry.group.ledger));
+					if (recheck.state === "missing") { drop(entry); lines.push(`Already gone: ${describe(entry.artifact)}`); continue; }
+					if (recheck.state === "kept") { lines.push(`Kept ${describe(entry.artifact)}: ${recheck.reason}`); continue; }
+					if (recheck.identity?.dev !== entry.check.identity?.dev || recheck.identity?.ino !== entry.check.identity?.ino) { lines.push(`Kept ${describe(entry.artifact)}: replaced after the check`); continue; }
+					const failure = await removeArtifact(entry.artifact, recheck);
 					if (failure) lines.push(`Kept ${describe(entry.artifact)}: ${failure}`);
 					else { drop(entry); lines.push(`Removed ${describe(entry.artifact)}`); }
 				}

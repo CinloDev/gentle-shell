@@ -34,6 +34,8 @@ interface Options {
 	env?: NodeJS.ProcessEnv;
 	/** The factory of a separately loaded module instance. */
 	factory?: ExtensionFactory;
+	/** Runs while the confirmation is open, before the user answers. */
+	duringConfirm?: () => void;
 }
 
 interface BashOptions { isError?: boolean; toolName?: string }
@@ -57,7 +59,7 @@ function session(fx: Fixture, options: Options = {}) {
 		sessionManager: { getSessionId: () => options.sessionId ?? "s-1" },
 		ui: {
 			notify: (message: string) => { notes.push(message); },
-			confirm: async (title: string, message: string) => { confirms.push(`${title}\n${message}`); return options.confirm ?? true; },
+			confirm: async (title: string, message: string) => { confirms.push(`${title}\n${message}`); options.duringConfirm?.(); return options.confirm ?? true; },
 		},
 	} as unknown as ExtensionContext;
 	const emit = async (name: string, event: unknown) => await handlers.get(name)?.(event, ctx);
@@ -574,6 +576,53 @@ test("S6: clean refuses a recorded clone replaced by a symlink and leaves live s
 	assert.ok(existsSync(liveScratch));
 	assert.match(out, /copy: not the recorded directory/);
 	await s.shutdown();
+});
+
+// PR #2300 review: `--all` does not include a detached HEAD, so a commit made only
+// there looked pushed and the clone holding its only copy was removable.
+test("S6: clean keeps a clone whose detached HEAD has a commit on no remote", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	const s = session(fx);
+	await s.start();
+	await s.bash(`cd ${fx.work} && git clone ${source} detached`, () => git(fx.work, "clone", "-q", source, "detached"));
+	const clone = join(fx.work, "detached");
+	git(clone, "checkout", "-q", "--detach", "HEAD");
+	git(clone, "commit", "-q", "--allow-empty", "-m", "only here");
+	const out = await s.run("clean");
+	assert.equal(s.confirms.length, 0, "nothing is offered for removal");
+	assert.ok(existsSync(join(clone, "a.txt")));
+	assert.match(out, /detached: commits not on any remote/);
+});
+
+// PR #2300 review: the check ran before the confirmation, so work added while it was
+// open was deleted with the clone.
+test("S6: clean checks a clone again after the confirmation and keeps it if it changed", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	const clone = join(fx.work, "late");
+	const s = session(fx, { duringConfirm: () => writeFileSync(join(clone, "late.txt"), "written while asked\n") });
+	await s.start();
+	await s.bash(`cd ${fx.work} && git clone ${source} late`, () => git(fx.work, "clone", "-q", source, "late"));
+	const out = await s.run("clean");
+	assert.equal(s.confirms.length, 1, "the clean clone was offered");
+	assert.equal(readFileSync(join(clone, "late.txt"), "utf8"), "written while asked\n");
+	assert.match(out, /late: uncommitted changes/);
+});
+
+// PR #2300 review: a recorded path whose parent became a file (ENOTDIR) is gone, not foreign.
+test("S6: a recorded clone whose parent is no longer a directory is reported gone and dropped", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	const s = session(fx);
+	await s.start();
+	mkdirSync(join(fx.work, "nest"));
+	await s.bash(`cd ${fx.work}/nest && git clone ${source} c`, () => git(join(fx.work, "nest"), "clone", "-q", source, "c"));
+	rmSync(join(fx.work, "nest"), { recursive: true, force: true });
+	writeFileSync(join(fx.work, "nest"), "now a file\n");
+	const first = await s.run("clean");
+	assert.match(first, /Already gone: clone .*nest\/c/);
+	assert.doesNotMatch(await s.run("list"), /nest\/c/, "the stale entry is dropped");
 });
 
 test("S6: clean keeps a detached worktree whose commits are on no branch", async (t) => {
