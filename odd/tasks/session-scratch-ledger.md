@@ -122,3 +122,21 @@ gentle-shell#2290). Runner: `pnpm test`.
 - L9 (decision, T1) Quarantine advisory documented only: shutdown removing a nested quarantined subagent TMPDIR is a
   win32 risk (POSIX quarantine only follows SIGKILL); not changed in this batch. Known residual: a scratch of this
   pid that `TMPDIR` no longer points into is kept, not tracked, when the same session id starts a new scratch.
+
+## Socket path budget (correction after native review escalation)
+
+- S9 (user decision 2026-10-16: "Nombres mínimos (recomendado)"): native review `review-53947d6fb7bbec8f` escalated
+  R3-scratch-socket-path-length: redirecting TMPDIR lengthens paths so Unix domain sockets created under it (for
+  example Python multiprocessing `pymp-XXXXXXXX/listener-XXXXXXXX`, 32 bytes) exceed the AF_UNIX limit (104 bytes on
+  macOS including the NUL, so at most 103). Requirements:
+  - Session scratch basename `gpXXXXXX` (mkdtemp of `gp`, 8 chars, no session id or hash); subagent TMPDIR basename
+    `gaXXXXXX` (lib/agents-runner.ts and `SUBAGENT_SCRATCH_PREFIX`).
+  - The TMPDIR value given to the process is `join(<inherited TMPDIR exactly as inherited>, <name>)`, never a realpath
+    (macOS realpath adds `/private`, 8 bytes); the ledger and every identity/refusal check keep using realpaths.
+  - Budget: with an inherited TMPDIR of 48 bytes (macOS `/var/folders/xx/<30 chars>/T`), session scratch + subagent
+    TMPDIR + `/pymp-XXXXXXXX/listener-XXXXXXXX` is at most 103 bytes. A test builds a 48-byte inherited TMPDIR and
+    asserts the child TMPDIR plus 32 bytes is at most 103.
+  - Removal safety that the session id in the name used to give: a scratch dir recorded by the ledger of a live session
+    (owning pid alive) is never removed through another session's ledger (sweep and clean). Keep every existing refusal.
+  - Reload recovery, shutdown restore, and all existing tests keep passing; update tests and docs that name the old
+    prefixes.
