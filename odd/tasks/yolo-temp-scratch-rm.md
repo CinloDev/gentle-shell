@@ -18,7 +18,7 @@ Branch: `feat/yolo-temp-scratch-rm` (worktree `/home/gentleman/work/gentle-pi-wo
 
 | ID | Specs | Route | Status | Commit |
 |----|-------|-------|--------|--------|
-| T2 | S6-S7 | delegated (context backstop; parallel with #4670 verifier) | done (awaiting verification) | fix(yolo) commit after c1e43fa3e (see L9) |
+| T2 | S6-S7 | delegated (context backstop; parallel with #4670 verifier) | done, verified (L10) | 7ff415745 |
 | T1 | S1-S5 (reopened L5: S2/S5 correction) | delegated (Writer trigger: parallel units with gentle-ai #4670) | done, verified (L7) | b8b1ba1a3, b75a97e5c |
 
 Risk: item 2 (security guard) → independent verifier after T1.
@@ -49,3 +49,4 @@ Risk: item 2 (security guard) → independent verifier after T1.
   - RED: `node --experimental-strip-types --test tests/autonomous-guard.test.ts tests/yolo-mode.test.ts tests/destructive-command-guard.test.ts tests/child-safety.test.ts tests/yolo-temp-scratch.test.ts` → 143/146. `YOLO waives push and rebase segments with harmless redirections and read-only filters` failed on `git push origin main 2>&1`; `guarded words inside data-command arguments are not guarded operations (#2174)` failed on `f=$(ls); grep -l "git push" $f`; the yolo-mode end-to-end test failed on `git push -u origin feat/x 2>&1 | tail -5` (not waived).
   - GREEN: the same command → 146/146. `pnpm test` → unit 6773 pass / 0 fail / 72 skipped; provider-contract and runtime-harness PASS. Preservation: `grep -l "git push" a.jsonl` not-guarded; Normal `git push origin main 2>&1` confirms; a child harness still blocks the pipe form; `x=$(ls); git push origin main` and `x=$(git push origin main); …` still confirm; `x=$(ls); git reset --hard` still blocks.
   - Differential vs base eebaf274e (35 probes, archive copy in a mktemp dir): all 30 docs push/rebase examples and negatives are identical. Only 5 change: `| sh` and `| tee out` YOLO true → false; `git push origin main 2>&1` and `… 2>&1 | tail -5` YOLO false → true; `f=$(ls); grep -l "git push" $f` confirm → not-guarded.
+- **L10** (2026-10-15) Independent verifier on 7ff415745: S6 PASS, S7 PASS, no blockers, no regressions (141-case differential vs b8921658a and eebaf274e; 5 focused files 146/146). Intended hardening: pushes piped into non-filters or writing files (`| sh`, `| tee f`, `| tail -5 > f`, `| cat > f`, `|& tee f`) were RUN at baseline and now ASK. Advisory (pre-existing): the YOLO waiver judges only the push segment, so a following `; sh -c x` stays unguarded as at baseline.
