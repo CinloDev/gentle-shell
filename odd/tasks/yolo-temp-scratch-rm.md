@@ -16,7 +16,7 @@ Branch: `feat/yolo-temp-scratch-rm` (worktree `/home/gentleman/work/gentle-pi-wo
 
 | ID | Specs | Route | Status | Commit |
 |----|-------|-------|--------|--------|
-| T1 | S1-S5 (reopened L5: S2/S5 correction) | delegated (Writer trigger: parallel units with gentle-ai #4670) | done, L5 correction applied (awaiting re-verification) | b8b1ba1a3 feat(yolo) + fix(yolo) ordering commit (see L4, L6) |
+| T1 | S1-S5 (reopened L5: S2/S5 correction) | delegated (Writer trigger: parallel units with gentle-ai #4670) | done, verified (L7) | b8b1ba1a3, b75a97e5c |
 
 Risk: item 2 (security guard) → independent verifier after T1.
 
@@ -38,3 +38,4 @@ Risk: item 2 (security guard) → independent verifier after T1.
   - Docs: `docs/yolo-mode.md` "Temp scratch removal" states the ordering rule with the `mv … && rm` example and the home-descendant tmpdir exclusion.
   - RED: `node --experimental-strip-types --test tests/autonomous-guard.test.ts tests/destructive-command-guard.test.ts tests/child-safety.test.ts tests/yolo-temp-scratch.test.ts` → 126/129. `YOLO waives recursive removal of own temp scratch only` failed on `mv /home/u/data /tmp/tmp.missingZZ619976 && rm -rf /tmp/tmp.missingZZ619976` (waived). `exposes literal removal targets only for a direct top-level rm that runs before every other segment` failed with a deep-equal error (a later `rm` after `mv` exposed targets). `a tmpdir that is /, home, an ancestor or a descendant of home is not a temp root` failed on `/home/user/work/repo: /home/user/work/repo/tmp.abcdef`.
   - GREEN: the same command → 129/129. `pnpm test` → unit 6771 pass / 0 fail / 72 skipped; provider-contract and runtime-harness PASS. The S1 example and `rm … && git push -u origin feature/x` are still waived.
+- **L7** (2026-10-15) Recheck limited to A1/A3: both fixed; 85-case differential probe shows only intended changes vs b8b1ba1a3 (`mv … && rm` RUN→ASK; `git push && rm -rf <dir>` RUN→ASK, back to baseline); 4 focused files 129/129; pnpm test green. Native assess: risk medium, reviewDue false (under_budget), no RDD review. Follow-ups (pre-existing at baseline, out of scope): recognizer misses rm inside backticks/eval (A2) and after `then`/`do` (`if true; then rm -rf data; fi` unguarded even in Normal and children).
