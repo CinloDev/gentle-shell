@@ -164,6 +164,22 @@ test("child session_start re-arms YOLO and the review sidebar for its own sessio
 	assert.ok(sidebarSessions().every((id) => id === "session-child-next"), JSON.stringify(sidebarSessions()));
 });
 
+// Harness roadmap T5: the delivered-test lint runs in the shared tool_call
+// handler, so it holds for the parent's inline writes and for every child.
+for (const child of [false, true]) {
+	test(`${child ? "child" : "parent"} tool_call blocks a test that reads a literal commit, and allows the same write elsewhere`, async (t) => {
+		const { cwd } = isolate(t);
+		const h = harness(child, cwd);
+		await h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+		const content = 'execSync("git show 3f9c2e1:src/ledger.ts");\n';
+		const call = (path: string) => h.handlers.get("tool_call")!({ toolName: "write", toolCallId: "call-1", input: { path, content } }, h.ctx) as Promise<{ block?: boolean; reason?: string } | undefined>;
+		const blocked = await call("tests/ledger.test.ts");
+		assert.equal(blocked?.block, true);
+		assert.match(blocked?.reason ?? "", /git history/);
+		assert.equal((await call("scripts/check.ts"))?.block, undefined, "a non-test file is not linted");
+	});
+}
+
 async function writeToolResult(child: boolean, t: TestContext) {
 	const { cwd } = isolate(t);
 	mkdirSync(join(cwd, "src"), { recursive: true });
