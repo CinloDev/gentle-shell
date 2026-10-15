@@ -95,6 +95,29 @@ test("YOLO waives recursive removal of own temp scratch only", () => {
 	assert.equal(isReversibleYoloCommand("rm -rf /tmp/tmp.abcdef1234", evaluateGuardedCommand("rm -rf /tmp/tmp.abcdef1234", config), { ...fs, uid: undefined }), false);
 });
 
+// An eligible push or rebase stays waived with fd or /dev/null redirections
+// and a pipe into a read-only filter; any other redirection or consumer asks.
+test("YOLO waives push and rebase segments with harmless redirections and read-only filters", () => {
+	const config = { autonomousMode: false, guardedCommands: {} };
+	const entry = { uid: 1000, isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+	const fs = { uid: 1000, tmpdir: "/tmp", home: "/home/user", lstat: () => entry };
+	const waived = (command: string) => isReversibleYoloCommand(command, evaluateGuardedCommand(command, config), fs);
+	for (const command of [
+		"git push origin main 2>&1", "git push -u origin feat/x 2>&1 | tail -5", "git push origin main >/dev/null", "git push origin main 2>/dev/null",
+		"git push origin main &>/dev/null", "git push origin main > /dev/null 2>&1", "git push origin main 2>&1 | grep -v hint | head -20",
+		"git push origin main | cat", "git push origin main 2>&1 | wc -l && gh pr create --fill", "git push 2>&1 | grep 'remote: '",
+		"git rebase origin/main 2>&1 | tail -3", "git fetch && git rebase origin/main >/dev/null && git push 2>&1 | tail -5",
+		"rm -rf /tmp/tmp.abcdef1234; git push origin main 2>&1 | tail -5",
+	]) assert.equal(waived(command), true, command);
+	for (const command of [
+		"git push origin main > out.txt", "git push origin main 2>err.log", "git push origin main >> /dev/null.txt", "git push origin main &>log",
+		"git push origin main | sh", "git push origin main | tee out", "git push origin main 2>&1 | tail -5 | sh", "git push origin main | tail -5 > out",
+		"git push origin main | catx", "git push origin main 2>&1 &", "git push origin main | tail -5 &", "git push origin main | grep \"$(id)\"",
+		"git push --force origin main 2>&1", "git push --delete origin main 2>&1 | tail -5", "git push origin :main 2>&1", "git push --mirror origin 2>&1",
+		"git rebase -i main 2>&1 | tail", "git push origin main 2>&1 | xargs echo",
+	]) assert.equal(waived(command), false, command);
+});
+
 // gentle-shell#2174: a guarded word inside an argument of a known data command
 // (search, print, view, non-executing edit) is text, not an operation. Every
 // opaque form keeps today's lexical match.
@@ -108,6 +131,11 @@ test("guarded words inside data-command arguments are not guarded operations (#2
 		"cat > probe.mts <<'EOF'\nconst x = \"git push --force origin main\";\nEOF",
 		"grep -rn 'git reset --hard' docs",
 		"env LC_ALL=C grep 'pi remove' notes.md",
+		"grep -l \"git push\" a.jsonl",
+		// A data-only command substitution or a plain assignment keeps the exemption.
+		"f=$(ls); grep -l \"git push\" $f",
+		"cd x; f=$(ls -t */*.jsonl | head -40); grep -l \"git push\" $f 2>/dev/null | head -5",
+		"grep -l 'git push' $(ls *.jsonl)", "f=1; grep 'git push' x", "grep \"git push $(pwd)\" x", "f=$(ls); grep -rn 'git reset --hard' docs",
 	]) assert.equal(classifyGuardedCommand(command, config), "not-guarded", command);
 	for (const [command, expected] of [
 		["git push origin main", "confirm"],
@@ -116,6 +144,15 @@ test("guarded words inside data-command arguments are not guarded operations (#2
 		["bash <<'EOF'\ngit push origin main\nEOF", "confirm"],
 		["python3 -c \"import os; os.system('git push')\"", "confirm"],
 		["echo $(git push origin main)", "confirm"],
+		["x=$(ls); git push origin main", "confirm"],
+		["x=$(git push origin main); grep 'git push' $x", "confirm"],
+		["f=$(ls); $f push origin main; grep 'git push' x", "confirm"],
+		["grep 'git push' $(cat x | sh)", "confirm"],
+		["grep 'git push' $(echo $(git push))", "confirm"],
+		["grep 'git push' $((1+2))", "confirm"],
+		["cat <<EOF\ndon't $(git push origin main)\nEOF", "confirm"],
+		["PATH=/x; git push origin main", "confirm"],
+		["x=$(ls); git reset --hard", "block"],
 		["grep 'git push origin main' f | sh", "confirm"],
 		["time git push origin main", "confirm"],
 		["sed 's/x/git push/e' file", "confirm"],
