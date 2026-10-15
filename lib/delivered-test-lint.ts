@@ -21,6 +21,9 @@ const COMMIT_ID = /\b[0-9a-f]{7,40}\b/g;
 // `=` but not `==`/`===`: a comparison with the working directory is not an assignment.
 const TMPDIR_ASSIGNMENT = /\bTMPDIR["']?\]?\s*(?::|=(?!=))\s*([^\n;,}]*)/g;
 const WORKING_DIRECTORY = /\$PWD|\$\{PWD\}|\$\(pwd\)|process\.cwd\(\)|__dirname|import\.meta\.dirname|os\.getcwd\(\)/;
+// A relative path resolves against the working directory too: `.tmp`, `./x`, `../x` or `tmp/x`, quoted or not.
+// Absolute, `~`, `$` or `%` based values and a bare word (`scratch`, `os.tmpdir()`, a fixture value) stay allowed.
+const RELATIVE_PATH = /^\s*["'`]?(?:\.{1,2}[\/\\\w-]|[\w.-]+[\/\\])/;
 
 export function isTestFilePath(path: string): boolean {
 	return TEST_PATH_PATTERNS.some((pattern) => pattern.test(path));
@@ -38,7 +41,7 @@ export function deliveredTestViolation(content: string): string | undefined {
 		if (commit) return `reads git history at a fixed commit (\`git ${match[1]} ${commit}\`), which fails in another clone`;
 	}
 	for (const match of content.matchAll(TMPDIR_ASSIGNMENT)) {
-		if (WORKING_DIRECTORY.test(match[1])) return `points TMPDIR inside the working directory (\`TMPDIR${match[0].slice(6).trim()}\`), so test scratch enters the diff`;
+		if (WORKING_DIRECTORY.test(match[1]) || RELATIVE_PATH.test(match[1])) return `points TMPDIR inside the working directory (\`TMPDIR${match[0].slice(6).trim()}\`), so test scratch enters the diff`;
 	}
 	return undefined;
 }

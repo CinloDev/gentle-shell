@@ -6686,7 +6686,9 @@ test("todo progress publishes merged into the owner's curated state, only for th
 	await h.fire("session_start", ctx);
 	const published = () => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 0, total: 2, current: "Write parser" });
-	assert.deepEqual(published(), { progress: "0/2 done; current: Write parser" }, "progress publishes before any curated state");
+	// PR #2290 review: a todo title is private work text; peers see counts only.
+	assert.deepEqual(published(), { progress: "0/2 done" }, "progress publishes before any curated state, without the todo title");
+	assert.doesNotMatch(JSON.stringify(readDiscovery(profile, listPresence(profile).entries[0])), /Write parser/, "the todo title never reaches peers");
 	await h.tools.get("orchestrator_session_id")!.execute("own", { subject: "Ledger", state: { objective: "Ship the ledger", decisions: "inline" } }, undefined, undefined, ctx);
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 2, current: null });
 	assert.deepEqual(published(), { objective: "Ship the ledger", decisions: "inline", progress: "1/2 done" });
@@ -6704,4 +6706,43 @@ test("todo progress publishes merged into the owner's curated state, only for th
 	await h.tools.get("orchestrator_session_id")!.execute("own", { state: { objective: "Ship v2" } }, undefined, undefined, ctx);
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 2, total: 3, current: null });
 	assert.deepEqual(published(), { objective: "Ship v2", progress: "2/3 done" }, "progress resumes once the owner publishes again");
+});
+
+// PR #2290 review: an owner publication without `progress` replaced the automatic
+// progress line, so peers lost it until the next todo write.
+test("an owner publication without progress keeps the automatic progress; explicit progress and null still win", async () => {
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const profile = realpathSync(mkdtempSync(join(root, "todo-progress-merge-")));
+	runtime.deps.agentHome = profile;
+	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/todo-progress-merge.sock", createdAt: 1 };
+	const registry = { list: async () => [], listActivations: async () => [peer] };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, record: peer, start: async () => {}, close: async () => {} }),
+		createClient: () => ({ close() {}, sendNotification: async () => { throw new Error("unexpected message"); } }),
+	};
+	Object.assign(h.pi, { setSessionName() {} });
+	Object.assign(ctx.sessionManager, { getSessionName: () => "", getBranch: () => h.entries });
+	gentleAgents(h.pi, {}, runtime.deps);
+	await h.fire("session_start", ctx);
+	const published = () => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	const own = (state: unknown) => h.tools.get("orchestrator_session_id")!.execute("own", { state }, undefined, undefined, ctx);
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 3, current: "Parser" });
+	await own({ objective: "Ship the ledger" });
+	assert.deepEqual(published(), { objective: "Ship the ledger", progress: "1/3 done" }, "omitted progress keeps the automatic line");
+	await own({ objective: "Ship the ledger", progress: "Reviewing the parser" });
+	assert.deepEqual(published(), { objective: "Ship the ledger", progress: "Reviewing the parser" }, "explicit owner progress wins");
+	await own({ objective: "Ship the ledger" });
+	assert.deepEqual(published(), { objective: "Ship the ledger" }, "owner progress is replaced like any curated field");
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 2, total: 3, current: null });
+	await own(null);
+	assert.equal(published(), null, "null withdraws everything");
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 3, total: 3, current: null });
+	assert.equal(published(), null, "the withdrawal holds against automatic progress");
+	await own({ objective: "Ship v2" });
+	assert.deepEqual(published(), { objective: "Ship v2" }, "a withdrawn progress line is not merged back");
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 4, current: null });
+	const full = "x".repeat(2048);
+	await own({ objective: full });
+	assert.deepEqual(published(), { objective: full }, "a merge over the state budget publishes the owner's state as given");
 });

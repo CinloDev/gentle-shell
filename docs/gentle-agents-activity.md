@@ -104,7 +104,9 @@ receipts. Complete model-facing output and permissions remain unchanged.
 
 `orchestrator_session_id` also accepts optional `state`: strings named `objective`,
 `progress`, `decisions`, and `blockers` (2,048 UTF-8 bytes total). An object replaces
-all fields, `null` withdraws, and omission leaves the current record unchanged.
+all fields, `null` withdraws, and omission leaves the current record unchanged. An object
+without `progress` keeps the automatic todo progress line still published (dropped only
+when the merge would exceed the byte budget); an explicit `progress` replaces it.
 Extra keys, controls, and oversized input are rejected before naming or persistence;
 records additionally fit 4 KiB. Never include credentials, internal instructions,
 or raw prompts. Whitelisting is not automatic secret redaction.
@@ -268,8 +270,10 @@ Call `orchestrator_consult` with required stable `recipient_session_id`, optiona
 No free-form question, owner request, human picker or read-consent dialog is used
 for this profile's explicitly published data. Declare a `subject` before work beyond
 small direct tasks. Progress is published automatically: after each todo write the
-runtime sets `progress` to `<done>/<total> done; current: <in-progress title>`, merged
-into the owner's curated fields, so the model never spends a turn reporting status.
+runtime sets `progress` to `<done>/<total> done`, merged into the owner's curated
+fields, so the model never spends a turn reporting status. Todo titles are private work
+text and are never published; a cleared list removes the line, and a withdrawn state
+stays withdrawn until the owner publishes again.
 Keep small direct tasks exempt. Do not add a model turn solely to publish or emit
 per-tool/token updates.
 

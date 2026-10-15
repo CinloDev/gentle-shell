@@ -19,12 +19,16 @@ export function isGitCommitCommand(command: string): boolean {
 	return command.split(/[;&|(\n]/).some((segment) => COMMIT.test(segment));
 }
 
-/** The directory the commit runs in: `git -C <dir>`, else a leading `cd <dir> &&`, else the session cwd. */
+/** The directory the commit runs in: `git -C <dir>` under every `cd <dir>` segment before the commit (joined by `;`, `&&`, `||`, or a newline), else the session cwd. */
 export function commitTargetDirectory(command: string, cwd: string): string {
 	const gitDir = /\bgit\s+-C\s+("[^"]+"|'[^']+'|\S+)\s+(?:-[Cc]\s+\S+\s+)*commit\b/.exec(command)?.[1];
-	const cdDir = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&/.exec(command)?.[1];
 	const unquote = (value: string) => value.replace(/^["']|["']$/g, "");
-	const base = cdDir ? resolve(cwd, unquote(cdDir)) : cwd;
+	let base = cwd;
+	for (const segment of command.split(/;|&&|\|\||\n/)) {
+		if (COMMIT.test(segment)) break;
+		const cdDir = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*$/.exec(segment)?.[1];
+		if (cdDir) base = resolve(base, unquote(cdDir));
+	}
 	return gitDir ? resolve(base, unquote(gitDir)) : base;
 }
 
@@ -53,11 +57,15 @@ export async function commitSliceReport(cwd: string, git: Git = runGit): Promise
 	const commits = base ? Number(await git(["rev-list", "--count", `${base}..HEAD`], cwd)) : 0;
 	if (!base || !(commits > 0)) return undefined;
 	// A failed or timed-out diff is not an empty one: report nothing rather than 0.
-	const numstat = await git(["diff", "--numstat", "--no-renames", base, "HEAD"], cwd);
+	// `-M` counts a move by what it changed; `-z` keeps paths unquoted for the generated-file filter.
+	const numstat = await git(["diff", "--numstat", "-z", "-M", base, "HEAD"], cwd);
 	if (numstat === undefined) return undefined;
 	let lines = 0;
-	for (const row of numstat.split("\n")) {
-		const [added, deleted, path] = row.split("\t");
+	const fields = numstat.split("\0");
+	for (let i = 0; i < fields.length; i++) {
+		const [added, deleted, inline] = fields[i].split("\t");
+		// A rename leaves the inline path empty and is followed by its old and new paths.
+		const path = inline === "" ? fields[i += 2] : inline;
 		if (!path || added === "-" || GENERATED.some((pattern) => pattern.test(path))) continue;
 		lines += Number(added) + Number(deleted);
 	}

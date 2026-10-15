@@ -592,11 +592,13 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// The todo list is the session's progress: publish it for peers so the model
 	// spends no turn on orchestrator_session_id. Merged into the owner's curated
 	// state; a publication that cannot be made never fails the todo write.
+	// Counts only: a todo title is private work text, never published to peers.
+	// The last automatic line survives an owner publication that omits `progress`.
+	let automaticProgress: { sessionId: string; text: string } | undefined;
 	const unsubscribeTodoProgress = pi.events.on(TODO_PROGRESS_EVENT, (event) => {
 		const progress = event as Partial<TodoProgress> | undefined;
 		if (!sessions || progress?.sessionId !== sessions.getSessionId() || typeof progress.done !== "number" || typeof progress.total !== "number") return;
-		const current = typeof progress.current === "string" ? sanitizeDisplayLabel(progress.current).slice(0, 120) : "";
-		const text = `${progress.done}/${progress.total} done${current ? `; current: ${current}` : ""}`;
+		const text = `${progress.done}/${progress.total} done`;
 		try {
 			const owned = stateCache.get(sessions);
 			// A state the owner withdrew stays withdrawn until the owner publishes again.
@@ -605,6 +607,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			// A cleared list has no progress to report: drop the line, publish nothing new.
 			if (progress.total === 0 && previous === undefined) return;
 			stateCache.publish(sessions, progress.total === 0 ? curated : { ...curated, progress: text }, (type, data) => pi.appendEntry(type, data));
+			automaticProgress = progress.total === 0 ? undefined : { sessionId: progress.sessionId, text };
 			publishActivity();
 		} catch { /* stale session or over the state budget: keep the previous publication */ }
 	});
@@ -1931,7 +1934,20 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			if (!transport) return text("Error: session messaging is not ready.", { error: "not ready" });
 			const { subject, state } = params as { subject?: unknown; state?: unknown };
 			const declared = normalizeTaskSubject(subject);
-			if (state !== undefined || declared) stateCache.publish(ctx.sessionManager, state, (type, data) => pi.appendEntry(type, data), Date.now(), declared);
+			// An owner object without `progress` keeps the automatic todo progress still on
+			// display; null and an explicit `progress` win, and an over-budget merge does not fail the call.
+			const shown = stateCache.get(ctx.sessionManager)?.state?.progress;
+			const merged = state && typeof state === "object" && !Array.isArray(state) && !Object.hasOwn(state, "progress")
+				&& automaticProgress?.sessionId === ctx.sessionManager.getSessionId() && shown === automaticProgress.text
+				? { ...state, progress: shown } : undefined;
+			const append = (type: string, data: unknown) => pi.appendEntry(type, data);
+			if (merged) {
+				try { stateCache.publish(ctx.sessionManager, merged, append, Date.now(), declared); }
+				catch (error) {
+					if ((error as Error).message !== "invalid-published-state") throw error;
+					stateCache.publish(ctx.sessionManager, state, append, Date.now(), declared);
+				}
+			} else if (state !== undefined || declared) stateCache.publish(ctx.sessionManager, state, append, Date.now(), declared);
 			if (activeTransportFor(ctx) !== transport) throw new Error("stale-published-state");
 			if (declared && !ctx.sessionManager.getSessionName?.()) pi.setSessionName(declared);
 			const alias = sanitizeDisplayLabel(ctx.sessionManager.getSessionName?.() ?? "");

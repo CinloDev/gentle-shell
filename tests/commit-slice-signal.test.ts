@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -51,6 +51,16 @@ test("commitTargetDirectory follows git -C and a leading cd", () => {
 	assert.equal(commitTargetDirectory("cd /tmp/x && git commit -m x", "/work/repo"), "/tmp/x");
 });
 
+// PR #2290 review: only a leading `cd <dir> &&` moved the count, so a commit after
+// `cd <dir>;` or a later `cd` counted the session cwd instead.
+test("commitTargetDirectory follows a cd that precedes the commit through ;, && or ||", () => {
+	assert.equal(commitTargetDirectory("cd /tmp/x; git commit -m x", "/work/repo"), "/tmp/x");
+	assert.equal(commitTargetDirectory("git add -A && cd pkg && git commit -m x", "/work/repo"), "/work/repo/pkg");
+	assert.equal(commitTargetDirectory("cd /tmp/x || exit 1; git commit -m x", "/work/repo"), "/tmp/x");
+	assert.equal(commitTargetDirectory("cd a && cd 'b c'\ngit -C d commit -m x", "/work/repo"), "/work/repo/a/b c/d");
+	assert.equal(commitTargetDirectory("git commit -m x && cd /tmp/x", "/work/repo"), "/work/repo", "a cd after the commit does not move it");
+});
+
 test("a feature branch reports authored changed lines since the default branch, lock files excluded", async (t) => {
 	const { dir, git, commitFile } = repo(t);
 	git("switch", "-q", "-c", "feat/slice");
@@ -60,6 +70,32 @@ test("a feature branch reports authored changed lines since the default branch, 
 	const report = await commitSliceReport(dir);
 	assert.match(report ?? "", /^Commit slice: 150 authored changed lines in 3 commits on feat\/slice since main/);
 	assert.match(report ?? "", /250 lines left before the ~400-line slice/);
+});
+
+// PR #2290 review: `--no-renames` counted a moved file as all of its lines deleted
+// and added again; rename detection counts only what the move changed.
+test("a move-only commit counts no authored lines", async (t) => {
+	const { dir, git, commitFile } = repo(t);
+	commitFile("src/old.ts", 120);
+	git("switch", "-q", "-c", "feat/move");
+	git("mv", "src/old.ts", "src/new.ts");
+	git("commit", "-q", "-m", "move src/old.ts");
+	assert.match(await commitSliceReport(dir) ?? "", /^Commit slice: 0 authored changed lines in 1 commit on feat\/move/);
+	git("mv", "src/new.ts", "src/newer.ts");
+	appendFileSync(join(dir, "src/newer.ts"), "line 120\n");
+	git("commit", "-qam", "move and extend src/new.ts");
+	assert.match(await commitSliceReport(dir) ?? "", /^Commit slice: 1 authored changed lines in 2 commits on feat\/move/, "a move that edits counts only the edit");
+});
+
+// PR #2290 review: Git quotes an unusual path in plain numstat output, so the
+// trailing quote hid a lock file from the generated-file filter.
+test("a lock file whose path Git quotes is still excluded", async (t) => {
+	const { dir, git, commitFile } = repo(t);
+	git("switch", "-q", "-c", "feat/quoted");
+	commitFile("packages/caf\u00e9/pnpm-lock.yaml", 900);
+	commitFile("src/a.ts", 10);
+	assert.match(git("-c", "core.quotePath=true", "diff", "--numstat", "main", "HEAD"), /"packages\/caf\\303\\251\/pnpm-lock\.yaml"/, "the fixture path needs quoting");
+	assert.match(await commitSliceReport(dir) ?? "", /^Commit slice: 10 authored changed lines in 2 commits on feat\/quoted/);
 });
 
 test("past ~400 lines the report says to apply the delivery strategy before the next commit", async (t) => {
@@ -90,11 +126,11 @@ test("a failed diff reports nothing instead of zero lines", async () => {
 		"symbolic-ref -q --short refs/remotes/origin/HEAD": "origin/main",
 		"merge-base HEAD origin/main": "base",
 		"rev-list --count base..HEAD": "2",
-		"diff --numstat --no-renames base HEAD": "12\t3\tsrc/a.ts",
+		"diff --numstat -z -M base HEAD": "12\t3\tsrc/a.ts\0",
 	};
 	const git = async (args: string[]) => answers[args.join(" ")];
 	assert.match(await commitSliceReport("/repo", git) ?? "", /^Commit slice: 15 authored changed lines in 2 commits/);
-	delete answers["diff --numstat --no-renames base HEAD"];
+	delete answers["diff --numstat -z -M base HEAD"];
 	assert.equal(await commitSliceReport("/repo", git), undefined);
 });
 
@@ -106,7 +142,7 @@ test("only a foreground bash commit carries the slice line", async () => {
 		"symbolic-ref -q --short refs/remotes/origin/HEAD": "origin/main",
 		"merge-base HEAD origin/main": "base",
 		"rev-list --count base..HEAD": "1",
-		"diff --numstat --no-renames base HEAD": "5\t0\tsrc/a.ts",
+		"diff --numstat -z -M base HEAD": "5\t0\tsrc/a.ts\0",
 	} as Record<string, string>)[args.join(" ")];
 	const event = (toolName: string) => ({ toolName, input: { command: "git commit -m x" }, isError: false, content: [{ type: "text" as const, text: "ok" }], structuredContent: undefined });
 	assert.match(JSON.stringify((await commitSliceToolResult(event("bash"), "/repo", git))?.content), /Commit slice: 5 authored changed lines/);

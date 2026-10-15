@@ -40,6 +40,36 @@ test("a test that points TMPDIR inside the working directory is a violation", ()
 	}
 });
 
+// PR #2290 review: a relative TMPDIR resolves against the working directory just
+// like `$PWD/...`, so test scratch entered the diff unflagged.
+test("a test that sets TMPDIR to a relative path is a violation", () => {
+	for (const content of [
+		"TMPDIR=./.tmp node --test",
+		"TMPDIR=.tmp node --test",
+		"export TMPDIR=tmp/x",
+		'const env = { ...process.env, TMPDIR: "./.tmp" };',
+		"process.env.TMPDIR = '.tmp';",
+		'process.env.TMPDIR = "tmp/x";',
+		'os.environ["TMPDIR"] = "../scratch"',
+	]) {
+		assert.match(deliveredTestViolation(content) ?? "", /TMPDIR/, content);
+	}
+	for (const content of [
+		'TMPDIR="$TMPDIR/ledger" node --test',
+		"TMPDIR=${TMPDIR:-/tmp}/ledger node --test",
+		"export TMPDIR=/var/tmp/ledger",
+		'const env = { TMPDIR: "/tmp/ledger" };',
+		"const env = { TMPDIR: os.tmpdir() };",
+		"const env = { TMPDIR: path.join(tmpdir(), 'ledger') };",
+		"TMPDIR=~/scratch node --test",
+		'process.env.TMPDIR = "C:\\\\Temp";',
+		"const env = { TMPDIR: `${tmpdir()}/ledger` };",
+		'const task = runner.run(request({ env: { TMPDIR: "reltmp" } }));',
+	]) {
+		assert.equal(deliveredTestViolation(content), undefined, content);
+	}
+});
+
 test("ordinary tests, git use in throwaway repos, and outside scratch stay allowed", () => {
 	for (const content of [
 		'const dir = mkdtempSync(join(tmpdir(), "ledger-"));',
