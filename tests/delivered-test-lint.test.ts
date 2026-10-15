@@ -34,6 +34,7 @@ test("a test that points TMPDIR inside the working directory is a violation", ()
 		'const env = { ...process.env, TMPDIR: join(process.cwd(), ".tmp") };',
 		"process.env.TMPDIR = path.join(__dirname, 'tmp');",
 		"export TMPDIR=\"$(pwd)/tmp\"",
+		'os.environ["TMPDIR"] = os.getcwd()',
 	]) {
 		assert.match(deliveredTestViolation(content) ?? "", /TMPDIR/, content);
 	}
@@ -47,6 +48,7 @@ test("ordinary tests, git use in throwaway repos, and outside scratch stay allow
 		"const env = { TMPDIR: scratch, PATH: [dirname(process.execPath)].join(':') };",
 		"git log -1 --format='%h' 53d62fbf3",
 		'assert.equal(hash("deadbeef"), "cafebabe");',
+		"assert.equal(env.TMPDIR === process.cwd(), false);",
 	]) {
 		assert.equal(deliveredTestViolation(content), undefined, content);
 	}
@@ -63,4 +65,11 @@ test("evaluateDeliveredTestTool blocks write and edit of a test file, never a so
 	assert.equal(evaluateDeliveredTestTool("write", { path: "scripts/diff-check.sh", content: bad }), undefined);
 	assert.equal(evaluateDeliveredTestTool("read", { path: "tests/ledger.test.ts" }), undefined);
 	assert.equal(evaluateDeliveredTestTool("write", { path: "tests/ledger.test.ts", content: "assert.ok(true);" }), undefined);
+});
+
+test("absolute paths are judged relative to the session cwd, so a project under a test/ directory is not a test", () => {
+	const bad = 'execSync("git show 3f9c2e1:src/ledger.ts")';
+	assert.equal(evaluateDeliveredTestTool("write", { path: "/home/u/test/app/src/release.ts", content: bad }, "/home/u/test/app"), undefined);
+	assert.equal(evaluateDeliveredTestTool("write", { path: "/home/u/test/app/tests/a.test.ts", content: bad }, "/home/u/test/app")?.block, true);
+	assert.equal(evaluateDeliveredTestTool("write", { path: "/elsewhere/tests/a.ts", content: bad }, "/home/u/test/app")?.block, true, "outside the cwd the path is judged whole");
 });

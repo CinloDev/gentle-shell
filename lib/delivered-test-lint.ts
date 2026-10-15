@@ -1,3 +1,4 @@
+import { isAbsolute, relative } from "node:path";
 import type { ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 
 // Harness roadmap T5 (R1): a delivered test must pass in any clone. Blind review
@@ -17,7 +18,8 @@ const TEST_PATH_PATTERNS = [
 
 const HISTORY_COMMAND = /\bgit\b[^\n]{0,40}?\b(show|checkout|diff|cat-file|archive)\b([^\n]{0,80})/g;
 const COMMIT_ID = /\b[0-9a-f]{7,40}\b/g;
-const TMPDIR_ASSIGNMENT = /\bTMPDIR["']?\s*[:=]\s*([^\n;,}]*)/g;
+// `=` but not `==`/`===`: a comparison with the working directory is not an assignment.
+const TMPDIR_ASSIGNMENT = /\bTMPDIR["']?\]?\s*(?::|=(?!=))\s*([^\n;,}]*)/g;
 const WORKING_DIRECTORY = /\$PWD|\$\{PWD\}|\$\(pwd\)|process\.cwd\(\)|__dirname|import\.meta\.dirname|os\.getcwd\(\)/;
 
 export function isTestFilePath(path: string): boolean {
@@ -53,11 +55,18 @@ function writtenText(toolName: string, input: Record<string, unknown>): string |
 	return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
+/** An absolute path inside the session cwd is judged by its repository-relative part. */
+function judgedPath(path: string, cwd: string | undefined): string {
+	if (!cwd || !isAbsolute(path)) return path;
+	const inside = relative(cwd, path);
+	return inside && !inside.startsWith("..") && !isAbsolute(inside) ? inside : path;
+}
+
 /** tool_call guard for write and edit, shared by the parent session and every child. */
-export function evaluateDeliveredTestTool(toolName: string, input: unknown): ToolCallEventResult | undefined {
+export function evaluateDeliveredTestTool(toolName: string, input: unknown, cwd?: string): ToolCallEventResult | undefined {
 	if ((toolName !== "write" && toolName !== "edit") || !input || typeof input !== "object") return undefined;
 	const record = input as Record<string, unknown>;
-	if (typeof record.path !== "string" || !isTestFilePath(record.path)) return undefined;
+	if (typeof record.path !== "string" || !isTestFilePath(judgedPath(record.path, cwd))) return undefined;
 	const text = writtenText(toolName, record);
 	const violation = text === undefined ? undefined : deliveredTestViolation(text);
 	if (!violation) return undefined;

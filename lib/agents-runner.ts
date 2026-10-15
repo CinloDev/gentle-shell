@@ -2,7 +2,7 @@ import { isSessionChangeEvidence, type SessionChangeEvidence } from "./session-c
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { tmpdir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { Duplex, type Readable, type Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { withoutInteractiveHost } from "./rpc-host.ts";
@@ -577,7 +577,9 @@ export class AgentRunner {
 		// the inherited TMPDIR.
 		let scratchDir: string | undefined;
 		try {
-			scratchDir = mkdtempSync(join(request.env.TMPDIR?.trim() || tmpdir(), "gentle-pi-subagent-tmp-"));
+			const inherited = request.env.TMPDIR?.trim();
+			// A relative TMPDIR would resolve against this process, not the child cwd.
+			scratchDir = mkdtempSync(join(inherited && isAbsolute(inherited) ? inherited : tmpdir(), "gentle-pi-subagent-tmp-"));
 			try { chmodSync(scratchDir, DIR_MODE); } catch { /* best effort */ }
 			env.TMPDIR = scratchDir;
 			if (this.processControl.platform === "win32") { env.TMP = scratchDir; env.TEMP = scratchDir; }
@@ -1017,7 +1019,8 @@ export class AgentRunner {
 		live.cancelGrace = this.deps.schedule(() => this.confirmGroupExit(id, live), GROUP_CONFIRM_MS);
 	}
 
-	private cleanupLive(live: LiveTask): void {
+	/** `exitProven` is true only in completeExit, after the child's exit was observed or its group is gone. */
+	private cleanupLive(live: LiveTask, exitProven = false): void {
 		live.permissionBroker?.close();
 		this.closeIpc(live);
 		live.cancelStall();
@@ -1027,8 +1030,8 @@ export class AgentRunner {
 			live.instructionsTransportDir = undefined;
 		}
 		// A quarantined child's exit is unconfirmed: a live descendant may still
-		// hold files there, so its scratch stays under the system temp dir.
-		if (live.scratchDir && !live.quarantined) {
+		// hold files there, so its scratch stays until the exit is proven.
+		if (live.scratchDir && (!live.quarantined || exitProven)) {
 			try { rmSync(live.scratchDir, { recursive: true, force: true }); } catch { /* best effort */ }
 			live.scratchDir = undefined;
 		}
@@ -1062,7 +1065,7 @@ export class AgentRunner {
 	}
 
 	private completeExit(id: string, live: LiveTask): void {
-		this.cleanupLive(live);
+		this.cleanupLive(live, true);
 		this.live.delete(id);
 		// Quarantine already notified completion, but its retained slot is now free.
 		if (live.quarantined) {

@@ -1842,9 +1842,10 @@ test("a quarantined child keeps its TMPDIR, since a descendant may still use it"
 	const timers: Array<{ fn: () => void; ms: number }> = [];
 	let now = 1_000;
 	let childTmp = "";
+	let fake: FakeChild | undefined;
 	const store = new TaskStore();
 	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 10_000 }, {
-		spawn: (_command, _args, options) => { childTmp = (options as { env: NodeJS.ProcessEnv }).env.TMPDIR ?? ""; return fakeChild({ exitOnKill: false, pid: 91 }).child; },
+		spawn: (_command, _args, options) => { childTmp = (options as { env: NodeJS.ProcessEnv }).env.TMPDIR ?? ""; return (fake = fakeChild({ exitOnKill: false, pid: 91 })).child; },
 		now: () => now,
 		schedule: (fn, ms) => { timers.push({ fn, ms }); return () => {}; },
 		pi: { command: "pi", args: [] },
@@ -1859,5 +1860,19 @@ test("a quarantined child keeps its TMPDIR, since a descendant may still use it"
 	await tick();
 	assert.match(store.get(task.id)?.error ?? "", /capacity quarantined/);
 	assert.equal(existsSync(childTmp), true, "an unconfirmed exit must not delete files a live descendant may hold");
-	fs.rmSync(childTmp, { recursive: true, force: true });
+	fake!.exit(0);
+	await tick();
+	assert.equal(existsSync(childTmp), false, "the proven exit removes the quarantined child's TMPDIR");
+});
+
+test("a relative inherited TMPDIR falls back to the system temp dir, so the child's path is absolute", async () => {
+	const fake = fakeChild();
+	let childTmp = "";
+	const runner = scratchRunner((env) => { childTmp = env.TMPDIR ?? ""; return fake.child; });
+	const task = runner.run(request({ env: { TMPDIR: "reltmp" } }));
+	await tick();
+	assert.ok(childTmp.startsWith(`${tmpdir()}/gentle-pi-subagent-tmp-`), childTmp);
+	fake.exit(0);
+	await runner.waitFor(task.id);
+	assert.equal(existsSync(childTmp), false);
 });
