@@ -3,6 +3,7 @@ import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destruc
 import { defaultTempScratchFs, isTempScratchRemoval, type TempScratchFs } from "../lib/yolo-temp-scratch.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { evaluateDeliveredTestTool } from "../lib/delivered-test-lint.ts";
+import { commitSliceToolResult } from "../lib/commit-slice-signal.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
@@ -10356,6 +10357,12 @@ function createGentleAiExtensionForTesting(
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
+		// Harness roadmap T4: a parent commit reports the branch's authored
+		// changed lines so delivery slicing reads a number, not an estimate.
+		if (SHELL_COMMAND_TOOLS.has(event.toolName)) {
+			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return undefined;
+			try { return commitSliceToolResult(event, ctx.cwd); } catch { return undefined; }
+		}
 		if (!reminderSessionActive || (reminderManager && reminderManager !== ctx.sessionManager) || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
 		try {
