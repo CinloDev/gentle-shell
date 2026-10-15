@@ -79,3 +79,9 @@ Upstream: gentle-ai `feat/pi-routing-canon-bundle` (`5aa0b887`, `9e6f24f6`), not
   - Size: authored changed lines (generated mirror, fixtures, and golden excluded) slice 1 = 379, slice 2 = 615
     (+214/-401, mostly the removed hand mirror and its provenance tests); one PR per L1.
   - Next: release gentle-ai with contract 1.4.0, then re-mirror from the published archive and compare its SHA-256.
+- L4 (2026-10-15) gentle-ai v4.2.0 published (contract 1.4.0). Rebased onto origin/main `4372ff2d` (R1 merged) without
+  conflicts. Re-mirrored from the published asset `gentle-ai-review-provider-contract-1.4.0.tar.gz` (SHA-256
+  `9d2927a84ba9a596f69029e3f854b16f86ca4c8b32cc5d63683764ccf2fb394b`, matches the release `checksums.txt`): tree
+  `aab5ab7f...c35d` is identical to the locally built mirror; only `source.archive_sha256` in the lock changed. The
+  gentle-ai binary pin stays 4.1.1 (`scripts/gentle-ai-installer.mjs`): the routing block is read from the mirror, not
+  from the binary; bumping the pin to 4.2.0 is the separate gentle-pi pin-bump procedure.
