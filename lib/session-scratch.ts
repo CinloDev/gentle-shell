@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
@@ -12,7 +12,13 @@ import { directoryAfterSegment, SHELL_SEGMENT_SEPARATOR } from "./commit-slice-s
 // and every check refuses rather than guesses.
 
 export const LEDGER_VERSION = 1;
-export const SCRATCH_PREFIX = "gentle-pi-session-";
+// Short on purpose: TMPDIR points here, and Unix socket paths under it are capped near 104 bytes.
+export const SCRATCH_PREFIX = "gp-";
+
+/** `gp-<first 8 hex of sha256(session id)>-`: a fixed-length name prefix for one session's scratch. */
+export function scratchNamePrefix(sessionId: string): string {
+	return `${SCRATCH_PREFIX}${createHash("sha256").update(sessionId).digest("hex").slice(0, 8)}-`;
+}
 /** Subagent TMPDIRs (lib/agents-runner.ts) nest under the session scratch; their runner removes them. */
 export const SUBAGENT_SCRATCH_PREFIX = "gentle-pi-subagent-tmp-";
 export const SWEEP_GRACE_MS = 60 * 60 * 1000;
@@ -124,11 +130,11 @@ export function isProcessAlive(pid: number): boolean {
 	}
 }
 
-/** A private `gentle-pi-session-<id>-XXXXXX` under `base`, as its real path, or undefined when it cannot be created. */
+/** A private `gp-<session hash>-XXXXXX` under `base`, as its real path, or undefined when it cannot be created. */
 export function createSessionScratch(base: string | undefined, sessionId: string): string | undefined {
 	if (!base || !isAbsolute(base)) return undefined;
 	try {
-		const dir = mkdtempSync(join(base, `${SCRATCH_PREFIX}${safeSessionId(sessionId)}-`));
+		const dir = mkdtempSync(join(base, scratchNamePrefix(sessionId)));
 		try { chmodSync(dir, 0o700); } catch { /* best effort, as mkdtemp already creates 0700 on POSIX */ }
 		return realpathSync(dir);
 	} catch {
@@ -153,7 +159,7 @@ export function scratchRefusal(ledger: ScratchLedger, ownRoot: string | undefine
 	const dir = ledger.scratchDir;
 	if (!dir || !isAbsolute(dir)) return "not recorded";
 	// Prefix and ledger match: only the directory created for this session id.
-	if (!basename(dir).startsWith(`${SCRATCH_PREFIX}${safeSessionId(ledger.sessionId)}-`)) return "not this session's scratch";
+	if (!basename(dir).startsWith(scratchNamePrefix(ledger.sessionId))) return "not this session's scratch";
 	// Created directly under the temp root recorded with it, which is a temp root.
 	const root = ledger.tempRoot;
 	if (!root || !isAbsolute(root) || dirname(dir) !== root) return "outside its temp root";
