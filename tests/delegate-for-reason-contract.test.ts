@@ -44,6 +44,8 @@ test("AC1: the core writer rule fires on named reasons, never on size or file co
 		"Tests, docs, and code of the same behavior are one unit, never separate writers",
 		"a delivery that depends on an earlier one is not independent",
 		"Context backstop",
+		// Bench gate p51-r1: parents launched writers the runtime then refused in most x5/x6 runs; the core states the admission.
+		"Runtime: writers need a `Spec:` line or the backstop",
 	]) {
 		assert.ok(coreWriter.includes(clause), `core Writer rule is missing: ${clause}`);
 	}
