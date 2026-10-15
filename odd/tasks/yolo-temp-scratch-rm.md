@@ -1,0 +1,33 @@
+# YOLO temp-scratch recursive rm waiver
+
+Objective: stop YOLO from asking for recursive `rm` of the session's own temp scratch, while keeping every other data-loss guarantee.
+Branch: `feat/yolo-temp-scratch-rm` (worktree `/home/gentleman/work/gentle-pi-worktrees/yolo-scratch`, base `origin/main` eebaf274e). Delivery: `ask-on-risk`. Runner: `node --experimental-strip-types --test <file>` for focused tests, `pnpm test` for the suite.
+
+## Specs
+
+- **S1** Under active YOLO in the primary session, a command whose only recognized data-loss effects are recursive `rm` of temp scratch runs without the "Allow recognized data-loss command?" prompt. The user's example must run without a prompt (all targets exist as the current user's mktemp dirs / own regular file):
+  `rm -rf /tmp/tmp.8phya1BpFr /tmp/tmp.LKd1kBX8Rw /tmp/tmp.C94OVzf01o /tmp/ctx-backstop-pnpm-test.log; cd /home/gentleman/work/gentle-pi-worktrees/harness-r1 && git log --oneline -1`
+- **S2** A target is temp scratch only when ALL hold: the `rm` segment is a direct `rm` (no `sudo`/`doas`/`env`/`xargs`/`find -exec`, not nested in `sh -c`, no `--no-preserve-root`); the target is a literal absolute path with no `$`, backtick, `~`, glob chars `*?[{`, no `.`/`..` components, no trailing `/` (`posix.normalize(t) === t`); it is exactly ONE path component under a temp root R ∈ {`/tmp`, `/var/tmp`, `realpath(os.tmpdir())`} (R itself never qualifies; R is never `/` or home); and an admission-time `lstat` (injectable fs for tests) shows: missing, or a symlink, or a regular file owned by the current uid, or a directory owned by the current uid whose name matches `^tmp\.[A-Za-z0-9]{6,}$`. Anything else (non-mktemp dir, other uid, lstat error, `$TMPDIR` written in the command) keeps asking.
+- **S3** Unchanged: Normal and Auto modes; children (`extensions/child-safety.ts`) still block every recognized destructive command including temp scratch; root/home recursive rm hard-block; SQL data loss, `find -delete`, other data-loss forms; every other segment of a compound command keeps its ordinary guard (e.g. `rm -rf /tmp/tmp.abcdef1234 ~/foo` still asks; `rm -rf /tmp/tmp.abcdef1234 && rm -rf data` still asks). Existing push/rebase YOLO waiver behavior unchanged.
+- **S4** Docs: `docs/yolo-mode.md` states the exception everywhere it promises recursive removal always asks (header tagline area if needed, "What still requires a decision", the "Recognized data-loss boundary" table — add a row "temp-scratch recursive removal: waived under YOLO (primary only)" — and "Approval and precedence" point 3). Keep the root/home hard-block row intact.
+- **S5** Tests (RED first): in `tests/autonomous-guard.test.ts` (or the closest existing YOLO test) with mocked lstat — waived: the S1 example, `rm -rf /tmp/tmp.abcdef1234`, own `.log` file, symlink; NOT waived: `rm -rf /tmp`, `/tmp/`, `/tmp/*`, `/tmp/tmp.x/`, `/tmp/tmp.x/../..`, `/tmp/a/b`, `"$TMPDIR/x"`, `sudo rm -rf /tmp/tmp.abcdef1234`, `rm -rf /tmp/tmp.abcdef1234 ~/foo`, non-mktemp dir, other-uid dir, `sh -c 'rm -rf /tmp/tmp.abcdef1234'`, and the same S1 example in Normal mode. `tests/destructive-command-guard.test.ts`: root/home hard deny still holds. `tests/child-safety.test.ts`: temp scratch still blocked in children.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|----|-------|-------|--------|--------|
+| T1 | S1-S5 | delegated (Writer trigger: parallel units with gentle-ai #4670) | done (awaiting independent verifier) | feat(yolo) commit on this branch (see L4) |
+
+Risk: item 2 (security guard) → independent verifier after T1.
+
+## Log
+
+- **L1** (2026-10-15, user, verbatim): "revisa logs y ve que el modo yolo molesta mucho todavía para cualquier cosa que diga rm por ejemplo y demás" + screenshot: `Allow recognized data-loss command?` for `rm -rf /tmp/tmp.8phya1BpFr /tmp/tmp.LKd1kBX8Rw /tmp/tmp.C94OVzf01o /tmp/ctx-backstop-pnpm-test.log; cd /home/gentleman/work/gentle-pi-worktrees/harness-r1 && git log --oneline -1 ...`
+- **L2** (2026-10-15) Root cause: `lib/destructive-command-guard.ts:184` marks every recursive rm as filesystem data loss regardless of target; `extensions/gentle-ai.ts` `isReversibleYoloCommand` (~:1956) returns false on `dataLoss` or zero push/rebase matches, so a lone rm can never be waived; prompt title at ~:2057. Children use `extensions/child-safety.ts`.
+- **L3** (2026-10-15) User was told this redefines the documented YOLO guarantee (docs/yolo-mode.md: "destructive actions still ask", recursive removal "not waived", precedence point 3 "always requires fresh confirmation") and answered verbatim: "si, hagamos las 3".
+- **L4** (2026-10-15, T1 writer) Implemented S1-S5.
+  - Design: `recognizeDestructiveCommands` attaches `removalTargets` only to a depth-0 `rm` whose head token is literally `rm` (no assignment/wrapper cursor) and whose arguments are all unquoted and lack `--no-preserve-root`. `lib/yolo-temp-scratch.ts` decides target eligibility over an injectable `TempScratchFs` (lstat, uid, resolved tmpdir, home); production uses `lstatSync`, `process.getuid`, `realpathSync(os.tmpdir())`. `isReversibleYoloCommand` skips effects proven temp scratch, so every other effect and guarded match keeps the push/rebase grammar. The call site is unchanged: only `yoloActive` (primary, YOLO) reaches it; Auto still sees `dataLoss`; children block earlier.
+  - Stricter than S2 on one point: targets must match a closed character set `^/[A-Za-z0-9._@%+=:,/-]*$`, because a blacklist admitted `rm -rf /tmp/x>important.txt`, whose redirection truncates another file. Quoted targets (`"/tmp/tmp.x"`) and `2>/dev/null` therefore keep asking.
+  - RED: `node --experimental-strip-types --test tests/autonomous-guard.test.ts` → 56/57, `YOLO waives recursive removal of own temp scratch only` failed on the S1 example (waiver false). `tests/destructive-command-guard.test.ts` → 60/61, `exposes literal removal targets only for a direct top-level rm` failed (`removalTargets` undefined). `tests/yolo-temp-scratch.test.ts` → ERR_MODULE_NOT_FOUND for `lib/yolo-temp-scratch.ts`. `tests/child-safety.test.ts` → 7/7 (preservation test, green by design).
+  - GREEN: the four files pass 57/57, 61/61, 7/7, 4/4; `pnpm test` → unit 6771 pass / 0 fail / 72 skipped, provider-contract and runtime-harness PASS.
+  - Differential vs base eebaf274e (archive copy in a mktemp dir): the docs push/rebase examples and their negatives classify identically with identical YOLO waiver results; only `rm -rf /tmp/tmp.x`-style scratch removals change (YOLO waiver false → true). Normal mode prompts `Allow recognized data-loss command?` for `rm -rf /tmp/tmp.x` in both.

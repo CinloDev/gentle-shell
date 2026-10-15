@@ -1,6 +1,6 @@
 # YOLO permission
 
-> 🚀 **Full speed, destructive actions still ask.** YOLO lets the agent implement, commit, push and open PRs within the already authorized task without asking each time, which suits long autonomous runs. Destructive operations still require fresh confirmation.
+> 🚀 **Full speed, destructive actions still ask.** YOLO lets the agent implement, commit, push and open PRs within the already authorized task without asking each time, which suits long autonomous runs. Destructive operations still require fresh confirmation; the one exception is recursive removal of the session's own temp scratch (see [Temp scratch removal](#temp-scratch-removal)).
 
 Use `/gentle:yolo enable` in the interactive primary Pi TUI to stop repeated permission questions for ordinary work **within your already authorized task**. YOLO is **OFF** unless you select it or save YOLO as the user-global default. [Normal, Auto and global defaults](permission-modes.md) are managed separately from the live-session toggle. The active status and a separate editor widget both say **🚀 YOLO ON 🔥 — destructive confirmations remain**, even when Gentle Shell hides its status layout.
 
@@ -33,12 +33,23 @@ The shell guard's routine default confirmation is skipped for reversible deliver
 
 ## What still requires a decision
 
-- Destructive operations retain fresh confirmations or hard denial: recognized SQL DROP/TRUNCATE and broad deletion, recursive removal, destructive Git and other guarded operations are not waived. Explicit configured confirmations/blocks and sensitive-path protection remain.
+- Destructive operations retain fresh confirmations or hard denial: recognized SQL DROP/TRUNCATE and broad deletion, recursive removal, destructive Git and other guarded operations are not waived. The only exception is [temp scratch removal](#temp-scratch-removal). Explicit configured confirmations/blocks and sensitive-path protection remain.
 - Current explicit human restrictions, repository policy, project trust and authorized scope still apply. Scope expansion, privacy-sensitive disclosure and genuinely unresolved consequential product choices require a human decision.
 - Ambiguous destinations or credentials remain unresolved. YOLO does not invent a remote, deployment destination, account or credential, nor authorize discovery or reuse of ambient credentials.
 - `ask_user` tools, provider consent, maintenance/recovery authorization and opaque-token choices are never automatically answered. Native review, RDD and review standing permission remain separate and unchanged.
 
 Children retain only their bounded delegated scope. They cannot activate or inherit YOLO, and receive no independent delivery permission.
+
+### Temp scratch removal
+
+In the primary session with YOLO active, a recursive `rm` whose every target is the session's own temp scratch runs without the data-loss confirmation. For example, `rm -rf /tmp/tmp.8phya1BpFr /tmp/build.log; git log --oneline -1` runs directly when both targets qualify. A target qualifies only when all of these hold:
+
+- The segment is a plain `rm` with no wrapper (`sudo`, `env`, `xargs`, assignments), not inside `sh -c` or `find -exec`, and without `--no-preserve-root`.
+- The target is an unquoted literal absolute path made only of letters, digits, `/` and `._-+@%=:,`. It has no `$`, backtick, `~`, glob, brace or redirection characters, no `.`/`..` components and no trailing `/`.
+- The target is exactly one path component under `/tmp`, `/var/tmp` or the resolved `os.tmpdir()`. The temp root itself never qualifies, and a temp root that is `/`, your home directory or one of its ancestors is ignored.
+- When the command is checked, the target is missing, a symlink, a regular file you own, or a directory you own named like `mktemp` output (`tmp.` followed by six or more letters or digits).
+
+Anything else keeps asking, including another user's directory, a directory not named like `mktemp` output, an unreadable path and `$TMPDIR/...`. Every other effect in the same command keeps its ordinary guard: `rm -rf /tmp/tmp.abcdef1234 && rm -rf data` still asks, and `rm -rf /tmp/tmp.abcdef1234 ~/foo` is still hard-blocked. Normal and Auto modes still ask, and children still block. The check runs when the command is admitted; it does not lock the path until `rm` runs.
 
 ## Lifetime and limits
 
@@ -50,7 +61,7 @@ This is permission guidance and shell-guard defense in depth, **not a sandbox or
 
 ## Recognized data-loss boundary
 
-Recognized destructive database and broad filesystem commands require **fresh primary confirmation** and are **blocked in package-owned children**, independently of YOLO and existing autonomous-mode configuration.
+Recognized destructive database and broad filesystem commands require **fresh primary confirmation** and are **blocked in package-owned children**, independently of YOLO and existing autonomous-mode configuration. The only YOLO exception is [temp scratch removal](#temp-scratch-removal).
 
 | Recognized executable form | Primary session | Delegated child |
 |---|---|---|
@@ -58,6 +69,7 @@ Recognized destructive database and broad filesystem commands require **fresh pr
 | SQL `DELETE FROM` without `WHERE`, or a trailing literal `WHERE 1=1` / `WHERE TRUE` | Fresh confirmation | Block |
 | Recursive `rm` (`-r`, `-R`, combined short flags, `--recursive`), `find -delete`, recognized destructive `find -exec/-execdir` and `xargs` invocations | Fresh confirmation | Block |
 | Recursive `rm` targeting `/`, `/*`, `.`, `..`, home or home descendants | Hard block | Block |
+| Temp scratch recursive removal ([conditions](#temp-scratch-removal)) | Waived under YOLO (primary only); fresh confirmation otherwise | Block |
 | Git force push, hard reset, forced clean | Hard block | Block |
 | Git forced branch deletion, reset/clean/restore/rebase, checkout with `--` or force, stash drop/clear | Existing primary policy remains | Block |
 
@@ -71,7 +83,7 @@ Ordinary builds, tests, read-only SQL, predicate-bounded literal deletes, Git st
 
 1. Existing hard denies and newly recognized hard-deny forms win across the command.
 2. Explicit configured blocks retain their existing semantics and win before data-loss confirmation. Active YOLO additionally honors explicit push restrictions in either configuration layer.
-3. Recognized database/filesystem data loss always requires fresh confirmation, even when autonomous mode or a matched delivery action is configured to allow.
+3. Recognized database/filesystem data loss always requires fresh confirmation, even when autonomous mode or a matched delivery action is configured to allow. The only exception is [temp scratch removal](#temp-scratch-removal) under active YOLO in the primary session.
 4. No UI, cancellation, a non-true answer or a dialog error cannot authorize execution. Approval is not cached; permission and Herdr blocker lifecycle events remain balanced.
 
 Children receive the lightweight `child-safety.ts` entry alongside `child-context.ts`; they do not need the full primary extension. The safety entry registers nothing outside `GENTLE_PI_AGENTS_CHILD=1`, preventing duplicate primary prompts during package auto-discovery. If the full primary extension is explicitly loaded in a child, its destructive-command path also blocks instead of prompting.

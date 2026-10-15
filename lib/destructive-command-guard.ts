@@ -6,6 +6,8 @@ export interface DestructiveCommandMatch {
 	kind: DestructionKind;
 	triggerIndex: number;
 	hardDeny: boolean;
+	/** Literal targets of a direct, top-level, unwrapped and unquoted recursive `rm`; absent otherwise. */
+	removalTargets?: readonly string[];
 }
 interface Token {
 	value: string;
@@ -148,6 +150,19 @@ function sqlDestroys(sql: string): boolean {
 	});
 }
 
+/** Operands of a plain `rm` invocation, or undefined when any argument is quoted, escaped or disables root protection. */
+function removalTargets(args: readonly Token[]): string[] | undefined {
+	const targets: string[] = [];
+	let options = true;
+	for (const arg of args) {
+		if (arg.raw !== arg.value || arg.value === "--no-preserve-root") return undefined;
+		if (options && arg.value === "--") options = false;
+		else if (options && arg.value.startsWith("-")) continue;
+		else targets.push(arg.value);
+	}
+	return targets.length > 0 ? targets : undefined;
+}
+
 export function recognizeDestructiveCommands(command: string, depth = 0): DestructiveCommandMatch[] {
 	if (depth > 4) return [];
 	const tokens = tokenize(command);
@@ -184,6 +199,8 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 		if (name === "rm" && args.some((arg) => /^-[^-]*[rR]/.test(arg) || arg === "--recursive")) {
 			const rootTarget = args.some((arg) => /^(?:\/(?:\*+)?$|\.{1,2}\/?$|~(?:\/|$)|\$\{?HOME\}?(?:\/|$))/.test(arg));
 			add(DESTRUCTION_KIND.FILESYSTEM, rootTarget);
+			const targets = depth === 0 && cursor === 0 && head.raw === "rm" ? removalTargets(segment.slice(1)) : undefined;
+			if (targets !== undefined) matches[matches.length - 1].removalTargets = targets;
 		}
 		if (name === "find") {
 			if (args.includes("-delete")) add(DESTRUCTION_KIND.FILESYSTEM);

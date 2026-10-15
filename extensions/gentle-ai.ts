@@ -1,5 +1,6 @@
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
+import { defaultTempScratchFs, isTempScratchRemoval, type TempScratchFs } from "../lib/yolo-temp-scratch.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
@@ -1951,9 +1952,16 @@ function yoloSegmentPrefix(command: string, triggerIndex: number): string {
 	return last === undefined ? head : head.slice(last.index + last[0].length);
 }
 
-/** Every guarded match and every recognized Git side effect must be a reversible push or non-interactive rebase. */
-function isReversibleYoloCommand(command: string, evaluation: GuardEvaluation): boolean {
-	if (evaluation.action !== "confirm" || evaluation.dataLoss || evaluation.matches.length === 0) return false;
+/**
+ * Every guarded match and every recognized Git side effect must be a reversible
+ * push or non-interactive rebase; the only data loss allowed is recursive
+ * removal of the session's own temp scratch (lib/yolo-temp-scratch.ts).
+ */
+function isReversibleYoloCommand(command: string, evaluation: GuardEvaluation, scratchFs?: TempScratchFs): boolean {
+	if (evaluation.action !== "confirm") return false;
+	const effects = recognizeDestructiveCommands(command);
+	const scratch = effects.map((effect) => effect.removalTargets !== undefined && isTempScratchRemoval(effect, scratchFs ??= defaultTempScratchFs()));
+	if (evaluation.matches.length === 0 && !scratch.includes(true)) return false;
 	for (const match of evaluation.matches) {
 		if (!YOLO_WAIVABLE_KEYS.has(match.key)) return false;
 		if (!YOLO_GIT_PREFIX_RE.test(yoloSegmentPrefix(command, match.triggerIndex))) return false;
@@ -1964,7 +1972,8 @@ function isReversibleYoloCommand(command: string, evaluation: GuardEvaluation): 
 	// restore, checkout --) to the primary policy; under YOLO only a rebase that
 	// a guarded match already vetted may remain.
 	const rebaseTriggers = new Set(evaluation.matches.filter((match) => match.key === "gitRebase").map((match) => match.triggerIndex));
-	for (const effect of recognizeDestructiveCommands(command)) {
+	for (const [index, effect] of effects.entries()) {
+		if (scratch[index]) continue;
 		if (effect.hardDeny || effect.kind !== "git") return false;
 		const rebase = /^git(?:\s+(?:-C|-c|--git-dir|--work-tree|--namespace)\s+\S+|\s+-\S+)*\s+(rebase)\b/.exec(command.slice(effect.triggerIndex));
 		if (rebase === null || !rebaseTriggers.has(effect.triggerIndex + rebase.index + rebase[0].lastIndexOf("rebase"))) return false;

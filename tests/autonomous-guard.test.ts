@@ -40,6 +40,51 @@ test("YOLO waives reversible push and rebase segments after full evaluation (#21
 	]) assert.equal(isReversibleYoloCommand(command, evaluateGuardedCommand(command, config)), false, command);
 });
 
+// YOLO also waives recursive removal of the session's own temp scratch: one
+// literal path component under a temp root whose admission-time lstat is
+// missing, a symlink, an own file or an own mktemp directory. Every other
+// effect in the command keeps its ordinary guard.
+test("YOLO waives recursive removal of own temp scratch only", () => {
+	const config = { autonomousMode: false, guardedCommands: {} };
+	const entry = (type: "dir" | "file" | "link", uid = 1000) => ({
+		uid, isDirectory: () => type === "dir", isFile: () => type === "file", isSymbolicLink: () => type === "link",
+	});
+	const entries = new Map([
+		["/tmp/tmp.8phya1BpFr", entry("dir")], ["/tmp/tmp.LKd1kBX8Rw", entry("dir")], ["/tmp/tmp.C94OVzf01o", entry("dir")],
+		["/tmp/ctx-backstop-pnpm-test.log", entry("file")], ["/tmp/tmp.abcdef1234", entry("dir")], ["/tmp/latest", entry("link", 0)],
+		["/var/tmp/tmp.zzzzzz", entry("dir")], ["/tmp/cache", entry("dir")], ["/tmp/tmp.other1234", entry("dir", 0)],
+		["/tmp/shared.log", entry("file", 0)],
+	]);
+	const fs = {
+		uid: 1000, tmpdir: "/tmp", home: "/home/user",
+		lstat(path: string) {
+			if (path === "/tmp/tmp.denied99") throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+			const found = entries.get(path);
+			if (found === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+			return found;
+		},
+	};
+	const waived = (command: string) => isReversibleYoloCommand(command, evaluateGuardedCommand(command, config), fs);
+	for (const command of [
+		"rm -rf /tmp/tmp.8phya1BpFr /tmp/tmp.LKd1kBX8Rw /tmp/tmp.C94OVzf01o /tmp/ctx-backstop-pnpm-test.log; cd /home/gentleman/work/gentle-pi-worktrees/harness-r1 && git log --oneline -1",
+		"rm -rf /tmp/tmp.abcdef1234", "rm -rf /tmp/ctx-backstop-pnpm-test.log", "rm -rf /tmp/latest", "rm -rf /tmp/tmp.gone1234",
+		"rm -r -f -- /var/tmp/tmp.zzzzzz", "rm -rf /tmp/tmp.abcdef1234 && git push -u origin feature/x",
+	]) assert.equal(waived(command), true, command);
+	for (const command of [
+		"rm -rf /tmp", "rm -rf /tmp/", "rm -rf /tmp/*", "rm -rf /tmp/tmp.x/", "rm -rf /tmp/tmp.x/../..", "rm -rf /tmp/./tmp.x",
+		"rm -rf /tmp/a/b", `rm -rf "$TMPDIR/x"`, "rm -rf $TMPDIR/x", "rm -rf /tmp/tmp.{a,b}", "rm -rf /tmp/tmp.abc?", "rm -rf tmp.abcdef1234",
+		"sudo rm -rf /tmp/tmp.abcdef1234", "xargs rm -rf /tmp/tmp.abcdef1234", "rm -rf --no-preserve-root /tmp/tmp.abcdef1234",
+		"rm -rf /tmp/tmp.abcdef1234 ~/foo", "rm -rf /tmp/tmp.abcdef1234 && rm -rf data", "rm -rf /tmp/tmp.abcdef1234 data",
+		"rm -rf /tmp/tmp.abcdef1234 && find /tmp/x -delete", "rm -rf /tmp/tmp.abcdef1234 && psql -c 'DROP TABLE users'",
+		"rm -rf /tmp/tmp.abcdef1234 && git push --delete origin main", "rm -rf /tmp/tmp.abcdef1234 && npm publish",
+		"rm -rf /tmp/tmp.abcdef1234 && git stash drop", "rm -rf /tmp/cache", "rm -rf /tmp/tmp.other1234", "rm -rf /tmp/shared.log",
+		"rm -rf /tmp/tmp.denied99", "rm -rf /home/user/tmp.abcdef1234", "sh -c 'rm -rf /tmp/tmp.abcdef1234'",
+		"find /tmp -maxdepth 1 -name 'tmp.*' -exec rm -rf {} +", "rm -rf /tmp/tmp.gone1234>important.txt", "rm -rf /tmp/tmp.gone1234 2>/dev/null",
+	]) assert.equal(waived(command), false, command);
+	// A missing uid (no POSIX ownership) never proves own scratch.
+	assert.equal(isReversibleYoloCommand("rm -rf /tmp/tmp.abcdef1234", evaluateGuardedCommand("rm -rf /tmp/tmp.abcdef1234", config), { ...fs, uid: undefined }), false);
+});
+
 // gentle-shell#2174: a guarded word inside an argument of a known data command
 // (search, print, view, non-executing edit) is text, not an operation. Every
 // opaque form keeps today's lexical match.

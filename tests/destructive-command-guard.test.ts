@@ -78,7 +78,24 @@ test("recognizes later compound destruction and shell wrappers without matching 
 });
 
 test("root/home recursive removal and destructive git retain hard denial", () => {
-	for (const command of [`rm -fr /`, `rm -r "$HOME"`, `git -C /repo reset --hard`, `git push -f`, `git push ';' -f main`, `rm -r ';' /`]) {
+	for (const command of [`rm -fr /`, `rm -r "$HOME"`, `git -C /repo reset --hard`, `git push -f`, `git push ';' -f main`, `rm -r ';' /`, `rm -rf /tmp/tmp.abcdef1234 ~/foo`, `rm -rf /tmp/tmp.abcdef1234 /`]) {
 		assert.equal(recognizeDestructiveCommands(command)[0]?.hardDeny, true, command);
+	}
+});
+
+// Only a direct, unwrapped, unquoted `rm` exposes its literal targets; the
+// YOLO temp-scratch waiver has nothing to inspect anywhere else.
+test("exposes literal removal targets only for a direct top-level rm", () => {
+	assert.deepEqual(recognizeDestructiveCommands(`rm -rf /tmp/tmp.abcdef1234 /tmp/x.log; git log -1`)[0]?.removalTargets, ["/tmp/tmp.abcdef1234", "/tmp/x.log"]);
+	assert.deepEqual(recognizeDestructiveCommands(`rm -r -f -- /tmp/tmp.abcdef1234`)[0]?.removalTargets, ["/tmp/tmp.abcdef1234"]);
+	for (const command of [
+		`sudo rm -rf /tmp/tmp.abcdef1234`, `env rm -rf /tmp/tmp.abcdef1234`, `X=1 rm -rf /tmp/tmp.abcdef1234`,
+		`xargs rm -rf /tmp/tmp.abcdef1234`, `/bin/rm -rf /tmp/tmp.abcdef1234`, `sh -c 'rm -rf /tmp/tmp.abcdef1234'`,
+		`find /tmp -name tmp.abcdef1234 -exec rm -rf {} +`, `rm -rf "$TMPDIR/x"`, `rm -rf '/tmp/tmp.abcdef1234'`,
+		`rm -rf --no-preserve-root /tmp/tmp.abcdef1234`, `rm -rf`,
+	]) {
+		const matches = recognizeDestructiveCommands(command);
+		assert.ok(matches.length > 0, command);
+		assert.ok(matches.every((match) => match.removalTargets === undefined), command);
 	}
 });
