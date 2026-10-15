@@ -25,6 +25,7 @@ import { applyTaskEvent, emptyThread, MISSING_TOOLS_NOTE_PREFIX, TASK_EVENT, TAS
 import { NativePointerScope } from "../lib/native-pointer-region.ts";
 import { PresenceCursor, PresencePublisher, listPresence, readActivity, readDiscovery } from "../lib/orchestrator-presence.ts";
 import { OrchestratorScopeCache } from "../lib/orchestrator-scope.ts";
+import { TODO_PROGRESS_EVENT } from "../lib/shell-todo.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
 import { AgentRunner, REQUESTED_TOOLS_ENV, type TaskRequest } from "../lib/agents-runner.ts";
@@ -6661,4 +6662,32 @@ test("a human stop of a monitor from /gentle:jobs delivers its pending lines, th
 		await fire("session_shutdown", ctx);
 		jobs.cleanup();
 	}
+});
+
+// Harness roadmap T6: todo progress reaches peers without a model turn spent on
+// orchestrator_session_id, and never replaces the owner's curated fields.
+test("todo progress publishes merged into the owner's curated state, only for this session", async () => {
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const profile = realpathSync(mkdtempSync(join(root, "todo-progress-")));
+	runtime.deps.agentHome = profile;
+	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/todo-progress.sock", createdAt: 1 };
+	const registry = { list: async () => [], listActivations: async () => [peer] };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, record: peer, start: async () => {}, close: async () => {} }),
+		createClient: () => ({ close() {}, sendNotification: async () => { throw new Error("unexpected message"); } }),
+	};
+	Object.assign(h.pi, { setSessionName() {} });
+	Object.assign(ctx.sessionManager, { getSessionName: () => "", getBranch: () => h.entries });
+	gentleAgents(h.pi, {}, runtime.deps);
+	await h.fire("session_start", ctx);
+	const published = () => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 0, total: 2, current: "Write parser" });
+	assert.deepEqual(published(), { progress: "0/2 done; current: Write parser" }, "progress publishes before any curated state");
+	await h.tools.get("orchestrator_session_id")!.execute("own", { subject: "Ledger", state: { objective: "Ship the ledger", decisions: "inline" } }, undefined, undefined, ctx);
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 2, current: null });
+	assert.deepEqual(published(), { objective: "Ship the ledger", decisions: "inline", progress: "1/2 done" });
+	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.aliases?.currentAlias, "Ledger", "the subject survives");
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "other", done: 2, total: 2, current: null });
+	assert.equal(published()?.progress, "1/2 done", "another session's todo is ignored");
 });

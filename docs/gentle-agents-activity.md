@@ -266,10 +266,12 @@ are unchanged; caller replacement prevents a stale `recorded` result.
 Call `orchestrator_consult` with required stable `recipient_session_id`, optional
 `kind: "metadata"` (default), and optional existing opaque catalog `cursor`.
 No free-form question, owner request, human picker or read-consent dialog is used
-for this profile's explicitly published data. Publish `subject` and `state` together
-before work beyond small direct tasks; update at task changes and completion. Keep
-small direct tasks exempt. Batch with setup/progress; do not add a model turn solely
-to publish or emit per-tool/token updates.
+for this profile's explicitly published data. Declare a `subject` before work beyond
+small direct tasks. Progress is published automatically: after each todo write the
+runtime sets `progress` to `<done>/<total> done; current: <in-progress title>`, merged
+into the owner's curated fields, so the model never spends a turn reporting status.
+Keep small direct tasks exempt. Do not add a model turn solely to publish or emit
+per-tool/token updates.
 
 Use `objective` for the goal, `progress` for current and next scope, and `blockers`
 for anything preventing progress. Use `state.work` for relevant area/topic and

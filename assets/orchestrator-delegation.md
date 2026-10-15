@@ -11,7 +11,7 @@ Exceptions:
 - Preserve exact user quotes, UI copy, error messages, filenames, commands, and domain terms in their original language when they are evidence.
 - Ask a subagent to produce Spanish only when its output is intended to be pasted directly to the user, a PR/comment/reply in Spanish, or Spanish-language product/documentation text.
 
-Before delegating, publish subject and state via `orchestrator_session_id` (reference).
+Before delegating, declare a subject via `orchestrator_session_id` (reference).
 
 #### Delegation Triggers
 
