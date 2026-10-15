@@ -11,6 +11,8 @@ Organic Driven Development (ODD) keeps explore → implement → proportionate c
 
 ODD runs on every request, without the user asking for a workflow, a plan, or task tracking.
 
+The primary-session prompt renders steps 1-7, the phase-reporting line, and the resume line verbatim from Gentle AI's ODD routing block for Pi, published in the provider contract bundle as `routing/pi.md` (contract 1.4.0) and mirrored in `contracts/review-provider-contract-mirror/`. The prompt verifies the mirrored file against the mirror lock's SHA-256 and fails closed when it is missing, tampered, or reshaped. The list below summarizes those steps.
+
 1. **Authorize** — read-only unless implementation is authorized; ask one clarification when intent is ambiguous.
 2. **Explore** — read existing code and requirements first, proportionately to the request.
 3. **Resolve uncertainty** — optional research or one focused product question only for a real unresolved decision.
@@ -1385,6 +1387,7 @@ To opt out:
 | `extensions/startup-banner.ts` | Shows and configures the startup intro, color presets, and compact runtime panel.     |
 | `extensions/skill-registry.ts` | Maintains `.atl/skill-registry.md` from project/user skills and closes file watchers on shutdown.          |
 | `extensions/codegraph-tools.ts` | Runs workspace-scoped CodeGraph init/query/explore and keeps `.codegraph/` out of git through the worktree's local `info/exclude` (never a tracked file). |
+| `contracts/review-provider-contract-mirror/` | Verified mirror of the Gentle AI provider contract bundle: the `orchestration/pi.md` review execution contract and the `routing/pi.md` ODD steps. Refresh it only with `node scripts/mirror-provider-contract.mjs --bundle <local archive or tree>`; `pnpm run check:provider-contract` checks it offline against its lock. |
 | `assets/orchestrator.md`       | Parent-session orchestration contract (always-on core).                                                    |
 | `assets/orchestrator-delegation.md` | Lazy-loaded delegation card read when the parent delegates: the mirrored gentle-ai triggers, handoff, launch, and Key Learnings rules. |
 | `assets/orchestrator-delegation-reference.md` | Lazy-loaded delegation reference read only when named: per-action table, Work Routing Ladder, background policy, runtime bindings, canonical workflows. |
