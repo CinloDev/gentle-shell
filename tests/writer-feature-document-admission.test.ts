@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -69,10 +69,10 @@ test("S16: previous behavior holds for non-writers and Judgment Day fix agents",
 
 type ToolCallHandler = (event: { toolName: string; input: unknown }, ctx: ExtensionContext) => Promise<{ block?: boolean; reason?: string } | undefined>;
 
-function launchThroughHook(input: Record<string, unknown>, cwd: string, tokens: number) {
+function launchThroughHook(input: Record<string, unknown>, cwd: string, tokens: number, processEnv: NodeJS.ProcessEnv = {}) {
 	const handlers = new Map<string, ToolCallHandler>();
 	const pi = { on(name: string, handler: ToolCallHandler) { handlers.set(name, handler); }, events: { emit() {} }, registerCommand() {}, registerTool() {} } as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	createGentleAiExtension({ nativeReviewCli: null, processEnv })(pi);
 	return handlers.get("tool_call")!({ toolName: "subagent_run", input }, {
 		cwd, hasUI: false, ui: { confirm: async () => true },
 		getContextUsage: () => ({ tokens, contextWindow: 272_000, percent: Math.round((tokens / 272_000) * 100) }),
@@ -90,4 +90,44 @@ test("S16: the orchestrator tool_call hook blocks an undocumented writer and adm
 	assert.equal(admitted?.block, undefined);
 	const explorer = await launchThroughHook({ agent: "gentle-ai-explore", mode: "task", task: "Map src/budget.ts" }, bare, 20_000);
 	assert.equal(explorer?.block, undefined, "read-only subagents are unaffected");
+});
+
+// Verifier B1: the delegation card tells the parent to write `Spec: odd/tasks/<feature>.md (read until "## Log").
+// Do T#; S#.`, and a live x6 run wrote `Spec: ... .md T1 S1;`. Both name a document task and must be admitted.
+test("S16: the delegation card format and a comma-free task reference are admitted", (t) => {
+	const root = workspace(true);
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	for (const line of [
+		'Spec: odd/tasks/ledger.md (read until "## Log"). Do T2; S3.',
+		"Spec: odd/tasks/ledger.md T1 S1; read through Tasks before Log.",
+		"- Spec: `odd/tasks/ledger.md`, T4",
+	]) {
+		assert.equal(rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `${line}\nImplement it.${surfaces}` }, { root, contextTokens: 0 }), undefined, line);
+	}
+});
+
+test("S16: a Spec mention inside prose, outside odd/tasks, or through a symlink leaving the root is rejected", (t) => {
+	const root = workspace(true);
+	const outside = mkdtempSync(join(tmpdir(), "writer-admission-outside-"));
+	t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+	writeFileSync(join(root, "README.md"), "# readme\n");
+	writeFileSync(join(outside, "elsewhere.md"), "# elsewhere\n");
+	symlinkSync(join(outside, "elsewhere.md"), join(root, "odd", "tasks", "link-out.md"));
+	for (const task of [
+		"Do not use Spec: odd/tasks/ledger.md, T1 here.",
+		"Spec: odd/tasks/../../README.md, T1",
+		"Spec: odd/tasks/link-out.md, T1",
+	]) {
+		assert.ok(rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `${task}${surfaces}` }, { root, contextTokens: 0 })?.block, task);
+	}
+});
+
+test("S16: child sessions are exempt and an empty workspace_root falls back to the session cwd", async (t) => {
+	const bare = workspace(false);
+	const documented = workspace(true);
+	t.after(() => { rmSync(bare, { recursive: true, force: true }); rmSync(documented, { recursive: true, force: true }); });
+	const child = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement it.${surfaces}` }, bare, 0, { GENTLE_PI_AGENTS_CHILD: "1" });
+	assert.equal(child?.block, undefined, "a child session is not gated");
+	const emptyRoot = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", workspace_root: "", task: `Spec: odd/tasks/ledger.md, T1${surfaces}` }, documented, 0);
+	assert.equal(emptyRoot?.block, undefined, "an empty workspace_root means the session cwd");
 });

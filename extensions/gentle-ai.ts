@@ -10366,7 +10366,8 @@ function createGentleAiExtensionForTesting(
 			if (writerScopeDenied) return writerScopeDenied;
 			if (primaryToolCall) {
 				const launch = event.input as Record<string, unknown>;
-				const root = typeof launch.workspace_root === "string" ? launch.workspace_root : typeof launch.repository_root === "string" ? launch.repository_root : ctx.cwd;
+				const selected = [launch.workspace_root, launch.repository_root].find((value): value is string => typeof value === "string" && value.trim() !== "");
+				const root = selected ? resolve(ctx.cwd, selected) : ctx.cwd;
 				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextTokens: ctx.getContextUsage?.()?.tokens });
 				if (undocumentedWriter) return undocumentedWriter;
 			}
