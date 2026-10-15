@@ -62,6 +62,23 @@ test("headless children reject corrected literal forms without prompting", async
 	}
 });
 
+// gentle-pi#2285: removal behind reserved words, in backticks or in eval is still data loss.
+test("children block destruction after reserved words, in backticks and in eval", async () => {
+	for (const primary of [false, true]) {
+		const h = harness(true, primary);
+		const ctx = context(async () => { throw new Error("child must never prompt"); }, false);
+		for (const command of [
+			`if true; then rm -rf data; fi`, `for d in a b; do rm -rf "$d"; done`, "echo `rm -rf data`", `eval 'rm -rf data'`,
+			`if true; then rm -rf ~; fi`, `{ rm -rf data; }`, `while true; do rm -rf data; done`,
+		]) {
+			assert.equal((await h.handlers[0](event(command), ctx) as { block?: boolean })?.block, true, command);
+		}
+		for (const command of [`if [ -f x ]; then echo ok; fi`, `for f in *; do cat "$f"; done`, "echo `date`", `grep "then rm -rf" x`]) {
+			assert.equal(await h.handlers[0](event(command), ctx), undefined, command);
+		}
+	}
+});
+
 test("primary requires fresh confirmation, cancellation and missing UI block", async () => {
 	const h = harness(false, true);
 	const command = `psql -c 'DROP TABLE users'`;

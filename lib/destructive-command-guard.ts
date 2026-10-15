@@ -58,10 +58,14 @@ const WRAPPER_VALUE_OPTIONS: Record<string, readonly string[]> = {
 	xargs: ["-n", "-I", "-P", "--max-args", "--replace", "--max-procs"],
 };
 const WRAPPERS = ["env", "sudo", "command", "exec", "nohup", "timeout", "xargs"];
+// gentle-pi#2285: unquoted reserved words that open a compound body or a
+// condition are followed by a command in command position.
+const RESERVED_WORDS = new Set(["then", "else", "elif", "do", "{", "!", "if", "while", "until"]);
 
-/** Index of the executable token after assignments and familiar wrappers. */
+/** Index of the executable token after reserved words, assignments and familiar wrappers. */
 function headCursor(segment: readonly Token[]): number {
 	let cursor = 0;
+	while (cursor < segment.length && segment[cursor].raw === segment[cursor].value && RESERVED_WORDS.has(segment[cursor].value)) cursor++;
 	while (cursor < segment.length) {
 		const value = segment[cursor].value;
 		if (/^[A-Za-z_][A-Za-z_0-9]*=/.test(value)) {
@@ -206,6 +210,37 @@ function removalTargets(args: readonly Token[]): string[] | undefined {
 	return targets.length > 0 ? targets : undefined;
 }
 
+/**
+ * Bodies of backtick command substitutions outside single quotes, with the
+ * backslash escapes that backticks remove, and the offset of each opening
+ * backtick. An unterminated substitution is a shell syntax error and runs
+ * nothing, so it yields no body. Heredoc bodies stay data, as elsewhere.
+ */
+function backtickBodies(command: string): Array<{ body: string; index: number }> {
+	const bodies: Array<{ body: string; index: number }> = [];
+	const text = blankHeredocs(command);
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index];
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+		} else if (char === "\\") {
+			index++;
+		} else if (char === "'" && quote === undefined) {
+			quote = "'";
+		} else if (char === '"') {
+			quote = quote === '"' ? undefined : '"';
+		} else if (char === "`") {
+			let end = index + 1;
+			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
+			if (end >= text.length) break;
+			bodies.push({ body: text.slice(index + 1, end).replace(/\\([\\$`])/g, "$1"), index });
+			index = end;
+		}
+	}
+	return bodies;
+}
+
 export function recognizeDestructiveCommands(command: string, depth = 0): DestructiveCommandMatch[] {
 	if (depth > 4) return [];
 	const tokens = tokenize(command);
@@ -231,6 +266,11 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 				// when quote removal changes the payload's byte positions.
 				matches.push(...recognizeDestructiveCommands(args[flag + 1], depth + 1).map((match) => ({ ...match, triggerIndex: head.index })));
 			}
+		}
+		// `eval` runs its arguments joined by spaces, like a literal `sh -c` payload.
+		if (name === "eval") {
+			const payload = (args[0] === "--" ? args.slice(1) : args).join(" ");
+			matches.push(...recognizeDestructiveCommands(payload, depth + 1).map((match) => ({ ...match, triggerIndex: head.index })));
 		}
 		if (["psql", "mysql", "mariadb", "sqlite3"].includes(name)) {
 			const payloads = args.map((arg) => arg.replace(/^(?:--command|--execute)=/, ""));
@@ -282,6 +322,10 @@ export function recognizeDestructiveCommands(command: string, depth = 0): Destru
 		previous = segment;
 		previousSeparator = tokens[end]?.value ?? "";
 		start = end + 1;
+	}
+	// Backtick substitutions run like `$(...)`, also inside double quotes.
+	for (const { body, index } of backtickBodies(command)) {
+		matches.push(...recognizeDestructiveCommands(body, depth + 1).map((match) => ({ ...match, triggerIndex: index })));
 	}
 	return matches;
 }
