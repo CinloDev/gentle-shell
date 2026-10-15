@@ -243,6 +243,7 @@ const DEFAULT_TOOLS: readonly string[] = [];
 const TERMINATION_GRACE_MS = 250;
 const GROUP_CONFIRM_MS = 25;
 const GROUP_CONFIRM_DEADLINE_MS = 1_000;
+const QUARANTINE_PROBE_MS = 1_000;
 const QUERY_REJECTION_ERRORS = new Set([
 	"invalid child IPC frame",
 	"invalid child IPC correlation",
@@ -1059,6 +1060,19 @@ export class AgentRunner {
 		const exitDesc = formatChildExit(code, signal);
 		if (this.groupExists(live)) {
 			if (!live.terminal) this.requestStop(id, TASK_STATUS.FAILED, `pi exited with ${exitDesc} before agent_settled${this.stderrSuffix(live)}`);
+			else if (live.quarantined) live.cancelGrace = this.deps.schedule(() => this.awaitQuarantinedGroup(id, live), QUARANTINE_PROBE_MS);
+			return;
+		}
+		this.completeExit(id, live);
+	}
+
+	// Quarantine stopped probing, and a descendant outlives the child's observed
+	// exit: no later event reports the group's end, so keep probing until it is
+	// gone, then release the slot and scratch.
+	private awaitQuarantinedGroup(id: string, live: LiveTask): void {
+		if (this.live.get(id) !== live) return;
+		if (this.groupExists(live)) {
+			live.cancelGrace = this.deps.schedule(() => this.awaitQuarantinedGroup(id, live), QUARANTINE_PROBE_MS);
 			return;
 		}
 		this.completeExit(id, live);

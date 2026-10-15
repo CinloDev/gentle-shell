@@ -29,11 +29,11 @@ function envNumber(env: Env, name: string, valid: (value: number) => boolean, fa
 	return valid(value) ? value : fallback;
 }
 
-/** min(absolute cap, fraction x context window); an unknown window leaves the cap alone. */
+/** min(absolute cap, fraction x context window); an unknown window leaves the cap alone. Never 0: an empty context is not past it. */
 export function contextBackstopThreshold(contextWindow: number | null | undefined, env: Env = process.env): number {
 	const cap = envNumber(env, CONTEXT_BACKSTOP_TOKENS_ENV, positive, CONTEXT_BACKSTOP_TOKENS);
 	const fraction = envNumber(env, CONTEXT_BACKSTOP_FRACTION_ENV, (value) => positive(value) && value <= 1, CONTEXT_BACKSTOP_FRACTION);
-	return positive(contextWindow) ? Math.min(cap, Math.floor(fraction * contextWindow)) : cap;
+	return positive(contextWindow) ? Math.min(cap, Math.max(1, Math.floor(fraction * contextWindow))) : cap;
 }
 
 /** Unknown tokens never count as reached. */

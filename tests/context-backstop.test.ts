@@ -39,6 +39,15 @@ test("the cap and the fraction are overridable by environment; invalid values ke
 	}
 });
 
+// R1 review advisory: a tiny window or fraction floored the threshold to 0, so an
+// empty context counted as reaching the backstop (and admitted every writer).
+test("the threshold is never below one token, so an empty context never reaches it", () => {
+	assert.equal(contextBackstopThreshold(200_000, { [CONTEXT_BACKSTOP_FRACTION_ENV]: "0.000001" }), 1);
+	assert.equal(contextBackstopThreshold(1, {}), 1);
+	assert.equal(contextBackstopReached({ tokens: 0, contextWindow: 1 }, {}), false);
+	assert.equal(contextBackstopReached({ tokens: 1, contextWindow: 1 }, {}), true);
+});
+
 test("unknown tokens never count as reaching the backstop", () => {
 	assert.equal(contextBackstopReached({ tokens: 150_000, contextWindow: 1_000_000 }, {}), true);
 	assert.equal(contextBackstopReached({ tokens: 149_999, contextWindow: 1_000_000 }, {}), false);

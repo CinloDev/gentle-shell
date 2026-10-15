@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import type { ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 
@@ -11,10 +11,12 @@ export const SLICE_LINES = 400;
 // Generated files that do not count as authored lines.
 const GENERATED = [/(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|composer\.lock|Gemfile\.lock)$/, /\.min\.(js|css)$/];
 
-const COMMIT = /(^|[;&|(]\s*|\s)git(\s+-[Cc]\s+\S+)*\s+commit(\s|$)/;
+// `git [-C dir | -c key=value]... commit` at the start of a segment, after any variable assignments.
+const COMMIT = /^\s*(\w+=\S*\s+)*git(\s+-[Cc]\s+\S+)*\s+commit(\s|$)/;
 
+/** A commit is a git invocation that starts a shell segment; text that only mentions one (echo, a message) is not. */
 export function isGitCommitCommand(command: string): boolean {
-	return COMMIT.test(command) && !/(^|[;&|]\s*)echo\s[^;&|]*git/.test(command);
+	return command.split(/[;&|(\n]/).some((segment) => COMMIT.test(segment));
 }
 
 /** The directory the commit runs in: `git -C <dir>`, else a leading `cd <dir> &&`, else the session cwd. */
@@ -26,32 +28,35 @@ export function commitTargetDirectory(command: string, cwd: string): string {
 	return gitDir ? resolve(base, unquote(gitDir)) : base;
 }
 
-type Git = (args: string[], cwd: string) => string | undefined;
+type Git = (args: string[], cwd: string) => Promise<string | undefined>;
 
-const runGit: Git = (args, cwd) => {
-	try {
-		return execFileSync("git", args, { cwd, encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
-	} catch {
-		return undefined;
-	}
-};
+// Asynchronous, so the parent stays responsive while git answers.
+const runGit: Git = (args, cwd) => new Promise((resolve) => {
+	execFile("git", args, { cwd, encoding: "utf8", timeout: 2_000 }, (error, stdout) => resolve(error ? undefined : stdout.trim()));
+});
 
-function defaultBranch(cwd: string, git: Git): string | undefined {
-	const remote = git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], cwd);
+async function defaultBranch(cwd: string, git: Git): Promise<string | undefined> {
+	const remote = await git(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], cwd);
 	if (remote) return remote;
-	return ["main", "master"].find((name) => git(["rev-parse", "--verify", "-q", `refs/heads/${name}`], cwd) !== undefined);
+	for (const name of ["main", "master"]) {
+		if (await git(["rev-parse", "--verify", "-q", `refs/heads/${name}`], cwd) !== undefined) return name;
+	}
+	return undefined;
 }
 
 /** One line for the parent after a commit on a feature branch, or undefined when there is no slice to report. */
-export function commitSliceReport(cwd: string, git: Git = runGit): string | undefined {
-	const branch = git(["symbolic-ref", "-q", "--short", "HEAD"], cwd);
-	const target = branch === undefined ? undefined : defaultBranch(cwd, git);
+export async function commitSliceReport(cwd: string, git: Git = runGit): Promise<string | undefined> {
+	const branch = await git(["symbolic-ref", "-q", "--short", "HEAD"], cwd);
+	const target = branch === undefined ? undefined : await defaultBranch(cwd, git);
 	if (!branch || !target || branch === target || `origin/${branch}` === target) return undefined;
-	const base = git(["merge-base", "HEAD", target], cwd);
-	const commits = base ? Number(git(["rev-list", "--count", `${base}..HEAD`], cwd)) : 0;
+	const base = await git(["merge-base", "HEAD", target], cwd);
+	const commits = base ? Number(await git(["rev-list", "--count", `${base}..HEAD`], cwd)) : 0;
 	if (!base || !(commits > 0)) return undefined;
+	// A failed or timed-out diff is not an empty one: report nothing rather than 0.
+	const numstat = await git(["diff", "--numstat", "--no-renames", base, "HEAD"], cwd);
+	if (numstat === undefined) return undefined;
 	let lines = 0;
-	for (const row of (git(["diff", "--numstat", "--no-renames", base, "HEAD"], cwd) ?? "").split("\n")) {
+	for (const row of numstat.split("\n")) {
 		const [added, deleted, path] = row.split("\t");
 		if (!path || added === "-" || GENERATED.some((pattern) => pattern.test(path))) continue;
 		lines += Number(added) + Number(deleted);
@@ -62,11 +67,14 @@ export function commitSliceReport(cwd: string, git: Git = runGit): string | unde
 		: `${head} ${SLICE_LINES - lines} lines left before the ~${SLICE_LINES}-line slice.`;
 }
 
-/** tool_result patch for a successful parent `git commit`: the slice line appended, structured content kept. */
-export function commitSliceToolResult(event: Pick<ToolResultEvent, "input" | "isError" | "content" | "structuredContent">, cwd: string, git: Git = runGit): ToolResultEventResult | undefined {
+/**
+ * tool_result patch for a successful parent `git commit`: the slice line appended, structured content kept.
+ * Only foreground `bash`: a background job's result arrives before its commit exists.
+ */
+export async function commitSliceToolResult(event: Pick<ToolResultEvent, "toolName" | "input" | "isError" | "content" | "structuredContent">, cwd: string, git: Git = runGit): Promise<ToolResultEventResult | undefined> {
 	const command = (event.input as { command?: unknown } | undefined)?.command;
-	if (event.isError !== false || typeof command !== "string" || !isGitCommitCommand(command)) return undefined;
-	const report = commitSliceReport(commitTargetDirectory(command, cwd), git);
+	if (event.toolName !== "bash" || event.isError !== false || typeof command !== "string" || !isGitCommitCommand(command)) return undefined;
+	const report = await commitSliceReport(commitTargetDirectory(command, cwd), git);
 	if (!report) return undefined;
 	return {
 		content: [...event.content, { type: "text", text: `\n${report}` }],

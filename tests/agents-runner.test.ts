@@ -3,7 +3,7 @@ import test from "node:test";
 import fs, { existsSync, readFileSync, statSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { AGENT_MODE, parseAgentsConfig, resolveAgentProfile, type AgentDefinition } from "../lib/agents-config.ts";
 import { MISSING_TOOLS_NOTE_PREFIX, TASK_STATUS, TaskStore, THREAD_ITEM, type TaskRecord } from "../lib/agents-protocol.ts";
@@ -1865,13 +1865,67 @@ test("a quarantined child keeps its TMPDIR, since a descendant may still use it"
 	assert.equal(existsSync(childTmp), false, "the proven exit removes the quarantined child's TMPDIR");
 });
 
+// R1 review advisory: a quarantined POSIX child whose own exit arrived while a
+// descendant still held its group was never probed again, so its TMPDIR and
+// slot stayed for the rest of the session after the group ended.
+test("a quarantined child whose exit is seen before its group ends frees its TMPDIR and slot once the group is gone", async () => {
+	const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
+	let now = 1_000;
+	let groupAlive = true;
+	let launches = 0;
+	const childTmps: string[] = [];
+	const store = new TaskStore();
+	let fake: FakeChild | undefined;
+	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 10_000 }, {
+		spawn: (_command, _args, options) => {
+			childTmps.push((options as { env: NodeJS.ProcessEnv }).env.TMPDIR ?? "");
+			return (fake = fakeChild({ exitOnKill: false, pid: 90 + (launches += 1) })).child;
+		},
+		now: () => now,
+		schedule: (fn, ms) => {
+			const timer = { fn, ms, cancelled: false };
+			timers.push(timer);
+			return () => { timer.cancelled = true; };
+		},
+		pi: { command: "pi", args: [] },
+		process: { platform: "linux", kill: (_pid, signal) => {
+			if (signal === 0 && !groupAlive) throw Object.assign(new Error("group probe"), { code: "ESRCH" });
+		} },
+	}, { askUser: async () => ({ value: "yes" }) });
+	const first = runner.run(request());
+	const second = runner.run(request({ prompt: "queued" }));
+	await tick();
+	const quarantined = fake!;
+	runner.cancel(first.id);
+	timers.find((timer) => timer.ms === 250)!.fn();
+	now = 5_000;
+	timers.filter((timer) => timer.ms === 25).at(-1)!.fn();
+	await tick();
+	assert.match(store.get(first.id)?.error ?? "", /capacity quarantined/);
+	quarantined.exit(0);
+	await tick();
+	assert.equal(existsSync(childTmps[0]), true, "a descendant still holds the group, so the TMPDIR stays");
+	assert.equal(store.get(second.id)?.status, TASK_STATUS.QUEUED, "the slot stays quarantined while the group lives");
+	groupAlive = false;
+	const probe = timers.filter((timer) => !timer.cancelled && timer.ms === 1_000).at(-1);
+	assert.ok(probe, "the observed exit keeps probing the remaining group");
+	probe.fn();
+	await tick();
+	assert.equal(existsSync(childTmps[0]), false, "the gone group removes the quarantined child's TMPDIR");
+	assert.equal(store.get(second.id)?.status, TASK_STATUS.RUNNING, "the freed slot starts queued work");
+	assert.equal(store.get(first.id)?.error, `process cleanup unconfirmed after 1000ms; capacity quarantined`, "the recorded outcome is unchanged");
+	runner.cancel(second.id);
+	fake!.exit(0);
+	await tick();
+});
+
 test("a relative inherited TMPDIR falls back to the system temp dir, so the child's path is absolute", async () => {
 	const fake = fakeChild();
 	let childTmp = "";
 	const runner = scratchRunner((env) => { childTmp = env.TMPDIR ?? ""; return fake.child; });
 	const task = runner.run(request({ env: { TMPDIR: "reltmp" } }));
 	await tick();
-	assert.ok(childTmp.startsWith(`${tmpdir()}/gentle-pi-subagent-tmp-`), childTmp);
+	assert.ok(childTmp.startsWith(join(tmpdir(), "gentle-pi-subagent-tmp-")), childTmp);
 	fake.exit(0);
 	await runner.waitFor(task.id);
 	assert.equal(existsSync(childTmp), false);

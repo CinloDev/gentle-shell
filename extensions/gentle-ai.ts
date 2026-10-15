@@ -10387,7 +10387,7 @@ function createGentleAiExtensionForTesting(
 		// changed lines so delivery slicing reads a number, not an estimate.
 		if (SHELL_COMMAND_TOOLS.has(event.toolName)) {
 			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return undefined;
-			try { return withNotice(commitSliceToolResult(event, ctx.cwd)); } catch { return withNotice(undefined); }
+			try { return withNotice(await commitSliceToolResult(event, ctx.cwd)); } catch { return withNotice(undefined); }
 		}
 		await recordWriteResult(event, ctx);
 		return withNotice(undefined);

@@ -598,8 +598,13 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const current = typeof progress.current === "string" ? sanitizeDisplayLabel(progress.current).slice(0, 120) : "";
 		const text = `${progress.done}/${progress.total} done${current ? `; current: ${current}` : ""}`;
 		try {
-			const curated = stateCache.get(sessions)?.state ?? {};
-			stateCache.publish(sessions, { ...curated, progress: text }, (type, data) => pi.appendEntry(type, data));
+			const owned = stateCache.get(sessions);
+			// A state the owner withdrew stays withdrawn until the owner publishes again.
+			if (owned?.state === null) return;
+			const { progress: previous, ...curated } = owned?.state ?? {};
+			// A cleared list has no progress to report: drop the line, publish nothing new.
+			if (progress.total === 0 && previous === undefined) return;
+			stateCache.publish(sessions, progress.total === 0 ? curated : { ...curated, progress: text }, (type, data) => pi.appendEntry(type, data));
 			publishActivity();
 		} catch { /* stale session or over the state budget: keep the previous publication */ }
 	});

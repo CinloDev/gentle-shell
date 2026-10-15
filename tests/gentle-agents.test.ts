@@ -6693,4 +6693,15 @@ test("todo progress publishes merged into the owner's curated state, only for th
 	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.aliases?.currentAlias, "Ledger", "the subject survives");
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "other", done: 2, total: 2, current: null });
 	assert.equal(published()?.progress, "1/2 done", "another session's todo is ignored");
+	// R1 review advisory: a cleared list published "0/0 done" as if it were progress.
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 0, total: 0, current: null });
+	assert.deepEqual(published(), { objective: "Ship the ledger", decisions: "inline" }, "a cleared list removes the progress line and keeps curated fields");
+	// R1 review advisory: a withdrawn state must stay withdrawn until the owner publishes again.
+	await h.tools.get("orchestrator_session_id")!.execute("withdraw", { state: null }, undefined, undefined, ctx);
+	assert.equal(published(), null);
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 3, current: "Docs" });
+	assert.equal(published(), null, "automatic progress does not republish a withdrawn state");
+	await h.tools.get("orchestrator_session_id")!.execute("own", { state: { objective: "Ship v2" } }, undefined, undefined, ctx);
+	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 2, total: 3, current: null });
+	assert.deepEqual(published(), { objective: "Ship v2", progress: "2/3 done" }, "progress resumes once the owner publishes again");
 });
