@@ -10,7 +10,9 @@ const read = (path: string) => readFileSync(join(import.meta.dirname, "..", path
 const core = read("assets/orchestrator.md");
 const delegation = readDelegationDetail();
 const memory = read("assets/orchestrator-memory.md");
-const wrapper = read("extensions/gentle-ai.ts");
+// The harness as rendered by extensions/gentle-ai.ts, including the ODD steps
+// it takes from the mirrored provider bundle's routing/pi.md.
+const wrapper = __testing.buildGentlePrompt("gentleman");
 
 function containsAll(text: string, clauses: readonly string[]): void {
 	for (const clause of clauses) assert.ok(text.includes(clause), `missing contract: ${clause}`);
@@ -28,7 +30,7 @@ test("organic entry stays read-only without authorization and loads detail befor
 	containsAll(wrapper, [
 		"Default workflow: Organic Driven Development (MANDATORY)",
 		"Every request enters it",
-		"Detail for steps 3–7: \\`orchestrator-delegation.md\\` and \\`orchestrator-memory.md\\`.",
+		"Detail for steps 3–7: `orchestrator-delegation.md` and `orchestrator-memory.md`.",
 	]);
 	containsAll(delegation, [
 		"Investigation, explanation, review, comparison, and proposal-only requests remain read-only",

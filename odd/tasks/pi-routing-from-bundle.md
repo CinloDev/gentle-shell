@@ -31,7 +31,7 @@ Upstream: gentle-ai `feat/pi-routing-canon-bundle` (`5aa0b887`, `9e6f24f6`), not
 
 | ID | Specs | Work | Route | Status |
 |---|---|---|---|---|
-| T1 | S1-S5 | decoder + mirror 1.4.0, harness steps from the bundle, remove the hand mirror | delegated (context backstop) | pending |
+| T1 | S1-S5 | decoder + mirror 1.4.0, harness steps from the bundle, remove the hand mirror | delegated (context backstop) | done: `2c8c64dc5` (S2), slice-2 commit `feat(prompt): render…` (S1, S3-S5); see L2-L3 |
 
 ## Log
 
@@ -58,3 +58,24 @@ Upstream: gentle-ai `feat/pi-routing-canon-bundle` (`5aa0b887`, `9e6f24f6`), not
     bound 72); GREEN: `tests/provider-contract-bundle.test.ts` 42/42. A 1.3.0-shaped bundle still verifies (test).
   - Expected prompt effect of re-mirroring: the review contract fragment heading reads `mirrored provider bundle 1.4.0`
     (its `orchestration/pi.md` body is unchanged); `tests/review-contract-prompt.test.ts` pins the new label.
+- L3 (writer, T1 slice 2; S1, S3-S5): the harness renders ODD steps 1-7, phase reporting, and resume from the mirrored
+  `routing/pi.md` (lock-digest verified, cached per process, blank lines dropped); `extensions/gentle-ai.ts` keeps no
+  step literal. Missing, tampered, or reshaped `routing/pi.md` throws an explicit error, like a missing
+  `assets/orchestrator.md`, instead of rendering a harness without its workflow. Removed `scripts/mirror-odd-routing.mjs`,
+  the `mirror:odd-routing` script, and `fixtures/odd-routing-canonical.md`; the ratchet and the literal tests
+  (`odd-routing-contract`, `no-self-pause-contract`) now read the verified mirrored block or the rendered prompt.
+  - Golden: `tests/fixtures/primary-session-prompt/gentleman.golden.md` (SHA-256 `3b332d45…ef161`) captured from
+    `eebaf274e` in a scratch clone (`$S/base-pi`), assets root normalized; `tests/primary-session-prompt.test.ts`
+    compares it byte for byte. RED: 5 of 6 new tests failed (`readMirroredOddProtocolSteps is not a function`, step
+    literals present); GREEN after the change; the golden passed before and after.
+  - Differential (scratch scripts in `$S/scripts`): `buildGentlePrompt` at `eebaf274e` vs this branch for 54 inputs
+    (2 personas x 3 tool sets x 3 RDD lines x 3 host modes): 0 differing. Full `before_agent_start` appendSystemPrompt
+    (RDD unknown, native CLI present): the only difference is the review fragment heading `mirrored provider bundle
+    1.3.0` -> `1.4.0` (L2). The base's 1.3.0 mirror tree verifies with the new decoder (9 entries, routing empty, tree
+    `a2b95892…c023` = base lock).
+  - Checks: `pnpm test` all three stages passed (unit 6851 tests, 6779 pass, 0 fail, 72 skipped); `pnpm -s typecheck`,
+    `pnpm run check:provider-contract` (1.4.0, 10 entries), `pnpm run check:runtime-modules`,
+    `node scripts/verify-package-files.mjs`: passed.
+  - Size: authored changed lines (generated mirror, fixtures, and golden excluded) slice 1 = 379, slice 2 = 615
+    (+214/-401, mostly the removed hand mirror and its provenance tests); one PR per L1.
+  - Next: release gentle-ai with contract 1.4.0, then re-mirror from the published archive and compare its SHA-256.

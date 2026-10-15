@@ -1290,13 +1290,13 @@ function renderOrchestratorPrompt(
 // pinned at an 8192-byte budget (tests/orchestrator-budget.test.ts).
 const PROVIDER_CONTRACT_MIRROR_ROOT = join(PACKAGE_ROOT, "contracts", "review-provider-contract-mirror");
 const PROVIDER_CONTRACT_LOCK_FILE = "provider-contract.lock.json";
-const PI_ORCHESTRATION_RUNTIME = "pi";
+const PI_MIRROR_RUNTIME = "pi";
 
 let reviewContractPromptFragmentCache: string | null | undefined;
 let reviewContractPromptMissingWarned = false;
 
-// Verifies the mirrored orchestration/pi.md bytes against the lock's digest before injection (gentle-ai R1/R3).
-function readMirroredReviewContractFragment(mirrorRoot: string = PROVIDER_CONTRACT_MIRROR_ROOT): string | null {
+// Reads one mirrored bundle file after verifying its bytes against the lock's digest (gentle-ai R1/R3).
+function readVerifiedMirrorFile(mirrorRoot: string, bundlePath: string): { contractSemver: string; text: string } | null {
 	try {
 		const lockPath = join(mirrorRoot, PROVIDER_CONTRACT_LOCK_FILE);
 		const lock = JSON.parse(readFileSync(lockPath, "utf8")) as {
@@ -1304,18 +1304,69 @@ function readMirroredReviewContractFragment(mirrorRoot: string = PROVIDER_CONTRA
 			entries?: Record<string, unknown>;
 		};
 		if (typeof lock.contract_semver !== "string" || lock.contract_semver === "") return null;
-		const expectedSha256 = lock.entries?.[`orchestration/${PI_ORCHESTRATION_RUNTIME}.md`];
+		const expectedSha256 = lock.entries?.[bundlePath];
 		if (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/.test(expectedSha256)) return null;
-		const contractPath = join(mirrorRoot, `v${lock.contract_semver}`, "bundle", "orchestration", `${PI_ORCHESTRATION_RUNTIME}.md`);
-		const rawBytes = readFileSync(contractPath);
+		const filePath = join(mirrorRoot, `v${lock.contract_semver}`, "bundle", ...bundlePath.split("/"));
+		const rawBytes = readFileSync(filePath);
 		const actualSha256 = createHash("sha256").update(rawBytes).digest("hex");
 		if (!timingSafeEqual(Buffer.from(expectedSha256, "hex"), Buffer.from(actualSha256, "hex"))) return null;
-		const text = rawBytes.toString("utf8").trim();
-		if (text.length === 0) return null;
-		return `## Gentle AI review execution contract (mirrored provider bundle ${lock.contract_semver})\n\n${text}`;
+		return { contractSemver: lock.contract_semver, text: rawBytes.toString("utf8") };
 	} catch {
 		return null;
 	}
+}
+
+// Verifies the mirrored orchestration/pi.md bytes against the lock's digest before injection (gentle-ai R1/R3).
+function readMirroredReviewContractFragment(mirrorRoot: string = PROVIDER_CONTRACT_MIRROR_ROOT): string | null {
+	const file = readVerifiedMirrorFile(mirrorRoot, `orchestration/${PI_MIRROR_RUNTIME}.md`);
+	if (file === null) return null;
+	const text = file.text.trim();
+	if (text.length === 0) return null;
+	return `## Gentle AI review execution contract (mirrored provider bundle ${file.contractSemver})\n\n${text}`;
+}
+
+// gentle-ai R3: the harness ODD steps 1-7, the phase-reporting line, and the
+// resume line come from the mirrored bundle's routing/pi.md (contract >= 1.4.0),
+// the ODD routing block Gentle AI renders for Pi, instead of a hand-copied
+// literal. The bundle's blank lines between them are not carried into the
+// prompt. Like assets/orchestrator.md, this is package-shipped prompt source:
+// a missing, tampered, or reshaped file fails closed instead of rendering a
+// harness without its workflow.
+const ODD_PROTOCOL_HEADING = "### ODD protocol (MANDATORY, in this order, on every request)";
+const ODD_PROTOCOL_STEP_COUNT = 7;
+
+let oddProtocolStepsCache: string | undefined;
+
+function extractOddProtocolLines(routing: string): string {
+	const lines = routing.split("\n");
+	const start = lines.indexOf(ODD_PROTOCOL_HEADING);
+	const section: string[] = [];
+	for (const line of start === -1 ? [] : lines.slice(start + 1)) {
+		if (line.startsWith("#")) break;
+		if (line !== "") section.push(line);
+	}
+	const shapeHolds =
+		section.length === ODD_PROTOCOL_STEP_COUNT + 2 &&
+		section.slice(0, ODD_PROTOCOL_STEP_COUNT).every((line, index) => line.startsWith(`${index + 1}. **`)) &&
+		section[ODD_PROTOCOL_STEP_COUNT]!.startsWith("Phase reporting: ") &&
+		section[ODD_PROTOCOL_STEP_COUNT + 1]!.startsWith("Resume an interrupted feature ");
+	if (!shapeHolds) {
+		throw new Error(`The mirrored provider bundle's routing/${PI_MIRROR_RUNTIME}.md ODD protocol section has an unexpected shape: expected ${JSON.stringify(ODD_PROTOCOL_HEADING)} followed by steps 1-${ODD_PROTOCOL_STEP_COUNT}, phase reporting, and resume.`);
+	}
+	return section.join("\n");
+}
+
+function readMirroredOddProtocolSteps(mirrorRoot: string = PROVIDER_CONTRACT_MIRROR_ROOT): string {
+	const file = readVerifiedMirrorFile(mirrorRoot, `routing/${PI_MIRROR_RUNTIME}.md`);
+	if (file === null) {
+		throw new Error(`Gentle Shell cannot render its ODD steps: the mirrored provider bundle's routing/${PI_MIRROR_RUNTIME}.md is missing, unreadable, or fails digest verification. Reinstall gentle-pi.`);
+	}
+	return extractOddProtocolLines(file.text);
+}
+
+function oddProtocolSteps(): string {
+	oddProtocolStepsCache ??= readMirroredOddProtocolSteps();
+	return oddProtocolStepsCache;
 }
 
 function loadReviewContractPromptFragment(
@@ -1409,15 +1460,7 @@ For background work, launch the bounded action and end the turn when no independ
 
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
-1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent (unclear whether a change is authorized at all) gets one clarification; stop and wait. A user saying they may stop you or resume later asks for notes and separate commits, not a stop.
-2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything. Do not delegate exploration of files you will read anyway to work inline; explore only for a map you need to decide or route.
-3. **Resolve uncertainty.** Recommend optional research only for a named uncertainty; ask one focused user question only for a real unresolved product decision, then stop and wait; use at most one scoped read-only assumption challenge for a high-consequence unproven premise.
-4. **Classify.** Size the task by the orchestrator's Task Size section; its criteria and resume test alone decide small or large, and small work follows its small path.
-5. **Track before the first write.** For large authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before the first source write and without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds. The document is the specification subagents read, in this order: a two- or three-line header; \`## Specs\` with numbered \`S#\` that quote the user's exact strings, error messages, and examples verbatim, never summarized and never adding unrequested requirements; \`## Tasks\` with one line per task (ID, linked \`S#\`, route, commit); \`## Log\` last, where \`L1\` is the user's original request verbatim and later user corrections, evidence, and decisions are appended. A requirement change appends its verbatim Log entry, rewrites only the affected \`S#\`, and reopens only its task.
-6. **Implement task by task.** Hand off by reference, never by paraphrase: name the document, task, and specs (for example \`Spec: odd/tasks/<feature>.md, T2, S3-S4\`), tell workers to read until \`## Log\`, and ask which \`S#\` were covered. Without a feature document, include the user's request verbatim. Verify reads the whole document, runs the spec's examples the parent authorized, against isolated state when they mutate data, and returns a verdict per \`S#\`. When the user reports a failure, reproduce it before deciding it already works. Each test asserts every observable effect of the rule it covers (exit code, exact stdout and stderr, and that rejected input leaves stored data and counters unchanged), covers the cases the rule itself names (its examples, boundaries, and errors), and checks through the public interface, never internal storage. When you add or change a command, option, or message, update the help text and docs that describe it. Route each task through the orchestrator's Mechanisms, honoring its delegation triggers when their conditions truly hold, with applicable test-first development and checks. No trigger holds by default and, when in doubt, work inline; executing past a fired trigger inline is a routing defect even if the work succeeds. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Commit work units in reviewable slices of about 400 authored changed lines on the feature branch (branch first when on the default branch), with tests and docs alongside the behavior and a Conventional Commit message; a unit whose Risk line names a high-risk item gets its own commit so native review can take it alone, and the last slice closes the feature. Record the commit that holds each task in the feature document as evidence. Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions.
-7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. Before writing \`Risk: none\`, check whether your diff changes code that existing behavior the request did not mention also uses (shared options, parsers, helpers); if it does, that is item 3. Never end with a tracked task pending unless you quote the user's explicit stop. An applicable quick check runs once; an unavailable verifier or subagent is reported as unavailable, never retried or escalated into extra ceremony. Partial, blocked, unavailable, or exhausted proof becomes one **Needs your decision** result naming the open blockers or missing proof, never more verification; that result is a valid stop, hedged wording is not. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
-Phase reporting: the Gentle Shell prompt label is inferred automatically from the primary session's tool activity (reads show \`exploring\`, edits \`implementing\`, test runs \`checking\`, user questions \`deciding\`). When the \`gentle_odd_phase\` tool is available, use it to refine that label with phases tools cannot show (\`authorizing\`, \`researching\`, \`deciding\`, \`closing\`): call \`gentle_odd_phase\` only when the primary session's ODD phase actually changes, never per tool call or on a fixed cadence, and never from a subagent. It drives the Gentle Shell prompt label only.
-Resume an interrupted feature with \`mem_context\`, then project- and feature-scoped \`mem_search\`, then \`mem_get_observation\` for the full document, then the task file itself; reconcile before continuing the next unfinished task. Detail for steps 3–7: \`orchestrator-delegation.md\` and \`orchestrator-memory.md\`.
+${oddProtocolSteps()}
 
 Harness principles:
 - el Gentleman is not prompt engineering. It is runtime discipline around powerful agents.
@@ -9592,6 +9635,7 @@ export const __testing = {
 	renderOrchestratorPrompt,
 	loadReviewContractPromptFragment,
 	readMirroredReviewContractFragment,
+	readMirroredOddProtocolSteps,
 	loadBackgroundSubagentsPolicy,
 	resolveBackgroundSubagentsPolicy,
 	renderBackgroundSubagentsReport,
