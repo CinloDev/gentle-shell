@@ -64,7 +64,7 @@ export function gaugeTone(percent: number | null): GaugeTone {
 export function paintGauge(percent: number | null, theme: GaugeTheme, cells: number = GAUGE_CELLS, paint?: GaugePaint): string {
 	const glyphs = gaugeGlyphs(paint && { filled: paint.filled, empty: paint.emptyGlyph });
 	const gauge = renderGauge(percent, cells, glyphs);
-	const filled = gauge.replace(new RegExp(`${glyphs.empty}+$`), "");
+	const filled = stripTrailing(gauge, glyphs.empty);
 	// Token names go through theme.fg; raw ANSI prefixes (resolved from direct
 	// colors by gauge-theme.ts) paint directly, so the gauges alone recolor.
 	const isAnsi = (role: string | undefined): role is string => typeof role === "string" && role.startsWith("\x1b[");
@@ -72,4 +72,12 @@ export function paintGauge(percent: number | null, theme: GaugeTheme, cells: num
 	const tone = gaugeTone(percent);
 	const filledRole = tone === GAUGE_TONE.ACCENT ? paint?.ok : tone === GAUGE_TONE.WARNING ? paint?.warning : tone === GAUGE_TONE.ERROR ? paint?.error : undefined;
 	return paintFg(filledRole, tone, filled) + paintFg(paint?.empty, GAUGE_EMPTY_ROLE, gauge.slice(filled.length));
+}
+
+// Strips the maximal run of trailing empty glyphs without building a RegExp
+// from theme-authored strings, which could contain regex metacharacters.
+function stripTrailing(gauge: string, empty: string): string {
+	let end = gauge.length;
+	while (end >= empty.length && end > 0 && gauge.endsWith(empty, end)) end -= empty.length;
+	return gauge.slice(0, end);
 }

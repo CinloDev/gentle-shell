@@ -14,10 +14,10 @@
 
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { colorToRgb, parseColor } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { GaugePaint } from "./shell-gauge.ts";
 
 const MAX_BYTES = 256_000;
-const HEX = /^#[0-9a-fA-F]{6}$/;
 const REFERENCE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const COLOR_KEYS = ["ok", "warning", "error", "empty"] as const;
 const GLYPH_KEYS = ["filled", "emptyGlyph"] as const;
@@ -30,24 +30,28 @@ interface CacheEntry {
 	paint: GaugePaint | undefined;
 }
 
-// The bar and panel render many times a second, so the theme file is read only
-// when its stat changes, never on the hot path.
+// The bar and panel render many times a second, so a render pays at most one
+// statSync per call; the file is opened and parsed only when the stat changes,
+// and a failed resolve is cached like any other result so a malformed theme
+// costs no repeated reads on the render path.
 const cache = new Map<string, CacheEntry>();
 
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** One visible code point, with no control characters or escape sequences. */
+/** One visible terminal column, single code point, no control characters or escape sequences. */
 function isGlyph(value: unknown): value is string {
-	return typeof value === "string" && [...value].length === 1 && !/[\u0000-\u001f\u007f\x1b]/.test(value);
+	return typeof value === "string" && [...value].length === 1 && visibleWidth(value) === 1 && !/[\u0000-\u001f\u007f\x1b]/.test(value);
 }
 
 // A color entry resolves like a Pi theme value: variable references expand
 // first, then either an existing theme token keeps its name (so the theme's
-// own resolved ANSI applies) or a direct color becomes raw foreground ANSI.
-// Direct colors are what let a theme recolor only the gauges, exactly like
-// the issue's green/yellow/red statusline use case.
+// own resolved ANSI applies) or the value delegates to pi-tui's `parseColor`,
+// the same grammar themes use everywhere else (3 or 6 digit hex, oklch,
+// case-insensitive okhsl), and becomes raw foreground ANSI. Direct colors are
+// what let a theme recolor only the gauges, exactly like the issue's
+// green/yellow/red statusline use case.
 function resolveGaugeColor(value: unknown, colors: Record<string, unknown>, vars: Record<string, unknown>): string | undefined {
 	const seen = new Set<unknown>();
 	while (typeof value === "string" && REFERENCE.test(value) && Object.hasOwn(vars, value)) {
@@ -57,10 +61,7 @@ function resolveGaugeColor(value: unknown, colors: Record<string, unknown>, vars
 	}
 	if (typeof value === "string" && Object.hasOwn(colors, value)) return value;
 	if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255) return `\x1b[38;5;${value}m`;
-	if (typeof value === "string" && HEX.test(value)) {
-		return `\x1b[38;2;${parseInt(value.slice(1, 3), 16)};${parseInt(value.slice(3, 5), 16)};${parseInt(value.slice(5, 7), 16)}m`;
-	}
-	if (typeof value === "string" && value.startsWith("okhsl(")) {
+	if (typeof value === "string") {
 		try {
 			const { r, g, b } = colorToRgb(parseColor(value));
 			return `\x1b[38;2;${r};${g};${b}m`;
@@ -112,19 +113,31 @@ export function resolveGaugePaint(sourcePath: string): GaugePaint | undefined {
 	return paint;
 }
 
-/** Memoized `resolveGaugePaint`; returns undefined when the theme source is unavailable. */
+/** Memoized `resolveGaugePaint`; undefined whenever the theme source is unavailable or invalid. */
 export function gaugePaintFor(sourcePath: string | undefined): GaugePaint | undefined {
 	if (!sourcePath) return undefined;
+	let stat;
 	try {
-		const stat = statSync(sourcePath);
-		const cached = cache.get(sourcePath);
-		if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.paint;
-		const paint = resolveGaugePaint(sourcePath);
-		cache.set(sourcePath, { mtimeMs: stat.mtimeMs, size: stat.size, paint });
-		return paint;
+		stat = statSync(sourcePath);
 	} catch {
+		// A missing source stays uncached: recreating it must take effect.
 		return undefined;
 	}
+	const cached = cache.get(sourcePath);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.paint;
+	// Validate the stat before any open: a path that is not a regular file (a
+	// FIFO, a device) must never reach openSync, and an oversized file must
+	// never reach a read. Failures resolve to the historical roles.
+	let paint: GaugePaint | undefined;
+	if (stat.isFile() && stat.size <= MAX_BYTES) {
+		try {
+			paint = resolveGaugePaint(sourcePath);
+		} catch {
+			paint = undefined;
+		}
+	}
+	cache.set(sourcePath, { mtimeMs: stat.mtimeMs, size: stat.size, paint });
+	return paint;
 }
 
 /** Test hook: drop every cached theme source entry. */

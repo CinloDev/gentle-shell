@@ -4,6 +4,8 @@ import { paintGauge, renderGauge, type GaugePaint } from "../lib/shell-gauge.ts"
 
 // Issue #2222: gauge-specific theme roles fall back to today's roles when a
 // theme does not define them, so existing themes render byte-identically.
+// (Fixtures here are unit-scoped stubs; Pi's theme schema is validated
+// separately by the loader and was checked directly against ThemeJsonSchema.)
 
 const taggedTheme = {
 	fg(color: string, text: string) {

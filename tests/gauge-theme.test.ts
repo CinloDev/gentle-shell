@@ -65,10 +65,37 @@ test("gauge colors accept direct hex, okhsl, 256 indexes, and vars references", 
 	assert.match(paint?.empty ?? "", /^\x1b\[38;2;\d+;\d+;\d+m$/);
 });
 
+test("direct colors use the same color grammar themes use everywhere: 3-digit hex, oklch, and case-insensitive okhsl", () => {
+	const path = withThemeSource({
+		name: "Test",
+		colors: {},
+		vars: { "gauge.ok": "#f00", "gauge.warning": "OKHSL(120 50% 50%)", "gauge.error": "oklch(0.7 0.1 200)", "gauge.empty": "okhsl(bogus)" },
+	});
+	const paint = resolveGaugePaint(path);
+	assert.equal(paint?.ok, "\x1b[38;2;255;0;0m");
+	assert.match(paint?.warning ?? "", /^\x1b\[38;2;\d+;\d+;\d+m$/);
+	assert.match(paint?.error ?? "", /^\x1b\[38;2;\d+;\d+;\d+m$/);
+	assert.equal(paint?.empty, undefined);
+});
+
+test("glyphs must occupy exactly one terminal column", () => {
+	const path = withThemeSource({
+		...BASE_THEME,
+		vars: { "gauge.filled": "０", "gauge.emptyGlyph": "\u200b" },
+	});
+	assert.deepEqual(resolveGaugePaint(path), {});
+});
+
 test("paintGauge paints raw ANSI roles directly and token roles through the theme", () => {
 	const raw = { ok: "\x1b[38;2;34;197;94m" };
 	assert.equal(paintGauge(45, taggedTheme, 8, raw), "\x1b[38;2;34;197;94m▰▰▰▰\x1b[39m<border>▱▱▱▱</border>");
 	assert.equal(paintGauge(45, taggedTheme, 8, { ok: "success" }), "<success>▰▰▰▰</success><border>▱▱▱▱</border>");
+});
+
+test("paintGauge tolerates regex metacharacters in theme-authored glyphs", () => {
+	assert.equal(paintGauge(50, taggedTheme, 4, { emptyGlyph: "*" }), "<accent>▰▰</accent><border>**</border>");
+	assert.equal(paintGauge(50, taggedTheme, 4, { emptyGlyph: "." }), "<accent>▰▰</accent><border>..</border>");
+	assert.equal(paintGauge(100, taggedTheme, 4, { filled: "(" }), "<error>((((</error><border></border>");
 });
 
 test("a malformed theme file throws for the raw resolver and is swallowed by the memoized one", () => {
