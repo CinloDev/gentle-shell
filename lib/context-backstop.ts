@@ -7,7 +7,9 @@ import type { ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-
 // headroom depend on how full the window is (fraction of the window).
 
 export const CONTEXT_BACKSTOP_TOKENS = 150_000;
-export const CONTEXT_BACKSTOP_FRACTION = 0.5;
+// Bench gate (harness roadmap T12): on the wide five-feature task, delegating at ~15% of a 272k window cost about
+// 20-40% less and ran ~30% faster than never reaching the backstop, while small tasks never reached it.
+export const CONTEXT_BACKSTOP_FRACTION = 0.15;
 export const CONTEXT_BACKSTOP_TOKENS_ENV = "GENTLE_PI_CONTEXT_BACKSTOP_TOKENS";
 export const CONTEXT_BACKSTOP_FRACTION_ENV = "GENTLE_PI_CONTEXT_BACKSTOP_FRACTION";
 

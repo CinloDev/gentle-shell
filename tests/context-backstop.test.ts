@@ -17,25 +17,28 @@ import {
 // estimate its own context. The runtime now measures it against min(absolute cap, fraction x context window) and
 // tells the primary session once per crossing.
 
-test("the threshold is the smaller of the absolute cap and half the context window", () => {
+test("the threshold is the smaller of the absolute cap and 15% of the context window", () => {
 	assert.equal(contextBackstopThreshold(1_000_000, {}), 150_000, "a large window keeps the absolute cap");
-	assert.equal(contextBackstopThreshold(400_000, {}), 150_000);
-	assert.equal(contextBackstopThreshold(200_000, {}), 100_000, "a small window reaches it at half its size");
-	assert.equal(contextBackstopThreshold(128_000, {}), 64_000);
+	assert.equal(contextBackstopThreshold(400_000, {}), 60_000);
+	// Bench gate (T12): a 272k window reaches it near 41k, where delegating the wide task paid off.
+	assert.equal(contextBackstopThreshold(272_000, {}), 40_800);
+	assert.equal(contextBackstopThreshold(200_000, {}), 30_000, "a small window reaches it at 15% of its size");
+	assert.equal(contextBackstopThreshold(128_000, {}), 19_200);
 	for (const unknown of [undefined, null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
 		assert.equal(contextBackstopThreshold(unknown, {}), 150_000, `window ${unknown} falls back to the cap`);
 	}
 });
 
 test("the cap and the fraction are overridable by environment; invalid values keep the defaults", () => {
-	assert.equal(contextBackstopThreshold(1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "300000" }), 300_000);
+	assert.equal(contextBackstopThreshold(1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "100000" }), 100_000);
+	assert.equal(contextBackstopThreshold(4_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "300000" }), 300_000, "a raised cap applies where the fraction allows it");
 	assert.equal(contextBackstopThreshold(1_000_000, { [CONTEXT_BACKSTOP_FRACTION_ENV]: "0.1" }), 100_000);
 	assert.equal(contextBackstopThreshold(200_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "80000", [CONTEXT_BACKSTOP_FRACTION_ENV]: "1" }), 80_000);
 	for (const value of ["", "abc", "0", "-5", "1.5e999"]) {
 		assert.equal(contextBackstopThreshold(1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: value }), 150_000, `tokens ${JSON.stringify(value)}`);
 	}
 	for (const value of ["", "abc", "0", "-0.5", "1.5"]) {
-		assert.equal(contextBackstopThreshold(200_000, { [CONTEXT_BACKSTOP_FRACTION_ENV]: value }), 100_000, `fraction ${JSON.stringify(value)}`);
+		assert.equal(contextBackstopThreshold(200_000, { [CONTEXT_BACKSTOP_FRACTION_ENV]: value }), 30_000, `fraction ${JSON.stringify(value)}`);
 	}
 });
 
@@ -51,7 +54,8 @@ test("the threshold is never below one token, so an empty context never reaches 
 test("unknown tokens never count as reaching the backstop", () => {
 	assert.equal(contextBackstopReached({ tokens: 150_000, contextWindow: 1_000_000 }, {}), true);
 	assert.equal(contextBackstopReached({ tokens: 149_999, contextWindow: 1_000_000 }, {}), false);
-	assert.equal(contextBackstopReached({ tokens: 64_000, contextWindow: 128_000 }, {}), true);
+	assert.equal(contextBackstopReached({ tokens: 19_200, contextWindow: 128_000 }, {}), true);
+	assert.equal(contextBackstopReached({ tokens: 19_199, contextWindow: 128_000 }, {}), false);
 	assert.equal(contextBackstopReached({ tokens: null, contextWindow: 128_000 }, {}), false, "null right after compaction");
 	assert.equal(contextBackstopReached(undefined, {}), false);
 });
@@ -73,10 +77,10 @@ function session(t: TestContext, child: boolean) {
 	const handlers = new Map<string, Handler>();
 	const pi = { on: (name: string, handler: Handler) => { handlers.set(name, handler); }, events: { on() {}, emit() {} }, registerCommand() {}, registerTool() {} } as unknown as ExtensionAPI;
 	createGentleAiExtension({ nativeReviewCli: null, processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0" } })(pi);
-	let usage: ContextUsage | undefined = { tokens: 10_000, contextWindow: 400_000, percent: 2.5 };
+	let usage: ContextUsage | undefined = { tokens: 10_000, contextWindow: 1_000_000, percent: 1 };
 	const sessionManager = { getSessionId: () => "session-backstop", getCwd: () => cwd, getEntries: () => [], getBranch: () => [] };
 	const ctx = { cwd, hasUI: false, ui: { notify() {} }, sessionManager, getContextUsage: () => usage } as unknown as ExtensionContext;
-	const setTokens = (tokens: number | null, contextWindow = 400_000) => {
+	const setTokens = (tokens: number | null, contextWindow = 1_000_000) => {
 		usage = { tokens, contextWindow, percent: tokens === null ? null : (tokens / contextWindow) * 100 };
 	};
 	const read = (overrides: Record<string, unknown> = {}) => handlers.get("tool_result")!({
@@ -95,7 +99,7 @@ test("the primary session gets one notice when its measured context first reache
 	const notice = crossed?.content?.[1]?.text ?? "";
 	assert.match(notice, /Context backstop/);
 	assert.match(notice, /160,000 tokens/, "measured tokens");
-	assert.match(notice, /40% of the 400,000-token context window/, "percent of the window");
+	assert.match(notice, /16% of the 1,000,000-token context window/, "percent of the window");
 	assert.match(notice, /150,000-token backstop/, "the threshold");
 	assert.match(notice, /delegate the next bounded unit that needs several steps \(its reads, edits, and checks\) with a short handoff/);
 	assert.match(notice, /single small edits and state checks stay inline/);
@@ -108,9 +112,9 @@ test("the primary session gets one notice when its measured context first reache
 	assert.equal(await s.read(), undefined, "still past the same crossing");
 	s.setTokens(40_000);
 	assert.equal(await s.read(), undefined, "dropping below the backstop re-arms it");
-	s.setTokens(64_000, 128_000);
+	s.setTokens(19_200, 128_000);
 	const again = await s.read({ isError: true, structuredContent: undefined });
-	assert.match(again?.content?.[1]?.text ?? "", /64,000 tokens \(50% of the 128,000-token context window\), at or past the 64,000-token backstop/, "a small window reaches it at half its size");
+	assert.match(again?.content?.[1]?.text ?? "", /19,200 tokens \(15% of the 128,000-token context window\), at or past the 19,200-token backstop/, "a small window reaches it at 15% of its size");
 	assert.equal(again && "structuredContent" in again, false, "absent structured content stays absent");
 	assert.equal(again && "isError" in again, false, "an error result keeps its flag");
 });

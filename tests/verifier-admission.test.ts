@@ -68,9 +68,9 @@ test("S3: the measured context backstop admits the verifier", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const input = { agent: "gentle-ai-verify", task: "Verify the change." };
-	assert.equal(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 150_000, contextWindow: 400_000 } }), undefined);
-	assert.equal(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 64_000, contextWindow: 128_000 } }), undefined, "half of a small window admits");
-	assert.ok(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 400_000 } })?.block);
+	assert.equal(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 150_000, contextWindow: 1_000_000 } }), undefined);
+	assert.equal(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 19_200, contextWindow: 128_000 } }), undefined, "15% of a small window admits");
+	assert.ok(rejectUnriskedVerifierLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 1_000_000 } })?.block);
 	assert.ok(rejectUnriskedVerifierLaunch(input, { root, contextUsage: undefined })?.block, "missing context usage does not admit");
 });
 

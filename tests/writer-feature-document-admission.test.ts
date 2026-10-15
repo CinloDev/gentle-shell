@@ -56,24 +56,25 @@ test("S16: the measured context backstop admits a writer without a document", (t
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const input = { agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` };
-	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 150_000, contextWindow: 400_000 } }), undefined);
-	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 400_000 } })?.block, "below the backstop does not admit");
+	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 150_000, contextWindow: 1_000_000 } }), undefined);
+	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 1_000_000 } })?.block, "below the backstop does not admit");
 	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: null, contextWindow: 400_000 } })?.block, "unknown context usage does not admit");
 	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: undefined })?.block, "missing context usage does not admit");
 });
 
 // Harness roadmap R1: the admission uses the same threshold as the runtime notice, min(absolute cap, fraction x
-// window), so a small context window reaches the backstop at half its size instead of a fixed 150,000 tokens.
+// window), so a small context window reaches the backstop at 15% of its size instead of a fixed 150,000 tokens.
 test("S16: the admission backstop scales with the measured context window and honors the environment", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const input = { agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` };
 	const decide = (tokens: number, contextWindow: number, env?: NodeJS.ProcessEnv) => rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens, contextWindow }, env })?.block ?? false;
-	assert.equal(decide(64_000, 128_000), false, "half of a small window admits");
-	assert.equal(decide(63_999, 128_000), true);
+	assert.equal(decide(19_200, 128_000), false, "15% of a small window admits");
+	assert.equal(decide(19_199, 128_000), true);
 	assert.equal(decide(150_000, 1_000_000), false, "a large window keeps the absolute cap");
 	assert.equal(decide(149_999, 1_000_000), true);
-	assert.equal(decide(150_000, 1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "300000" }), true, "the cap is overridable");
+	assert.equal(decide(120_000, 1_000_000), true);
+	assert.equal(decide(120_000, 1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "100000" }), false, "the cap is overridable");
 });
 
 test("S16: previous behavior holds for non-writers and Judgment Day fix agents", (t) => {
@@ -107,10 +108,10 @@ test("S16: the orchestrator tool_call hook blocks an undocumented writer and adm
 	assert.equal(admitted?.block, undefined);
 	const explorer = await launchThroughHook({ agent: "gentle-ai-explore", mode: "task", task: "Map src/budget.ts" }, bare, 20_000);
 	assert.equal(explorer?.block, undefined, "read-only subagents are unaffected");
-	// The hook passes the measured window, not only the tokens: 64k of a 128k window is at the backstop.
-	const smallWindow = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 64_000, {}, 128_000);
-	assert.equal(smallWindow?.block, undefined, "half of the measured window admits");
-	const envCap = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 64_000, { GENTLE_PI_CONTEXT_BACKSTOP_FRACTION: "0.9" }, 128_000);
+	// The hook passes the measured window, not only the tokens: 19.2k of a 128k window is at the backstop.
+	const smallWindow = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 19_200, {}, 128_000);
+	assert.equal(smallWindow?.block, undefined, "15% of the measured window admits");
+	const envCap = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 19_200, { GENTLE_PI_CONTEXT_BACKSTOP_FRACTION: "0.9" }, 128_000);
 	assert.equal(envCap?.block, true, "the hook reads the session environment");
 });
 
