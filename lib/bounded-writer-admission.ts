@@ -106,6 +106,18 @@ function featureDocumentExists(root: string, relativePath: string): boolean {
 	}
 }
 
+// True when a string value has a `Spec:` task line naming an existing feature document under `root`. Shared by
+// writer and verifier admission so both accept exactly the same task lines.
+export function namesExistingFeatureDocumentTask(values: readonly unknown[], root: string): boolean {
+	for (const value of values) {
+		if (typeof value !== "string") continue;
+		for (const match of value.matchAll(FEATURE_DOCUMENT_TASK)) {
+			if (featureDocumentExists(root, match[1])) return true;
+		}
+	}
+	return false;
+}
+
 export function rejectUndocumentedWriterLaunch(
 	input: unknown,
 	options: { root: string; contextUsage: MeasuredContext | undefined; env?: Readonly<Record<string, string | undefined>> },
@@ -113,12 +125,7 @@ export function rejectUndocumentedWriterLaunch(
 	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
 	const record = input as Record<string, unknown>;
 	if (typeof record.agent !== "string" || !isGenericBoundedWriter(record.agent)) return undefined;
-	for (const value of [record.task, record.context]) {
-		if (typeof value !== "string") continue;
-		for (const match of value.matchAll(FEATURE_DOCUMENT_TASK)) {
-			if (featureDocumentExists(options.root, match[1])) return undefined;
-		}
-	}
+	if (namesExistingFeatureDocumentTask([record.task, record.context], options.root)) return undefined;
 	if (contextBackstopReached(options.contextUsage, options.env)) return undefined;
 	return { block: true, reason: WRITER_FEATURE_DOCUMENT_REJECTION };
 }
