@@ -237,6 +237,36 @@ test("quoted separator arguments cannot waive hard denial or invent destruction"
 	}
 });
 
+// gentle-pi#2285: compound bodies, backticks and eval reach the data-loss
+// boundary, while the YOLO scratch waiver still covers leading direct `rm` only.
+test("removal after reserved words, in backticks and in eval needs fresh confirmation and is never scratch-waived", () => {
+	const config = { autonomousMode: true, guardedCommands: { gitPush: "allow" as const } };
+	for (const command of [`if true; then rm -rf data; fi`, `for d in a b; do rm -rf "$d"; done`, "echo `rm -rf data`", `eval 'rm -rf data'`]) {
+		const evaluation = evaluateGuardedCommand(command, config);
+		assert.equal(evaluation.action, "confirm", command);
+		assert.equal(evaluation.dataLoss, true, command);
+	}
+	for (const command of [`if true; then rm -rf ~; fi`, "echo `rm -rf /`", `eval 'rm -rf "$HOME"'`]) {
+		assert.equal(classifyGuardedCommand(command, config), "block", command);
+	}
+	for (const command of [`if [ -f x ]; then echo ok; fi`, `for f in *; do cat "$f"; done`, "echo `date`", `eval "$(ssh-agent -s)"`, `grep "then rm -rf" x`]) {
+		assert.equal(classifyGuardedCommand(command, config), "not-guarded", command);
+	}
+	const entry = { uid: 1000, isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+	const fs = { uid: 1000, tmpdir: "/tmp", home: "/home/user", lstat: () => entry };
+	const normal = { autonomousMode: false, guardedCommands: {} };
+	assert.equal(isReversibleYoloCommand("rm -rf /tmp/tmp.abcdef1234", evaluateGuardedCommand("rm -rf /tmp/tmp.abcdef1234", normal), fs), true);
+	for (const command of [
+		`if true; then rm -rf /tmp/tmp.abcdef1234; fi`, `for d in a; do rm -rf /tmp/tmp.abcdef1234; done`, `{ rm -rf /tmp/tmp.abcdef1234; }`,
+		`! rm -rf /tmp/tmp.abcdef1234`, "echo `rm -rf /tmp/tmp.abcdef1234`", `eval 'rm -rf /tmp/tmp.abcdef1234'`, `eval rm -rf /tmp/tmp.abcdef1234`,
+		"rm -rf /tmp/tmp.abcdef1234 && echo `rm -rf data`", `rm -rf /tmp/tmp.abcdef1234; eval 'rm -rf data'`,
+	]) {
+		const evaluation = evaluateGuardedCommand(command, normal);
+		assert.equal(evaluation.action, "confirm", command);
+		assert.equal(isReversibleYoloCommand(command, evaluation, fs), false, command);
+	}
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

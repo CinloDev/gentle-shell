@@ -83,6 +83,67 @@ test("root/home recursive removal and destructive git retain hard denial", () =>
 	}
 });
 
+// gentle-pi#2285: a reserved word that opens a compound body is not the
+// segment head, and backtick and literal `eval` payloads run like `$(...)`.
+const compoundRemovals = [
+	`if true; then rm -rf data; fi`,
+	`for d in a b; do rm -rf "$d"; done`,
+	"echo `rm -rf data`",
+	`eval 'rm -rf data'`,
+	`if false; then :; else rm -rf data; fi`,
+	`if false; then :; elif rm -rf data; then :; fi`,
+	`while rm -rf data; do :; done`,
+	`until rm -rf data; do :; done`,
+	`if rm -rf data; then :; fi`,
+	`{ rm -rf data; }`,
+	`! rm -rf data`,
+	`if true; then sudo rm -rf data; fi`,
+	"echo \"now: `rm -rf data`\"",
+	"echo `true; rm -rf data`",
+	`eval "rm -rf data"`,
+	`eval rm -rf data`,
+	`eval -- 'rm -rf data'`,
+	`command eval 'rm -rf data'`,
+	`eval 'if true; then rm -rf data; fi'`,
+	`eval 'git reset --hard'`,
+];
+for (const command of compoundRemovals) {
+	test(`recognizes destruction after reserved words, in backticks and in eval: ${command}`, () => {
+		const matches = recognizeDestructiveCommands(command);
+		assert.ok(matches.length > 0, command);
+		assert.ok(matches.every((match) => match.triggerIndex >= 0 && match.triggerIndex < command.length), command);
+		assert.ok(matches.every((match) => match.removalTargets === undefined), command);
+	});
+}
+
+test("issue #2285 examples are recursive filesystem data loss like a plain rm", () => {
+	for (const command of [`if true; then rm -rf data; fi`, `for d in a b; do rm -rf "$d"; done`, "echo `rm -rf data`", `eval 'rm -rf data'`]) {
+		const matches = recognizeDestructiveCommands(command);
+		assert.ok(matches.some((match) => match.kind === "filesystem"), command);
+		assert.ok(matches.every((match) => !match.hardDeny), command);
+	}
+});
+
+test("root/home recursive removal behind reserved words, backticks or eval keeps its hard denial", () => {
+	for (const command of [
+		`if true; then rm -rf ~; fi`, `for d in a; do rm -rf /; done`, `{ rm -rf "$HOME"; }`, `! rm -rf ..`,
+		"echo `rm -rf ~`", `eval 'rm -rf /'`, `while true; do rm -rf ~/foo; done`,
+	]) {
+		assert.ok(recognizeDestructiveCommands(command).some((match) => match.hardDeny), command);
+	}
+});
+
+for (const command of [
+	`if [ -f x ]; then echo ok; fi`, `for f in *; do cat "$f"; done`, "echo `date`", `eval "$(ssh-agent -s)"`,
+	`grep "then rm -rf" x`, `echo 'then rm -rf data'`, "echo '`rm -rf data`'", "echo \\`rm -rf data\\`",
+	`eval 'echo rm -rf data'`, `eval "$cmd"`, `while read -r line; do echo "$line"; done < x`,
+	`if git diff --quiet; then git push origin main; fi`, "echo 'unterminated `rm -rf data'",
+]) {
+	test(`leaves ordinary compound, backtick and eval commands unchanged: ${command}`, () => {
+		assert.deepEqual(recognizeDestructiveCommands(command), []);
+	});
+}
+
 // Only a direct, unwrapped, unquoted `rm` exposes its literal targets; the
 // YOLO temp-scratch waiver has nothing to inspect anywhere else.
 test("exposes literal removal targets only for a direct top-level rm that runs before every other segment", () => {
@@ -97,6 +158,8 @@ test("exposes literal removal targets only for a direct top-level rm that runs b
 		`rm -rf --no-preserve-root /tmp/tmp.abcdef1234`, `rm -rf`,
 		`mv x /tmp/tmp.abcdef1234 && rm -rf /tmp/tmp.abcdef1234`, `cp -r x /tmp/tmp.abcdef1234; rm -rf /tmp/tmp.abcdef1234`,
 		`(rm -rf /tmp/tmp.abcdef1234)`, `rm -rf /tmp/tmp.abcdef1234 & true`, `rm -rf /tmp/tmp.abcdef1234 | cat`,
+		`{ rm -rf /tmp/tmp.abcdef1234; }`, `! rm -rf /tmp/tmp.abcdef1234`, `if true; then rm -rf /tmp/tmp.abcdef1234; fi`,
+		"echo `rm -rf /tmp/tmp.abcdef1234`", `eval 'rm -rf /tmp/tmp.abcdef1234'`, `eval rm -rf /tmp/tmp.abcdef1234`,
 	]) {
 		const matches = recognizeDestructiveCommands(command);
 		assert.ok(matches.length > 0, command);
