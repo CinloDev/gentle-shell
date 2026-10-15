@@ -441,6 +441,22 @@ test("S5: a recorded temp root inside the home is accepted only when it is the s
 	assert.equal(existsSync(scratch), false, "the session's own scratch under a home temp root is removed");
 });
 
+// Native review R3-untracked-status-guard: `git status --porcelain` honors the user's
+// status.showUntrackedFiles, so with "no" a clone holding new work looked clean.
+test("S6: clean keeps a clone with untracked work even when status hides untracked files", async (t) => {
+	const fx = fixture(t);
+	const source = origin(fx);
+	const s = session(fx);
+	await s.start();
+	await s.bash(`cd ${fx.work} && git clone ${source} hidden`, () => git(fx.work, "clone", "-q", source, "hidden"));
+	git(join(fx.work, "hidden"), "config", "status.showUntrackedFiles", "no");
+	writeFileSync(join(fx.work, "hidden", "work.txt"), "new work\n");
+	const out = await s.run("clean");
+	assert.equal(s.confirms.length, 0, "nothing is offered for removal");
+	assert.equal(readFileSync(join(fx.work, "hidden", "work.txt"), "utf8"), "new work\n");
+	assert.match(out, /hidden: uncommitted changes/);
+});
+
 test("S5: shutdown keeps a scratch that holds a recorded clone", async (t) => {
 	const fx = fixture(t);
 	const source = origin(fx);

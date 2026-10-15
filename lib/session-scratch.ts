@@ -329,7 +329,8 @@ export async function checkArtifact(artifact: ScratchArtifact, keep: readonly st
 	let dotGit;
 	try { dotGit = lstatSync(join(path, ".git")); } catch { return { state: "kept", reason: "not a Git work tree root" }; }
 	if (kind === "clone" ? !dotGit.isDirectory() : !dotGit.isFile()) return { state: "kept", reason: kind === "clone" ? "not a standalone clone" : "not a linked worktree" };
-	const status = await git(["status", "--porcelain"], path);
+	// Override user settings that hide untracked files or submodule changes from status.
+	const status = await git(["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"], path);
 	if (status === undefined) return { state: "kept", reason: "Git status unavailable" };
 	if (status !== "") return { state: "kept", reason: "uncommitted changes" };
 	if (kind === "clone") {
