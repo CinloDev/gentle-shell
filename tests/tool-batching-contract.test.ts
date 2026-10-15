@@ -58,7 +58,7 @@ test("S13 C10: the delegation card keeps the parent from reading what the worker
 test("S13 C9: the always-on orchestrator batches independent calls and never spends a turn only on coordination", () => {
 	const core = read("assets/orchestrator.md");
 	containsAll(core, [
-		"Batch independent tool calls in one turn (parallel calls, or one command reading several files).",
-		"Never spend a turn only on a `todo` or status update; attach it to that turn's work call.",
+		"Batch independent tool calls in one turn (parallel calls or one multi-file command).",
+		"Never spend a turn only on a `todo` or status update.",
 	], "orchestrator core");
 });

@@ -143,7 +143,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// reference material moved to orchestrator-delegation-reference.md, read only when a situation names it.
 	// Pain-point iteration S13 (C10): the Preparation trigger tells the parent not to read what the worker will
 	// read and to pass paths, not content (7,000 -> 7,100 B; every other card sentence is pinned by a contract).
-	"orchestrator-delegation.md": 7_100,
+	// S15: units of about 100 changed lines or less always run inline (7,100 -> 7,300 B).
+	"orchestrator-delegation.md": 7_300,
 	"orchestrator-delegation-reference.md": 14_800,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
 	// S14: close the open slice before a high-risk commit; outcomes per commit (12,600 -> 12,850 B).
