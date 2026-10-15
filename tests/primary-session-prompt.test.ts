@@ -11,7 +11,7 @@ import { __testing } from "../extensions/gentle-ai.ts";
 // mirrored provider contract bundle's routing/pi.md instead of a hand-copied
 // literal, and the rendered primary-session prompt stays byte-identical.
 //
-// The golden was captured from the base commit before the steps moved into the
+// The golden was captured from the base commit (main 4372ff2d, after R1) before the steps moved into the
 // bundle, with the inputs below and the package assets root normalized. When a
 // prompt change is intended, regenerate it with
 // UPDATE_PRIMARY_SESSION_PROMPT_GOLDEN=1 and review the golden diff.
