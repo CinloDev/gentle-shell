@@ -140,11 +140,14 @@ async function listedEntries(groups, {adapters, path, key, canonical}) {
  * it: updating a separate global Pi never changes what that Shell runs.
  */
 /** Where `gentle-shell upgrade --channel main` packed this Shell version: the
- * same config home as scripts/main-channel.mjs configHome.
+ * same config home as scripts/main-channel.mjs configHome. A relative config
+ * home is refused, not resolved: `upgrade` resolved it from its own working
+ * directory, so it names no single folder, and the package manager runs from
+ * the neutral cwd.
  */
 function mainBuildTarball(version, {env, home, path}) {
- const config = env?.GENTLE_PI_CONFIG_HOME || (typeof home === 'string' && path.isAbsolute(home) ? path.join(home, '.pi', 'gentle-ai') : null);
- if (!config) throw refusal('cannot locate the main-channel build without a home directory');
+ const config = env?.GENTLE_PI_CONFIG_HOME || (typeof home === 'string' ? path.join(home, '.pi', 'gentle-ai') : null);
+ if (!config || !path.isAbsolute(config)) throw refusal('cannot locate the main-channel build without an absolute config home');
  return path.join(config, 'main', 'packages', `${SHELL}-${version}.tgz`);
 }
 

@@ -154,10 +154,19 @@ test('a missing main-channel tarball names the rebuild command and installs noth
  assert.deepEqual(f.out, []);
 });
 
+// A relative config home names different folders for `upgrade` and `update`
+// run from different directories, and npm/pnpm resolve it from the neutral cwd.
+test('a relative GENTLE_PI_CONFIG_HOME is refused for a main-channel Shell without mutation', async () => {
+ const f = fixture({shellVersion: MAIN, configHome: 'relative/config'});
+ await assert.rejects(updateSelectedPi(f.input), /ownership cannot locate the main-channel build without an absolute config home/);
+ assert.deepEqual(f.mutations, []);
+ assert.deepEqual(f.out, []);
+});
+
 test('a main-channel Shell without a home directory is refused without mutation', async () => {
  const f = fixture({shellVersion: MAIN});
  delete (f.input as {home?: string}).home;
- await assert.rejects(updateSelectedPi(f.input), /ownership cannot locate the main-channel build without a home directory/);
+ await assert.rejects(updateSelectedPi(f.input), /ownership cannot locate the main-channel build without an absolute config home/);
  assert.deepEqual(f.mutations, []);
 });
 
