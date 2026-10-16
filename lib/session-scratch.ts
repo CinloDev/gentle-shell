@@ -23,8 +23,6 @@ const SUBAGENT_SCRATCH_NAME = new RegExp(`^${SUBAGENT_SCRATCH_PREFIX}[A-Za-z0-9]
 /** Whether a path's last component is named as the runtime names a session scratch. */
 export const isSessionScratchName = (path: string): boolean => SCRATCH_NAME.test(basename(path));
 export const SWEEP_GRACE_MS = 60 * 60 * 1000;
-/** How far a ledger's `processStartedAt` may be from the start time the OS reports for its pid. */
-export const PROCESS_START_TOLERANCE_MS = 5_000;
 /** `/gentle:scratch clean` keeps the live scratch's entries changed this long before it started. */
 export const CLEAN_RECENT_MS = 60_000;
 
@@ -55,6 +53,8 @@ export interface ScratchLedger {
 	sessionId: string;
 	pid: number;
 	processStartedAt: string;
+	/** The OS's opaque start token of the owning process (`processStartToken`); absent when it could not be read. */
+	processStartToken?: string;
 	cwd: string;
 	/** The real temp root the scratch was created directly under (the inherited TMPDIR or os.tmpdir()). */
 	tempRoot: string | null;
@@ -88,7 +88,8 @@ function isArtifact(value: unknown): value is ScratchArtifact {
 function isLedger(value: unknown): value is ScratchLedger {
 	const ledger = value as Partial<ScratchLedger> | null;
 	return typeof ledger === "object" && ledger !== null && ledger.version === LEDGER_VERSION && typeof ledger.sessionId === "string" &&
-		typeof ledger.pid === "number" && typeof ledger.processStartedAt === "string" && typeof ledger.cwd === "string" &&
+		typeof ledger.pid === "number" && typeof ledger.processStartedAt === "string" &&
+		(ledger.processStartToken === undefined || typeof ledger.processStartToken === "string") && typeof ledger.cwd === "string" &&
 		(ledger.tempRoot === null || typeof ledger.tempRoot === "string") && typeof ledger.inherited === "object" && ledger.inherited !== null &&
 		Object.values(ledger.inherited).every((value) => value === null || typeof value === "string") &&
 		(ledger.scratchDir === null || typeof ledger.scratchDir === "string") && Array.isArray(ledger.artifacts) && ledger.artifacts.every(isArtifact);
@@ -148,28 +149,25 @@ export function isProcessAlive(pid: number): boolean {
 	}
 }
 
-let linuxClockTicks: number | undefined;
-
 /**
- * When the process `pid` started (epoch ms), or undefined when it cannot be
- * read: always on Windows, where only pid liveness is checked.
+ * An opaque token for when the process `pid` started, as the OS reports it, or
+ * undefined when it cannot be read: always on Windows, where only pid liveness
+ * is checked. Tokens are compared for equality only, never converted to wall
+ * clock time, so a clock step cannot make a live process look like another one.
  */
-export function processStartTime(pid: number, platform: NodeJS.Platform = process.platform): number | undefined {
+export function processStartToken(pid: number, platform: NodeJS.Platform = process.platform): string | undefined {
 	if (!Number.isInteger(pid) || pid <= 0) return undefined;
 	try {
 		if (platform === "linux") {
 			// Field 22 counts clock ticks since boot; the command name (field 2) may hold spaces and parentheses.
 			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-			const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
-			const boot = Number(/^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1]);
-			linuxClockTicks ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 2_000 }).trim());
-			const started = boot * 1000 + (ticks * 1000) / linuxClockTicks;
-			return Number.isFinite(started) && linuxClockTicks > 0 ? started : undefined;
+			const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+			return ticks && /^\d+$/.test(ticks) ? `linux:${ticks}` : undefined;
 		}
 		if (platform === "win32") return undefined;
-		// macOS and the BSDs: the local start time, to the second.
-		const started = Date.parse(execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] }).trim());
-		return Number.isNaN(started) ? undefined : started;
+		// macOS and the BSDs: the start time text as ps prints it, in a fixed locale.
+		const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
+		return started ? `ps:${started}` : undefined;
 	} catch {
 		return undefined;
 	}

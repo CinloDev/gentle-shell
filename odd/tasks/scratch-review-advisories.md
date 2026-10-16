@@ -89,3 +89,14 @@ merged as `d79265b99`) left, where each is a real defect reproducible through th
   provider-contract and runtime-harness PASS); `pnpm -s typecheck` no regressions; `node scripts/verify-package-files.mjs`
   passed. Note: a test that drives `process.env` must clear `GENTLE_PI_AGENTS_CHILD`, since the runner may itself run
   inside a subagent, where the extension registers nothing.
+- L9 (parent, 2026-10-16): native review `review-e6f96fb8f1a7b6c5` of 9f4040bcb approved and acknowledged with 9 non-blocking
+  findings. Fixed the consequential one in a follow-up commit: R1-start-time-mismatch-deletes-live-scratch (with
+  R3/R4 linux-btime-shifts-with-clock-steps, R3 macos-lstart-local-time-parse, R3 getconf-failure-not-cached) — the
+  wall-clock reconstruction of the start time could make a live session look ended after a clock step, and then
+  another session's sweep would remove its scratch. Now the ledger records `processStartToken` (Linux `/proc/<pid>/stat`
+  start ticks, macOS/BSD raw `ps -o lstart=` text with LC_ALL=C TZ=UTC) and liveness compares tokens for equality;
+  a missing or unreadable token keeps the ledger live (old ledgers keep pid liveness). RED: "advisories S3: a ledger
+  counts as live only when its pid has the start token..." failed ("a reused pid has another start token...") and
+  "...start token is read from the OS..." failed ("exports processStartToken"). GREEN: session-scratch + agents-runner
+  144/144, typecheck 0 diagnostics. Remaining advisories (clean walks held entries before cheap keep checks, git
+  version for linked worktree porcelain, ps spawned per ledger on macOS) stay as follow-ups.

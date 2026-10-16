@@ -19,8 +19,7 @@ import {
 	ledgerPath,
 	listLedgers,
 	liveSubagentScratch,
-	PROCESS_START_TOLERANCE_MS,
-	processStartTime,
+	processStartToken,
 	readLedger,
 	realTempRoot,
 	removeArtifact,
@@ -54,7 +53,7 @@ export interface SessionScratchOptions {
 	now?: () => number;
 	isProcessAlive?: (pid: number) => boolean;
 	/** When a process started (epoch ms), or undefined when it cannot be read. */
-	processStartTime?: (pid: number) => number | undefined;
+	processStartToken?: (pid: number) => string | undefined;
 	graceMs?: number;
 	platform?: NodeJS.Platform;
 }
@@ -74,16 +73,19 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 	const env = options.env ?? process.env;
 	const now = options.now ?? Date.now;
 	const alive = options.isProcessAlive ?? isProcessAlive;
-	const startedAt = options.processStartTime ?? processStartTime;
-	// A live pid is the ledger's process only if it started when the ledger recorded:
-	// the OS may have reused it. A start time that cannot be read keeps the ledger live.
+	const startToken = options.processStartToken ?? processStartToken;
+	// A live pid is the ledger's process only if it has the start token the ledger
+	// recorded: the OS may have reused it. A token that is missing or cannot be
+	// read keeps the ledger live.
 	const isLive = (ledger: ScratchLedger) => {
 		if (!alive(ledger.pid)) return false;
-		const recorded = Date.parse(ledger.processStartedAt);
-		let started: number | undefined;
-		try { started = startedAt(ledger.pid); } catch { started = undefined; }
-		return started === undefined || Number.isNaN(recorded) || Math.abs(started - recorded) <= PROCESS_START_TOLERANCE_MS;
+		if (ledger.processStartToken === undefined) return true;
+		let current: string | undefined;
+		try { current = startToken(ledger.pid); } catch { current = undefined; }
+		return current === undefined || current === ledger.processStartToken;
 	};
+	// This process's own token, or undefined (omitted from the ledger JSON) when it cannot be read.
+	const safeStartToken = () => { try { return startToken(process.pid); } catch { return undefined; } };
 	// Real paths of this process's live and quarantined subagent TMPDIRs (lib/agents-runner.ts).
 	const subagentDirs = () => liveSubagentScratch().flatMap((dir) => realTempRoot(dir) ?? []);
 	const graceMs = options.graceMs ?? SWEEP_GRACE_MS;
@@ -191,6 +193,7 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 			sessionId,
 			pid: process.pid,
 			processStartedAt: new Date(now() - process.uptime() * 1000).toISOString(),
+			processStartToken: safeStartToken(),
 			cwd: ctx.cwd,
 			tempRoot: scratchDir ? dirname(scratchDir) : null,
 			inherited,

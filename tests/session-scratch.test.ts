@@ -31,7 +31,7 @@ type ExtensionFactory = typeof createSessionScratchExtension;
 
 interface Options {
 	sessionId?: string; child?: boolean; hasUI?: boolean; confirm?: boolean; isProcessAlive?: (pid: number) => boolean; now?: () => number; platform?: NodeJS.Platform; tmp?: string;
-	processStartTime?: (pid: number) => number | undefined;
+	processStartToken?: (pid: number) => string | undefined;
 	/** A shared process environment, as a reload re-runs the extension against the same `process.env`. */
 	env?: NodeJS.ProcessEnv;
 	/** The factory of a separately loaded module instance. */
@@ -54,7 +54,7 @@ function session(fx: Fixture, options: Options = {}) {
 		on: (name: string, handler: Handler) => { handlers.set(name, handler); },
 		registerCommand: (name: string, command: Command) => { commands.set(name, command); },
 	} as unknown as ExtensionAPI;
-	(options.factory ?? createSessionScratchExtension)({ env, isProcessAlive: options.isProcessAlive, processStartTime: options.processStartTime, now: options.now, platform: options.platform })(pi);
+	(options.factory ?? createSessionScratchExtension)({ env, isProcessAlive: options.isProcessAlive, processStartToken: options.processStartToken, now: options.now, platform: options.platform })(pi);
 	const ctx = {
 		cwd: fx.cwd,
 		hasUI: options.hasUI ?? true,
@@ -755,7 +755,7 @@ test("S8: the reference documents the scratch dir, ledger, automatic cleanup, sw
 	const section = reference.split("### Session scratch and artifact ledger\n")[1]?.split("\n### ")[0] ?? "";
 	for (const term of [
 		"`gpXXXXXX`", "never its real path", "`TMPDIR`", "`<config home>/scratch/<session id>.json`", "atomically",
-		"`version`", "`sessionId`", "`pid`", "`processStartedAt`", "`cwd`", "`tempRoot`", "`inherited`", "`scratchDir`", "`artifacts`", "`git clone ... [<dir>]`", "`git worktree add ... <path>`",
+		"`version`", "`sessionId`", "`pid`", "`processStartedAt`", "`processStartToken`", "`cwd`", "`tempRoot`", "`inherited`", "`scratchDir`", "`artifacts`", "`git clone ... [<dir>]`", "`git worktree add ... <path>`",
 		"did not exist before the command", "recovers the live scratch from the ledger", "never removes a scratch of its own process",
 		"At session shutdown", "older than one hour", "never follows symlinks", "directly under the temp root its ledger recorded", "the ledger of a live session",
 		"`/gentle:scratch list`", "`/gentle:scratch clean`", "no uncommitted changes and no unpushed commits", "ignored files inside them are deleted too", "`git worktree remove`", "Without a UI",
@@ -770,35 +770,56 @@ test("S8: the reference documents the scratch dir, ledger, automatic cleanup, sw
 // Native review advisories of gentle-shell#2300 (odd/tasks/scratch-review-advisories.md).
 
 // R3-pid-reuse-liveness: a pid the system reused for another process made an
-// ended session look live, so its scratch was never swept.
-test("advisories S3: a ledger counts as live only when its pid started when the ledger recorded; an unreadable start time keeps it", async (t) => {
+// ended session look live, so its scratch was never swept. The comparison uses
+// the OS's own start token, never the wall clock: a clock step must not make a
+// live session look ended (review-e6f96fb8f1a7b6c5 R1-start-time-mismatch).
+test("advisories S3: a ledger counts as live only when its pid has the start token the ledger recorded; an unreadable or missing token keeps it", async (t) => {
 	const fx = fixture(t);
-	const recorded = Date.parse("2026-01-01T00:00:00.000Z");
-	const started = new Map([[5_555_550, recorded + 3_600_000], [5_555_551, recorded + 2_000]]);
-	const dirs = ["gpReuseA", "gpMatchA", "gpNoTime"].map((name) => join(fx.base, name));
-	for (const [index, dir] of dirs.entries()) {
-		mkdirSync(dir);
-		writeForeignLedger(fx, { sessionId: `pid-${index}`, pid: 5_555_550 + index, processStartedAt: new Date(recorded).toISOString(), scratchDir: dir });
+	const current = new Map([[5_555_550, "linux:900"], [5_555_551, "linux:100"], [5_555_553, "linux:900"]]);
+	const cases = [
+		{ name: "gpReuseA", token: "linux:100" },
+		{ name: "gpMatchA", token: "linux:100", startedAt: "2020-01-01T00:00:00.000Z" },
+		{ name: "gpNoTime", token: "linux:100" },
+		{ name: "gpOldLed", token: undefined },
+	];
+	const dirs = cases.map(({ name }) => join(fx.base, name));
+	for (const [index, { token, startedAt }] of cases.entries()) {
+		mkdirSync(dirs[index]);
+		writeForeignLedger(fx, { sessionId: `pid-${index}`, pid: 5_555_550 + index, scratchDir: dirs[index], ...(startedAt ? { processStartedAt: startedAt } : {}), ...(token ? { processStartToken: token } : {}) });
 	}
-	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => true, processStartTime: (pid) => started.get(pid), now: later });
+	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => true, processStartToken: (pid) => current.get(pid), now: later });
 	await s.start();
-	assert.equal(existsSync(dirs[0]), false, "a reused pid started an hour later: the session ended and its scratch is swept");
-	assert.ok(existsSync(dirs[1]), "a start time within the tolerance is the same process");
-	assert.ok(existsSync(dirs[2]), "a start time that cannot be read keeps the ledger live");
+	assert.equal(existsSync(dirs[0]), false, "a reused pid has another start token: the session ended and its scratch is swept");
+	assert.ok(existsSync(dirs[1]), "the same start token is the same process, whatever the wall clock says");
+	assert.ok(existsSync(dirs[2]), "a start token that cannot be read keeps the ledger live");
+	assert.ok(existsSync(dirs[3]), "a ledger without a start token keeps pid liveness");
 	const listed = await s.run("list");
-	assert.doesNotMatch(listed, /pid-[12]/, "live ledgers are not listed as ended");
+	assert.doesNotMatch(listed, /pid-[123]/, "live ledgers are not listed as ended");
 	await s.shutdown();
 });
 
-test("advisories S3: the process start time is read from the OS, and skipped on Windows", () => {
-	const read = (scratchLib as { processStartTime?: (pid: number, platform?: NodeJS.Platform) => number | undefined }).processStartTime;
-	assert.equal(typeof read, "function", "lib/session-scratch.ts exports processStartTime");
+test("advisories S3: the process start token is read from the OS, stable for a process, and skipped on Windows", () => {
+	const read = (scratchLib as { processStartToken?: (pid: number, platform?: NodeJS.Platform) => string | undefined }).processStartToken;
+	assert.equal(typeof read, "function", "lib/session-scratch.ts exports processStartToken");
 	assert.equal(read!(process.pid, "win32"), undefined, "Windows checks pid liveness only");
-	assert.equal(read!(2 ** 22 + 12_345), undefined, "a pid that does not exist has no start time");
+	assert.equal(read!(2 ** 22 + 12_345), undefined, "a pid that does not exist has no start token");
 	if (process.platform === "linux" || process.platform === "darwin") {
 		const own = read!(process.pid);
-		assert.ok(own !== undefined && Math.abs(own - (Date.now() - process.uptime() * 1000)) < 5_000, `own start time ${own}`);
+		assert.ok(typeof own === "string" && own.length > 0, `own start token ${own}`);
+		assert.equal(read!(process.pid), own, "the token of one process never changes");
+		assert.notEqual(read!(process.ppid), own, "another process has another token");
 	}
+});
+
+test("advisories S3: the ledger records the owning process's start token", async (t) => {
+	const fx = fixture(t);
+	const s = session(fx);
+	await s.start();
+	const ledger = readLedger(fx, "s-1") as ScratchLedger & { processStartToken?: string };
+	const own = (scratchLib as { processStartToken?: (pid: number) => string | undefined }).processStartToken?.(process.pid);
+	if (process.platform === "linux") assert.match(own ?? "", /^linux:\d+$/);
+	assert.equal(ledger.processStartToken, own);
+	await s.shutdown();
 });
 
 // R1-clone-removal-orphans-linked-worktrees: removing a clone left the worktrees
@@ -918,7 +939,7 @@ test("advisories S7: the reference documents the advisory rules", () => {
 	const reference = readFileSync(new URL("../docs/readme-reference.md", import.meta.url), "utf8");
 	const section = reference.split("### Session scratch and artifact ledger\n")[1]?.split("\n### ")[0] ?? "";
 	for (const term of [
-		"live or quarantined subagent", "a later startup sweep", "started at the time its ledger recorded", "cannot be read", "has linked worktrees",
+		"live or quarantined subagent", "a later startup sweep", "has a start token other than the one its ledger recorded", "never through the wall clock", "cannot be read", "has linked worktrees",
 		"changed in the last minute", "recorded `inherited` values", "not a `gpXXXXXX` directory",
 	]) assert.ok(section.includes(term), `scratch reference missing ${term}`);
 });
