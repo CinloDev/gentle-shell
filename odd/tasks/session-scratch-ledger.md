@@ -140,3 +140,26 @@ gentle-shell#2290). Runner: `pnpm test`.
     (owning pid alive) is never removed through another session's ledger (sweep and clean). Keep every existing refusal.
   - Reload recovery, shutdown restore, and all existing tests keep passing; update tests and docs that name the old
     prefixes.
+- L10 (evidence, S9) Names: `SCRATCH_PREFIX = "gp"` and `SUBAGENT_SCRATCH_PREFIX = "ga"` (lib/agents-runner.ts now
+  imports it); `scratchRefusal` accepts only a basename matching `^gp[A-Za-z0-9]{6}$` and `clean` keeps only entries
+  matching `^ga[A-Za-z0-9]{6}$` (`scratchNamePrefix` and the session-id hash are gone). `createSessionScratch(base)`
+  returns `{ path, realPath }`: `TMPDIR`/`TMP`/`TEMP` get `path` (mkdtemp of `join(<inherited as given>, "gp")`), the
+  ledger `scratchDir`/`tempRoot` get real paths. Live-ledger refusal: `heldBy` in extensions/session-scratch.ts adds
+  to the held paths of every removal (sweep, `clean`, shutdown, startup replacement) the scratch dirs of every other
+  ledger whose pid is alive plus the current session's own; `removeSessionScratch` keeps a dir or entry that equals or
+  holds one. RED: "S9: the scratch name is gpXXXXXX whatever the session id" (`gp-ffe054fe-Qo3QGw`), "S9: TMPDIR keeps
+  the inherited spelling while the ledger records real paths" (dirname was the real `.../tmp`, not `.../tmp-link`),
+  "S9: under a 48-byte inherited TMPDIR, a subagent TMPDIR leaves room for a 32-byte socket name" (129 bytes), the
+  updated name assertions in S2/S5/S6/S8 and agents-runner (`gentle-pi-subagent-tmp-adsukK`); after the rename,
+  "S9: a dead forged ledger never removes the scratch a live session's ledger records, in the sweep or in clean"
+  failed with ENOENT on `gpLiveAb/work.txt`. GREEN after each fix. TRIANGULATE: dropping the current session from the
+  live set fails "clean keeps this session's scratch named by a forged ledger"; dropping other live ledgers fails the
+  sweep assertion; dropping them only in `clean` fails the clean assertion (all restored). The "another session's
+  prefix" case of the S5 refusal test became five non-scratch names (old prefix, old hash form, 7 and 5 random
+  characters, wrong letter), all kept. Budget: 48 + `/gpXXXXXX` (9) + `/gaXXXXXX` (9) + 32 = 98 bytes <= 103. Docs:
+  reference names `gpXXXXXX`/`gaXXXXXX`, the unresolved spelling, the live-ledger rule, and the budget. Checks:
+  `tests/session-scratch.test.ts` 35/35, `tests/agents-runner.test.ts` 99/99, `tests/gentle-agents.test.ts` 259/259,
+  `tests/test-scratch-contract.test.ts` 4/4; `pnpm test` all three stages PASS (unit 6985 tests, 6913 pass, 0 fail,
+  72 skipped); `pnpm -s typecheck` 0 diagnostics; `node scripts/verify-package-files.mjs` passed (215 files). Known
+  residual: the instructions transport dir `gentle-pi-subagent-<agent>-*` the runner creates under TMPDIR is not kept
+  by `clean` (unchanged by S9).

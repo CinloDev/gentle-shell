@@ -26,6 +26,7 @@ import {
 	type ArtifactTarget,
 	type ScratchArtifact,
 	type ScratchLedger,
+	type StoredLedger,
 	writeLedger,
 } from "../lib/session-scratch.ts";
 
@@ -82,9 +83,23 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 	// The temp root the asking session trusts inside the home: its own, as recorded.
 	const ownRoot = () => activeSessions.get(env)?.ledger.tempRoot ?? realTempRoot(env.TMPDIR?.trim() || tmpdir());
 
+	// S9: a scratch name no longer carries its session id, so a scratch dir that a
+	// live session's ledger records stays out of reach of every other ledger. This
+	// session is live whatever the process check says. Returns, per ledger path,
+	// what removal through that ledger must keep: its artifacts and others' live scratch.
+	const heldBy = (ledgers: readonly StoredLedger[]) => {
+		const own = activeSessions.get(env);
+		const live = ledgers.filter(({ ledger }) => ledger.scratchDir !== null && alive(ledger.pid)).map(({ path, ledger }) => ({ path, dir: ledger.scratchDir! }));
+		if (own?.ledger.scratchDir) live.push({ path: own.path, dir: own.ledger.scratchDir });
+		return (path: string, ledger: ScratchLedger) => [
+			...ledger.artifacts.map((artifact) => artifact.path),
+			...live.filter((entry) => entry.path !== path).map((entry) => entry.dir),
+		];
+	};
+
 	const endSession = (session: ActiveSession) => {
 		const { ledger } = session;
-		const removal = removeSessionScratch(ledger, ledger.artifacts.map((artifact) => artifact.path), { ownRoot: ledger.tempRoot ?? undefined });
+		const removal = removeSessionScratch(ledger, heldBy(listLedgers(configHome()))(session.path, ledger), { ownRoot: ledger.tempRoot ?? undefined });
 		if (removal === "removed" || removal === "absent") ledger.scratchDir = null;
 		for (const [key, value] of Object.entries(ledger.inherited)) {
 			if (value === null) delete env[key];
@@ -97,10 +112,12 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 
 	// S5(b): scratch of ended sessions past the grace period; their artifacts stay for the command.
 	const sweep = (ownPath: string) => {
-		for (const { path, ledger, mtimeMs } of listLedgers(configHome())) {
+		const ledgers = listLedgers(configHome());
+		const held = heldBy(ledgers);
+		for (const { path, ledger, mtimeMs } of ledgers) {
 			if (path === ownPath || alive(ledger.pid) || now() - mtimeMs < graceMs) continue;
 			const artifacts = ledger.artifacts.filter((artifact) => { try { lstatSync(artifact.path); return true; } catch { return false; } });
-			const removal = ledger.scratchDir === null ? "absent" : removeSessionScratch(ledger, artifacts.map((artifact) => artifact.path), { ownRoot: ownRoot() });
+			const removal = ledger.scratchDir === null ? "absent" : removeSessionScratch(ledger, held(path, { ...ledger, artifacts }), { ownRoot: ownRoot() });
 			persist(path, { ...ledger, scratchDir: removal === "removed" || removal === "absent" ? null : ledger.scratchDir, artifacts });
 		}
 	};
@@ -129,8 +146,10 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 		}
 		const inherited = Object.fromEntries(tempVariables.map((key) => [key, env[key] ?? null]));
 		const inheritedTmp = env.TMPDIR?.trim();
-		const scratchDir = createSessionScratch(inheritedTmp ? inheritedTmp : tmpdir(), sessionId);
-		if (scratchDir) for (const key of tempVariables) env[key] = scratchDir;
+		const created = createSessionScratch(inheritedTmp ? inheritedTmp : tmpdir());
+		// TMPDIR keeps the inherited spelling (S9: socket path length); the ledger keeps real paths.
+		if (created) for (const key of tempVariables) env[key] = created.path;
+		const scratchDir = created?.realPath;
 		// A resumed session keeps the artifacts an earlier run of it recorded.
 		const ledger: ScratchLedger = {
 			version: LEDGER_VERSION,
@@ -145,7 +164,8 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 		};
 		// A scratch of this process is never removed at startup: it may still be in use.
 		if (previous?.scratchDir && previous.scratchDir !== scratchDir && previous.pid !== process.pid && !alive(previous.pid)) {
-			removeSessionScratch(previous, ledger.artifacts.map((artifact) => artifact.path), { ownRoot: ownRoot() });
+			const held = heldBy(listLedgers(configHome()))(path, ledger);
+			removeSessionScratch(previous, scratchDir ? [...held, scratchDir] : held, { ownRoot: ownRoot() });
 		}
 		activeSessions.set(env, { sessionId, path, ledger });
 		persist(path, ledger);
@@ -245,14 +265,15 @@ export function createSessionScratchExtension(options: SessionScratchOptions = {
 			}
 		}
 		// Scratch goes without asking; the live session keeps its TMPDIR and empties it.
+		const held = heldBy(listLedgers(configHome()));
 		for (const group of groups) {
 			const { ledger } = group;
 			if (!ledger.scratchDir) continue;
 			const dir = ledger.scratchDir;
-			const removal = removeSessionScratch(ledger, ledger.artifacts.map((artifact) => artifact.path), { contentsOnly: group.own, ownRoot: ownRoot() });
+			const removal = removeSessionScratch(ledger, held(group.path, ledger), { contentsOnly: group.own, ownRoot: ownRoot() });
 			if (!group.own && (removal === "removed" || removal === "absent")) ledger.scratchDir = null;
 			if (removal === "refused") lines.push(`Kept scratch ${dir}: not a directory this runtime created`);
-			else if (removal === "kept") lines.push(`${group.own ? "Emptied" : "Kept"} scratch ${dir}${group.own ? " except live subagent scratch and recorded artifacts" : ": holds a recorded artifact"}`);
+			else if (removal === "kept") lines.push(`${group.own ? "Emptied" : "Kept"} scratch ${dir}${group.own ? " except live subagent scratch, live sessions' scratch, and recorded artifacts" : ": holds a recorded artifact or a live session's scratch"}`);
 			else lines.push(`${group.own ? "Emptied" : "Removed"} scratch ${dir}`);
 		}
 		for (const group of groups) persist(group.path, group.ledger);

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
@@ -12,15 +12,14 @@ import { directoryAfterSegment, SHELL_SEGMENT_SEPARATOR } from "./commit-slice-s
 // and every check refuses rather than guesses.
 
 export const LEDGER_VERSION = 1;
-// Short on purpose: TMPDIR points here, and Unix socket paths under it are capped near 104 bytes.
-export const SCRATCH_PREFIX = "gp-";
-
-/** `gp-<first 8 hex of sha256(session id)>-`: a fixed-length name prefix for one session's scratch. */
-export function scratchNamePrefix(sessionId: string): string {
-	return `${SCRATCH_PREFIX}${createHash("sha256").update(sessionId).digest("hex").slice(0, 8)}-`;
-}
+// Short on purpose (S9): TMPDIR points at `gpXXXXXX` and a subagent's TMPDIR at
+// `gaXXXXXX` under it, and Unix socket paths below them are capped near 104 bytes.
+export const SCRATCH_PREFIX = "gp";
 /** Subagent TMPDIRs (lib/agents-runner.ts) nest under the session scratch; their runner removes them. */
-export const SUBAGENT_SCRATCH_PREFIX = "gentle-pi-subagent-tmp-";
+export const SUBAGENT_SCRATCH_PREFIX = "ga";
+// mkdtemp appends six alphanumeric characters to the prefix.
+const SCRATCH_NAME = new RegExp(`^${SCRATCH_PREFIX}[A-Za-z0-9]{6}$`);
+const SUBAGENT_SCRATCH_NAME = new RegExp(`^${SUBAGENT_SCRATCH_PREFIX}[A-Za-z0-9]{6}$`);
 export const SWEEP_GRACE_MS = 60 * 60 * 1000;
 
 export type ArtifactKind = "clone" | "worktree";
@@ -130,13 +129,17 @@ export function isProcessAlive(pid: number): boolean {
 	}
 }
 
-/** A private `gp-<session hash>-XXXXXX` under `base`, as its real path, or undefined when it cannot be created. */
-export function createSessionScratch(base: string | undefined, sessionId: string): string | undefined {
+/**
+ * A private `gpXXXXXX` under `base`, or undefined when it cannot be created.
+ * `path` joins `base` as given, for TMPDIR (a real path can be longer, as
+ * macOS `/private/var/...`); `realPath` is what the ledger and checks use.
+ */
+export function createSessionScratch(base: string | undefined): { path: string; realPath: string } | undefined {
 	if (!base || !isAbsolute(base)) return undefined;
 	try {
-		const dir = mkdtempSync(join(base, scratchNamePrefix(sessionId)));
-		try { chmodSync(dir, 0o700); } catch { /* best effort, as mkdtemp already creates 0700 on POSIX */ }
-		return realpathSync(dir);
+		const path = mkdtempSync(join(base, SCRATCH_PREFIX));
+		try { chmodSync(path, 0o700); } catch { /* best effort, as mkdtemp already creates 0700 on POSIX */ }
+		return { path, realPath: realpathSync(path) };
 	} catch {
 		return undefined;
 	}
@@ -158,8 +161,8 @@ export function realTempRoot(path: string | undefined): string | undefined {
 export function scratchRefusal(ledger: ScratchLedger, ownRoot: string | undefined): string | undefined {
 	const dir = ledger.scratchDir;
 	if (!dir || !isAbsolute(dir)) return "not recorded";
-	// Prefix and ledger match: only the directory created for this session id.
-	if (!basename(dir).startsWith(scratchNamePrefix(ledger.sessionId))) return "not this session's scratch";
+	// Prefix and ledger match: only a directory named as the runtime names a session scratch.
+	if (!SCRATCH_NAME.test(basename(dir))) return "not a session scratch name";
 	// Created directly under the temp root recorded with it, which is a temp root.
 	const root = ledger.tempRoot;
 	if (!root || !isAbsolute(root) || dirname(dir) !== root) return "outside its temp root";
@@ -178,15 +181,16 @@ export type ScratchRemoval = "removed" | "absent" | "kept" | "refused";
 
 /**
  * Removes a ledger's scratch dir, or with `contentsOnly` its entries except live
- * subagent TMPDIRs. A dir or entry holding a recorded artifact is kept: the
- * artifact is removed only through its own checks. Symlinks are never followed.
+ * subagent TMPDIRs. A dir or entry holding one of `heldPaths` is kept: a
+ * recorded artifact is removed only through its own checks, and the scratch dir
+ * of a live session only through that session's ledger. Symlinks are never followed.
  */
-export function removeSessionScratch(ledger: ScratchLedger, artifactPaths: readonly string[], options: { contentsOnly?: boolean; ownRoot: string | undefined }): ScratchRemoval {
+export function removeSessionScratch(ledger: ScratchLedger, heldPaths: readonly string[], options: { contentsOnly?: boolean; ownRoot: string | undefined }): ScratchRemoval {
 	const refusal = scratchRefusal(ledger, options.ownRoot);
 	if (refusal === "absent") return "absent";
 	if (refusal) return "refused";
 	const dir = ledger.scratchDir!;
-	const holdsArtifact = (path: string) => artifactPaths.some((artifact) => isWithin(artifact, path));
+	const holdsArtifact = (path: string) => heldPaths.some((held) => isWithin(held, path));
 	try {
 		if (!options.contentsOnly) {
 			if (holdsArtifact(dir)) return "kept";
@@ -196,7 +200,7 @@ export function removeSessionScratch(ledger: ScratchLedger, artifactPaths: reado
 		let kept = false;
 		for (const name of readdirSync(dir)) {
 			const path = join(dir, name);
-			if (name.startsWith(SUBAGENT_SCRATCH_PREFIX) || holdsArtifact(path)) { kept = true; continue; }
+			if (SUBAGENT_SCRATCH_NAME.test(name) || holdsArtifact(path)) { kept = true; continue; }
 			rmSync(path, { recursive: true, force: true });
 		}
 		return kept ? "kept" : "removed";

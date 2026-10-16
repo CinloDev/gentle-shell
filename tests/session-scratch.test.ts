@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createSessionScratchExtension, SCRATCH_COMMAND_USAGE } from "../extensions/session-scratch.ts";
-import { gitArtifactTargets, LEDGER_VERSION, scratchNamePrefix, type ScratchLedger } from "../lib/session-scratch.ts";
+import { gitArtifactTargets, LEDGER_VERSION, type ScratchLedger } from "../lib/session-scratch.ts";
 
 // Session scratch and artifact ledger (odd/tasks/session-scratch-ledger.md):
 // the runtime owns the parent session's TMPDIR and the clones/worktrees it
@@ -105,14 +105,46 @@ const later = () => Date.now() + 2 * 3_600_000;
 
 // S2
 
+// Pi's /reload re-evaluates every extension module (jiti `moduleCache: false`
+// after `clearExtensionCache()`), so the module-level state is new; a fresh
+// import with a cache-busting query string is a separate module instance.
+const loadInstance = async (tag: string): Promise<ExtensionFactory> =>
+	((await import(`../extensions/session-scratch.ts?instance=${tag}-${Date.now()}`)) as { createSessionScratchExtension: ExtensionFactory }).createSessionScratchExtension;
+
 // Native review R3-scratch-socket-path-length: TMPDIR now points at the scratch, and
-// Unix socket paths are capped near 104 bytes, so the name must stay short.
-test("S2: the scratch name is short and fixed-length whatever the session id", async (t) => {
+// Unix socket paths are capped near 104 bytes, so the name must stay short (S9).
+const SCRATCH_NAME = /^gp[A-Za-z0-9]{6}$/;
+
+test("S9: the scratch name is gpXXXXXX whatever the session id", async (t) => {
 	const fx = fixture(t);
 	const s = session(fx, { sessionId: "a".repeat(64) });
 	await s.start();
-	assert.match(basename(s.env.TMPDIR!), /^gp-[0-9a-f]{8}-[A-Za-z0-9]{6}$/);
+	assert.match(basename(s.env.TMPDIR!), SCRATCH_NAME);
 	await s.shutdown();
+});
+
+test("S9: TMPDIR keeps the inherited spelling while the ledger records real paths", async (t) => {
+	const fx = fixture(t);
+	const link = join(fx.root, "tmp-link");
+	symlinkSync(fx.base, link, "dir");
+	const env: NodeJS.ProcessEnv = { TMPDIR: link, GENTLE_PI_CONFIG_HOME: fx.configHome };
+	const first = session(fx, { env, factory: await loadInstance("spelling-a") });
+	await first.start();
+	const scratch = env.TMPDIR!;
+	assert.equal(dirname(scratch), link, "the TMPDIR value joins the inherited value, never a real path");
+	const ledger = readLedger(fx, "s-1");
+	assert.equal(ledger.scratchDir, join(fx.base, basename(scratch)));
+	assert.equal(ledger.tempRoot, fx.base);
+	assert.deepEqual(ledger.inherited, { TMPDIR: link });
+	writeFileSync(join(scratch, "work.txt"), "x");
+	await first.shutdown("reload");
+	const second = session(fx, { env, factory: await loadInstance("spelling-b") });
+	await second.start("reload");
+	assert.equal(env.TMPDIR, scratch, "a reload recovers the scratch under the same spelling");
+	assert.deepEqual(readdirSync(fx.base), [basename(scratch)]);
+	await second.shutdown("quit");
+	assert.deepEqual(readdirSync(fx.base), []);
+	assert.equal(env.TMPDIR, link);
 });
 
 test("S2: a primary session points TMPDIR at a private session scratch under the inherited one", async (t) => {
@@ -121,7 +153,7 @@ test("S2: a primary session points TMPDIR at a private session scratch under the
 	await s.start();
 	const scratch = s.env.TMPDIR!;
 	assert.equal(dirname(scratch), fx.base);
-	assert.match(basename(scratch), new RegExp(`^${scratchNamePrefix("abc/../1")}`));
+	assert.match(basename(scratch), SCRATCH_NAME);
 	assert.ok(statSync(scratch).isDirectory());
 	if (process.platform !== "win32") assert.equal(statSync(scratch).mode & 0o777, 0o700);
 	assert.equal(s.env.TMP, undefined, "TMP/TEMP are only set on win32");
@@ -180,12 +212,6 @@ test("S2/S5: reload keeps the same scratch; quit removes it and restores TMPDIR"
 	assert.equal(existsSync(ledgerFile(fx, "s-1")), false, "a ledger without artifacts is deleted");
 });
 
-// Pi's /reload re-evaluates every extension module (jiti `moduleCache: false`
-// after `clearExtensionCache()`), so the module-level state is new; a fresh
-// import with a cache-busting query string is a separate module instance.
-const loadInstance = async (tag: string): Promise<ExtensionFactory> =>
-	((await import(`../extensions/session-scratch.ts?instance=${tag}-${Date.now()}`)) as { createSessionScratchExtension: ExtensionFactory }).createSessionScratchExtension;
-
 test("S2/S5: a reload into a fresh module instance recovers the live scratch from the ledger and quit removes it once", async (t) => {
 	const fx = fixture(t);
 	const env: NodeJS.ProcessEnv = { TMPDIR: fx.base, GENTLE_PI_CONFIG_HOME: fx.configHome };
@@ -237,7 +263,7 @@ test("S5: a session replacement removes the old scratch and the new session gets
 	await s.start("new");
 	assert.equal(existsSync(first), false);
 	assert.equal(dirname(s.env.TMPDIR!), fx.base, "the new scratch nests under the inherited TMPDIR, not the old scratch");
-	assert.match(basename(s.env.TMPDIR!), new RegExp(`^${scratchNamePrefix("second")}`));
+	assert.match(basename(s.env.TMPDIR!), SCRATCH_NAME);
 	await s.shutdown();
 });
 
@@ -392,35 +418,37 @@ test("S5: the sweep keeps scratch of live owners and of ledgers younger than the
 	for (const s of [live, young, other]) await s.shutdown();
 });
 
-test("S5: the sweep refuses a symlinked scratch, a scratch outside the recorded prefix, and another session's prefix", async (t) => {
+test("S5: the sweep refuses a symlinked scratch, a scratch outside the recorded root, and a directory without the scratch name", async (t) => {
 	const fx = fixture(t);
 	const victim = join(fx.root, "victim");
 	mkdirSync(victim);
 	writeFileSync(join(victim, "keep.txt"), "precious");
-	const link = join(fx.base, `${scratchNamePrefix("evil-link")}AAAAAA`);
+	const link = join(fx.base, "gpLinkAA");
 	symlinkSync(victim, link, "dir");
 	writeForeignLedger(fx, { sessionId: "evil-link", scratchDir: link });
 	writeForeignLedger(fx, { sessionId: "evil-outside", scratchDir: victim });
-	const otherPrefix = join(fx.base, `${scratchNamePrefix("someone-else")}BBBBBB`);
-	mkdirSync(otherPrefix);
-	writeFileSync(join(otherPrefix, "keep.txt"), "x");
-	writeForeignLedger(fx, { sessionId: "evil-prefix", scratchDir: otherPrefix });
+	const otherNames = ["gentle-pi-session-evil-prefix-BBBBBB", "gp-1234abcd-BBBBBB", "gpBBBBBBB", "gpBBBBB", "xpBBBBBB"].map((name) => join(fx.base, name));
+	for (const [index, dir] of otherNames.entries()) {
+		mkdirSync(dir);
+		writeFileSync(join(dir, "keep.txt"), "x");
+		writeForeignLedger(fx, { sessionId: `evil-prefix-${index}`, scratchDir: dir });
+	}
 	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => false, now: later });
 	await s.start();
 	assert.equal(readFileSync(join(victim, "keep.txt"), "utf8"), "precious");
 	assert.ok(lstatSync(link).isSymbolicLink());
-	assert.ok(existsSync(join(otherPrefix, "keep.txt")));
-	for (const id of ["evil-link", "evil-outside", "evil-prefix"]) assert.ok(existsSync(ledgerFile(fx, id)), `${id} ledger is kept for the command`);
+	for (const dir of otherNames) assert.ok(existsSync(join(dir, "keep.txt")), dir);
+	for (const id of ["evil-link", "evil-outside", ...otherNames.map((_, index) => `evil-prefix-${index}`)]) assert.ok(existsSync(ledgerFile(fx, id)), `${id} ledger is kept for the command`);
 	await s.shutdown();
 });
 
 test("S5: a forged ledger naming a session-prefixed directory outside its recorded temp root is refused", async (t) => {
 	const fx = fixture(t);
-	const forged = join(fx.work, `${scratchNamePrefix("evil")}abc`);
+	const forged = join(fx.work, "gpEvilAb");
 	mkdirSync(forged);
 	writeFileSync(join(forged, "keep.txt"), "precious");
 	writeForeignLedger(fx, { sessionId: "evil", tempRoot: fx.base, scratchDir: forged });
-	const rootless = join(fx.base, `${scratchNamePrefix("rootless")}abc`);
+	const rootless = join(fx.base, "gpRootAb");
 	mkdirSync(rootless);
 	writeForeignLedger(fx, { sessionId: "rootless", tempRoot: null, scratchDir: rootless });
 	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => false, now: later });
@@ -432,16 +460,56 @@ test("S5: a forged ledger naming a session-prefixed directory outside its record
 	await s.shutdown();
 });
 
+// S9: without the session id in the name, a forged ledger could name another
+// session's live scratch; the ledger of a live session keeps it.
+test("S9: a dead forged ledger never removes the scratch a live session's ledger records, in the sweep or in clean", async (t) => {
+	const fx = fixture(t);
+	const livePid = 4_444_444;
+	const liveScratch = join(fx.base, "gpLiveAb");
+	mkdirSync(liveScratch);
+	writeFileSync(join(liveScratch, "work.txt"), "live");
+	writeForeignLedger(fx, { sessionId: "live", pid: livePid, scratchDir: liveScratch });
+	writeForeignLedger(fx, { sessionId: "forged", scratchDir: liveScratch });
+	// A forged scratch that holds a live session's scratch is kept too.
+	const outer = join(fx.base, "gpOuterA");
+	const nested = join(outer, "gpInnerA");
+	mkdirSync(nested, { recursive: true });
+	writeForeignLedger(fx, { sessionId: "nested-live", pid: livePid, tempRoot: outer, scratchDir: nested });
+	writeForeignLedger(fx, { sessionId: "forged-outer", scratchDir: outer });
+	const s = session(fx, { sessionId: "sweeper", isProcessAlive: (pid) => pid === livePid, now: later });
+	await s.start();
+	assert.equal(readFileSync(join(liveScratch, "work.txt"), "utf8"), "live", "the sweep keeps the live scratch");
+	assert.ok(existsSync(nested), "the sweep keeps a scratch holding a live one");
+	assert.equal(readLedger(fx, "forged").scratchDir, liveScratch);
+	await s.run("clean");
+	assert.equal(readFileSync(join(liveScratch, "work.txt"), "utf8"), "live", "clean keeps the live scratch");
+	assert.ok(existsSync(nested), "clean keeps a scratch holding a live one");
+	// This session's own scratch is live whatever the process check says.
+	const own = readLedger(fx, "sweeper").scratchDir!;
+	writeFileSync(join(own, "mine.txt"), "x");
+	writeForeignLedger(fx, { sessionId: "forged-own", scratchDir: own });
+	await s.run("clean");
+	assert.ok(existsSync(own), "clean keeps this session's scratch named by a forged ledger");
+	// Control: a dead ledger's own scratch that no live ledger records is removed.
+	const deadScratch = join(fx.base, "gpDeadAb");
+	mkdirSync(deadScratch);
+	writeForeignLedger(fx, { sessionId: "dead", scratchDir: deadScratch });
+	await s.run("clean");
+	assert.equal(existsSync(deadScratch), false);
+	await s.shutdown();
+	assert.equal(existsSync(own), false, "shutdown still removes the session's own scratch");
+});
+
 test("S5: a recorded temp root inside the home is accepted only when it is the session's own temp root", async (t) => {
 	const fx = fixture(t);
 	const home = process.env.HOME;
 	process.env.HOME = fx.root;
 	t.after(() => { if (home === undefined) delete process.env.HOME; else process.env.HOME = home; });
 	// fx.base and fx.work are now inside the home; fx.base is this session's inherited TMPDIR.
-	const foreign = join(fx.work, `${scratchNamePrefix("home")}abc`);
+	const foreign = join(fx.work, "gpHomeAb");
 	mkdirSync(foreign);
 	writeForeignLedger(fx, { sessionId: "home", tempRoot: fx.work, scratchDir: foreign });
-	const dead = join(fx.base, `${scratchNamePrefix("dead")}abc`);
+	const dead = join(fx.base, "gpDeadAb");
 	mkdirSync(dead);
 	writeForeignLedger(fx, { sessionId: "dead", tempRoot: fx.base, scratchDir: dead });
 	const s = session(fx, { sessionId: "sweeper", isProcessAlive: () => false, now: later });
@@ -510,7 +578,7 @@ test("S6: clean removes scratch without asking and, after one confirmation, only
 	await s.start();
 	const scratch = s.env.TMPDIR!;
 	writeFileSync(join(scratch, "junk.txt"), "x");
-	mkdirSync(join(scratch, "gentle-pi-subagent-tmp-live"));
+	mkdirSync(join(scratch, "gaLiveAa"));
 	const add = async (args: string[], command: string) => { await s.bash(`cd ${fx.work} && ${command}`, () => git(fx.work, ...args)); };
 	await add(["clone", "-q", source, "pushed"], `git clone ${source} pushed`);
 	await add(["clone", "-q", source, "unpushed"], `git clone ${source} unpushed`);
@@ -538,7 +606,7 @@ test("S6: clean removes scratch without asking and, after one confirmation, only
 	assert.match(out, /dirty-clone: uncommitted changes/);
 	assert.match(out, /wt-dirty: uncommitted changes/);
 	assert.equal(existsSync(join(scratch, "junk.txt")), false);
-	assert.ok(existsSync(join(scratch, "gentle-pi-subagent-tmp-live")), "live subagent scratch is left to the runner");
+	assert.ok(existsSync(join(scratch, "gaLiveAa")), "live subagent scratch is left to the runner");
 	assert.ok(existsSync(scratch), "the session keeps its TMPDIR");
 	assert.deepEqual(readLedger(fx, "s-1").artifacts.map((artifact) => basename(artifact.path)).sort(), ["dirty-clone", "unpushed", "wt-dirty"]);
 	await s.shutdown();
@@ -575,7 +643,7 @@ test("S6: clean refuses a recorded clone replaced by a symlink and leaves live s
 	renameSync(join(fx.work, "copy"), join(fx.work, "moved"));
 	symlinkSync(join(fx.work, "real"), join(fx.work, "copy"), "dir");
 	git(fx.work, "clone", "-q", source, "theirs");
-	const liveScratch = join(fx.base, `${scratchNamePrefix("live-2")}CCCCCC`);
+	const liveScratch = join(fx.base, "gpLiveCC");
 	mkdirSync(liveScratch);
 	writeForeignLedger(fx, { sessionId: "live-2", pid: 3_333_333, scratchDir: liveScratch, artifacts: [{ kind: "clone", path: join(fx.work, "theirs"), command: "git clone", recordedAt: new Date().toISOString() }] });
 	const out = await s.run("clean");
@@ -682,10 +750,10 @@ test("S8: the reference documents the scratch dir, ledger, automatic cleanup, sw
 	const reference = readFileSync(new URL("../docs/readme-reference.md", import.meta.url), "utf8");
 	const section = reference.split("### Session scratch and artifact ledger\n")[1]?.split("\n### ")[0] ?? "";
 	for (const term of [
-		"`gp-<first 8 hex of sha256(session id)>-XXXXXX`", "`TMPDIR`", "`<config home>/scratch/<session id>.json`", "atomically",
+		"`gpXXXXXX`", "never its real path", "`TMPDIR`", "`<config home>/scratch/<session id>.json`", "atomically",
 		"`version`", "`sessionId`", "`pid`", "`processStartedAt`", "`cwd`", "`tempRoot`", "`inherited`", "`scratchDir`", "`artifacts`", "`git clone ... [<dir>]`", "`git worktree add ... <path>`",
 		"did not exist before the command", "recovers the live scratch from the ledger", "never removes a scratch of its own process",
-		"At session shutdown", "older than one hour", "never follows symlinks", "directly under the temp root its ledger recorded",
+		"At session shutdown", "older than one hour", "never follows symlinks", "directly under the temp root its ledger recorded", "the ledger of a live session",
 		"`/gentle:scratch list`", "`/gentle:scratch clean`", "no uncommitted changes and no unpushed commits", "ignored files inside them are deleted too", "`git worktree remove`", "Without a UI",
 	]) assert.ok(section.includes(term), `scratch reference missing ${term}`);
 	assert.match(reference, /\| `\/gentle:scratch` +\| Lists \(`list`, the default\) or cleans \(`clean`\)/);
