@@ -2068,7 +2068,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					const gaps = peer.scope && !peer.scope.complete ? `\n  (scope incomplete: ${peer.scope.omittedTasks} tasks, ${peer.scope.omittedRegistered} registered roots omitted)` : "";
 					const catalog = peer.catalog ? `\n  recorded catalog (not Git identity): ${JSON.stringify(peer.catalog)}` : "\n  recorded catalog: unknown";
 					const note = params.recipient_session_id ? `\n  owner-curated recorded state (not consent or owner reply; authority none): ${peer.state ? JSON.stringify(peer.state) : "unknown"}` : "";
-					return `- ${peer.sessionId}${context} · ${repository(peer.scope?.host)} · metadata: ${peer.freshness}${tasks}${registered}${gaps}${catalog}${note}${peer.omitted ? `\n  (${peer.omitted} more tasks omitted)` : ""}`;
+					// A legacy peer never publishes its scope: say so instead of reporting an unknown.
+					const legacy = peer.legacyLabel !== undefined;
+					return `- ${peer.sessionId}${context} · ${legacy ? "repository: not published" : repository(peer.scope?.host)} · metadata: ${legacy ? "legacy" : peer.freshness}${tasks}${registered}${gaps}${catalog}${note}${peer.omitted ? `\n  (${peer.omitted} more tasks omitted)` : ""}`;
 				});
 				return peers.length === 0 ? text("No other sessions are currently advertised. Advertisements have unknown reachability and do not guarantee a live session.") : text(`Advertised sessions (reachability is unknown):\n${rows.join("\n")}`, { gentleAgents: { candidates: peers } });
 			} catch {
