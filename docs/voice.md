@@ -1,12 +1,37 @@
 # Optional local voice dictation
 
-> **Status: not wired yet.** This page documents the acquisition and status
-> layer and the dictation session. No command or menu uses them yet; the planned
-> entry point is `/gentle:voice`. Nothing described here runs at startup.
-
 Voice dictation is optional. It transcribes speech locally with NVIDIA Parakeet
-through sherpa-onnx, with no API key and no cloud inference. The runtime and the
-model are downloaded only when explicitly requested.
+through sherpa-onnx, with no API key and no cloud inference. Everything happens
+from `/gentle:voice`; nothing described here runs at startup.
+
+## Quick path
+
+1. Run `/gentle:voice` and choose **Download voice dictation**. The
+   confirmation lists each component, its size, the destination directory,
+   the licenses and the platform limitations. Esc during the download cancels it.
+2. Run `/gentle:voice` again and choose **Start dictation**. Speak, then press
+   Enter to stop. Esc cancels at any point.
+3. The transcript is pasted into the editor draft at the cursor. It is never
+   sent automatically. Pi collapses pastes over 1,000 characters or 10 lines into
+   a `[paste #N …]` marker; the full text is retained and expanded when you submit.
+   Long transcripts are therefore not displayed as editable text in the draft.
+
+## The command
+
+| Topic | Behavior |
+|-------|----------|
+| Menu | Built-in select and confirm dialogs. **Show status and notices** reports the target, both components, limitations and licenses. |
+| Download | Only after the confirmation; runtime first, then the model. A cancelled download keeps components that already finished. |
+| Dictation | A compact overlay shows preparing, recording, transcribing. Enter stops recording; the overlay stays until the transcript is ready. |
+| Recording limit | After 2 minutes recording stops by itself, and the transcript is pasted without a key press. |
+| Insertion | The recognized text goes through Pi's editor paste pipeline, which may collapse long text into a paste marker. A blank result pastes nothing. |
+| One at a time | A second `/gentle:voice` while a download or dictation runs is refused with a notice. |
+| Cancel and shutdown | Esc, reload or session shutdown aborts the download or cancels the session. A transcript that arrives afterwards is dropped. |
+| Where it runs | Interactive TUI parent sessions only. RPC, print, JSON and delegated child sessions refuse it. No model-callable tool exists. |
+| Errors | Fixed messages with the action to take, such as installing ALSA or the Visual C++ runtime. Gentle AI never runs those installers. |
+
+The command is tested with fake dialogs, downloads and sessions only. No real
+download, native load or microphone recording has been exercised through it.
 
 ## What gets downloaded
 
@@ -140,7 +165,7 @@ built for their architecture (checked from the binary headers, not by loading).
 node-cpal requires Node 22 or newer, and a dictation session refuses to start
 on an older Node. Gentle AI never downloads or installs the Visual C++ runtime;
 a missing runtime is expected to surface as a runtime load failure, which has
-not been observed on hardware.
+not been observed on hardware. `/gentle:voice` then names the runtime to install.
 
 None of these targets has been verified on real hardware yet: native loading,
 library paths and microphone capture have not been executed. Linux with a glibc
