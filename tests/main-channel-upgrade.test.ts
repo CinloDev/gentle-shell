@@ -254,7 +254,8 @@ test("after a fail-forward, the retry from the new Shell builds Gentle AI and re
 		const before = files();
 		await assert.rejects(w.upgrade([], "4.0.0-main.6e7e3a18f794"), (error: MainChannelError) => error.code === "main-gentle-ai-unverified");
 		assert.deepEqual(files(), before);
-		// The retry runs from the Shell the first attempt installed. No channel was recorded,
+		// The retry is simulated as the new Shell's run: the same runUpgrade with the new
+		// version (the installed package itself is not executed). No channel was recorded,
 		// so it rebuilds Gentle AI and repacks the Shell before recording both commits.
 		w.lines.length = 0;
 		assert.equal(await w.upgrade([], "4.1.0-main.333333333333"), 0);
