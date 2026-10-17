@@ -139,18 +139,21 @@ export async function buildMainGentleAi({ commit, ctx, platform, goPath, run, fs
 	const executable = platform === "win32" ? "gentle-ai.exe" : "gentle-ai";
 	const directory = join(configHome(ctx), "main", "gentle-ai", commit);
 	const buildDirectory = join(configHome(ctx), "main", ".build");
+	// Verified in the work folder before it replaces anything, so a failed rebuild of
+	// an already registered commit never touches the override; the final move stays
+	// on one filesystem, and uninstall already accepts a leftover .build.
+	const staging = join(buildDirectory, commit);
 	await fs.rm(buildDirectory, { recursive: true, force: true });
 	const env = sealedGoEnvironment(goPath, buildDirectory, platform);
 	for (const path of [env.GOBIN, env.GOPATH, env.GOMODCACHE, env.GOCACHE, join(buildDirectory, "tmp")]) await fs.mkdir(path, { recursive: true });
 	try {
 		const install = await run(goPath, ["install", `${GENTLE_AI_MAIN_PACKAGE}@${commit}`], { env, cwd: buildDirectory, deadlineMs: deadlines.build, stderrTail: 4096 });
 		if (!succeeded(install)) throw new MainChannelError("main-gentle-ai-build-failed", `go install ${GENTLE_AI_MAIN_PACKAGE}@${commit} failed`, stderrCause(install));
-		await fs.mkdir(directory, { recursive: true });
-		const binaryPath = join(directory, executable);
-		await fs.copyFile(join(env.GOBIN, executable), binaryPath);
-		if (platform !== "win32") await fs.chmod(binaryPath, 0o755);
+		await fs.mkdir(staging, { recursive: true });
+		const stagedPath = join(staging, executable);
+		await fs.copyFile(join(env.GOBIN, executable), stagedPath);
+		if (platform !== "win32") await fs.chmod(stagedPath, 0o755);
 		const reject = async (message, cause) => {
-			await fs.rm(directory, { recursive: true, force: true });
 			throw new MainChannelError("main-gentle-ai-unverified", message, cause);
 		};
 		const short = commit.slice(0, 12);
@@ -172,18 +175,21 @@ export async function buildMainGentleAi({ commit, ctx, platform, goPath, run, fs
 		if (originHash !== commit) {
 			return await reject(`Go resolved Gentle AI commit ${short} to ${originHash ? `commit ${originHash}` : "no commit"}, not the requested commit`);
 		}
-		const embedded = await run(goPath, ["version", "-m", binaryPath], goOptions);
+		const embedded = await run(goPath, ["version", "-m", stagedPath], goOptions);
 		if (!succeeded(embedded)) return await reject("the built Gentle AI's embedded module version could not be read", stderrCause(embedded));
 		const modLine = String(embedded.stdout ?? "").split(/\r?\n/).map((line) => line.trim().split(/\s+/)).find((fields) => fields[0] === "mod" && fields[1] === GENTLE_AI_MODULE);
 		if (modLine?.[2] !== resolvedVersion) {
 			return await reject(`the built Gentle AI embeds module version ${modLine?.[2] ?? "none"}, expected ${resolvedVersion} for commit ${short}`);
 		}
-		const probe = await run(binaryPath, ["version"], { env: { PATH: env.PATH }, deadlineMs: deadlines.version });
+		const probe = await run(stagedPath, ["version"], { env: { PATH: env.PATH }, deadlineMs: deadlines.version });
 		const match = succeeded(probe) && /^gentle-ai (\S+)$/m.exec(String(probe.stdout ?? ""));
 		const expectedVersion = resolvedVersion.replace(/^v/, "");
 		if (!match || match[1] !== expectedVersion) {
 			return await reject(`the built Gentle AI reports version ${match ? match[1] : "none"}, expected ${expectedVersion} for commit ${short}`);
 		}
+		await fs.mkdir(directory, { recursive: true });
+		const binaryPath = join(directory, executable);
+		await fs.rename(stagedPath, binaryPath);
 		registerGentleAiDevBinary(binaryPath, ctx, platform);
 		return { binaryPath, version: match[1] };
 	} finally {

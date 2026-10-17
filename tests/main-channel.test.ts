@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -265,6 +265,32 @@ test("a failed go list is rejected as unverified, with its stderr tail as the ca
 			(error: MainChannelError) => error.code === "main-gentle-ai-unverified" && error.cause instanceof Error && error.cause.message === LIST_FAILURE);
 		assert.equal(existsSync(join(s.home, ".pi", "gentle-ai", "dev-binary.json")), false);
 		assert.equal(existsSync(join(s.home, ".pi", "gentle-ai", "main", "gentle-ai", AI_SHA)), false);
+	} finally { s.cleanup(); }
+});
+
+// Rebuilding a commit that is already registered (a rerun wizard step, a lost
+// channel record) must not delete the working override when verification fails.
+for (const [name, failure] of Object.entries({
+	"go list fails": { listFails: true },
+	"the embedded version differs": { embeddedVersion: "v4.1.2" },
+	"the reported version differs": { probeVersion: "4.0.1-0.20261008202137-aaaaaaaaaaaa" },
+})) test(`a registered build of the same commit survives a rebuild whose verification fails because ${name}`, posixOnly, async () => {
+	const s = sandbox();
+	try {
+		const directory = join(s.home, ".pi", "gentle-ai", "main", "gentle-ai", AI_SHA);
+		const binary = join(directory, "gentle-ai");
+		const registration = join(s.home, ".pi", "gentle-ai", "dev-binary.json");
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(binary, "#!/bin/sh\n# registered\n", { mode: 0o755 });
+		const record = JSON.stringify({ schema: "gentle-pi.dev-binary/v1", path: binary });
+		writeFileSync(registration, record);
+		const { run } = gentleAiBuildRun({ commit: AI_SHA, listVersion: PSEUDO, ...failure });
+		await assert.rejects(buildMainGentleAi({ commit: AI_SHA, ctx: s.ctx, platform: "darwin", goPath: "/go/bin/go", run, fs: fsPromises }),
+			(error: MainChannelError) => error.code === "main-gentle-ai-unverified");
+		assert.equal(readFileSync(binary, "utf8"), "#!/bin/sh\n# registered\n");
+		assert.equal(readFileSync(registration, "utf8"), record);
+		assert.deepEqual(readdirSync(join(s.home, ".pi", "gentle-ai", "main", "gentle-ai")), [AI_SHA]);
+		assert.equal(existsSync(join(s.home, ".pi", "gentle-ai", "main", ".build")), false);
 	} finally { s.cleanup(); }
 });
 
