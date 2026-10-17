@@ -787,7 +787,7 @@ publishes main builds, so main is built on this computer
      Gentleman-Programming/gentle-ai (GitHub API, raw SHA), runs
      `go install github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@<sha>`
      in a sealed Go environment (`GOPROXY=https://proxy.golang.org`,
-     `GOSUMDB=sum.golang.org`, `GOTOOLCHAIN=local`, `GOFLAGS=-modcacherw`), requires
+     `GOSUMDB=sum.golang.org`, `GOTOOLCHAIN=local`, `GOFLAGS=-modcacherw`),
      asks Go (`go list -m -json`, same environment) which module version that
      commit is (a release tag such as `v4.2.0`, or a pseudo-version) and requires
      its origin to be that exact commit, requires the binary to embed that module
