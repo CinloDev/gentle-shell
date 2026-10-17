@@ -241,6 +241,35 @@ test("a Go that cannot be obtained for the Gentle AI build still installs the ma
 	} finally { w.cleanup(); }
 });
 
+test("after a fail-forward, the retry from the new Shell builds Gentle AI and records both commits", posixOnly, async () => {
+	// The first copy of the built binary fails (as a rejected build would); the retry's succeeds.
+	let copies = 0;
+	const fs = { ...fsPromises, copyFile: async (...args: Parameters<typeof fsPromises.copyFile>) => {
+		if (copies++ === 0) throw new MainChannelError("main-gentle-ai-unverified", "first attempt rejected");
+		return fsPromises.copyFile(...args);
+	} } as typeof fsPromises;
+	const w = world({ commits: { ai: NEW_AI, shell: NEW_SHELL }, fs });
+	try {
+		const files = await onPriorMain(w);
+		const before = files();
+		await assert.rejects(w.upgrade([], "4.0.0-main.6e7e3a18f794"), (error: MainChannelError) => error.code === "main-gentle-ai-unverified");
+		assert.deepEqual(files(), before);
+		// The retry runs from the Shell the first attempt installed. No channel was recorded,
+		// so it rebuilds Gentle AI and repacks the Shell before recording both commits.
+		w.lines.length = 0;
+		assert.equal(await w.upgrade([], "4.1.0-main.333333333333"), 0);
+		assert.deepEqual(w.lines, ["Updated to the latest main: Gentle Shell 333333333333, Gentle AI 222222222222."]);
+		assert.deepEqual(w.installs(), [`/usr/bin/pnpm add -g ${NEW_SHELL_TGZ(w.home)} --allow-build=gentle-pi`, `/usr/bin/pnpm add -g ${NEW_SHELL_TGZ(w.home)} --allow-build=gentle-pi`]);
+		assert.deepEqual(await readChannel(w.ctx, fsPromises), { channel: "main", shellCommit: NEW_SHELL, gentleAiCommit: NEW_AI });
+		assert.equal(JSON.parse(readFileSync(join(w.home, ".pi", "gentle-ai", "dev-binary.json"), "utf8")).path,
+			join(w.home, ".pi", "gentle-ai", "main", "gentle-ai", NEW_AI, "gentle-ai"));
+		// A third run is a no-op: both commits are current.
+		w.lines.length = 0;
+		assert.equal(await w.upgrade([], "4.1.0-main.333333333333"), 0);
+		assert.deepEqual(w.lines, ["gentle-shell is already at the latest main: Gentle Shell 333333333333, Gentle AI 222222222222."]);
+	} finally { w.cleanup(); }
+});
+
 test("a failed Gentle AI build with the main Shell already current fails as before: nothing installed or recorded", posixOnly, async () => {
 	const w = world({ commits: { ai: NEW_AI, shell: SHELL_SHA }, failGoInstall: true });
 	try {
