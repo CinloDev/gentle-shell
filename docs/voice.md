@@ -1,8 +1,8 @@
 # Optional local voice dictation
 
-> **Status: not wired yet.** This page documents the acquisition and status layer
-> only. No command, menu, microphone capture or transcription uses it yet; the
-> planned entry point is `/gentle:voice`. Nothing described here runs at startup.
+> **Status: not wired yet.** This page documents the acquisition and status
+> layer and the dictation session. No command or menu uses them yet; the planned
+> entry point is `/gentle:voice`. Nothing described here runs at startup.
 
 Voice dictation is optional. It transcribes speech locally with NVIDIA Parakeet
 through sherpa-onnx, with no API key and no cloud inference. The runtime and the
@@ -68,6 +68,62 @@ reported as the current one.
   installation is never partially overwritten: a valid one is kept as is, and an
   invalid one is replaced only by a complete, verified copy.
 
+## Dictation session
+
+`lib/voice-session.ts` records one dictation and returns its text. It never
+submits the text or touches the editor; the caller decides what to do with it.
+
+- **Separate process.** `start()` runs `scripts/voice-worker.cjs` with the same
+  Node executable, from the runtime directory, with no shell. Microphone
+  capture, the model load and the decode all happen in that process, so a
+  native crash or a long decode cannot freeze Gentle AI. Importing the module or
+  creating a session does nothing until `start()`.
+- **Checked before loading.** `start()` first requires both components to be
+  reported installed. The worker then checks the files again before it loads
+  any native code: every entry in the runtime and model directories must be a
+  plain directory or regular file, owned by the current user and not writable
+  by everyone (ownership and modes are not checked on Windows). Each required
+  runtime file must be present, and each model file must match its pinned size
+  and SHA-256. The digests are recomputed on every session, which reads the
+  whole model (about 670 MB) before recording starts. Directories above the
+  voice home are not checked. These checks catch broken or swapped installs;
+  they cannot stop someone with the same user account from replacing the files,
+  which is the same as running code as that user.
+- **Lifecycle.** A session is used once: `start()` resolves when recording
+  begins, `stop()` resolves with `{ text, truncated }`, and `cancel()` (or
+  `dispose()`) discards everything, including a transcript that arrives late.
+  `start()` resolves while the worker keeps recording; `stop()`, `cancel()` and
+  a failed `start()` settle only after the worker has exited. A worker that does
+  not exit within 2 seconds of finishing or being cancelled is killed. If the parent
+  disappears, the worker sees its input close and stops capturing.
+- **Bounds.** Recording stops by itself after 120 seconds, and the worker then
+  transcribes what it has (`truncated: true`). Starting (file checks and model
+  load) and transcribing each have a 120-second limit. Audio is kept in memory
+  only up to the recording limit. All of these are options.
+- **Audio.** The worker opens the default input device through node-cpal,
+  preferring 32-bit float samples and otherwise using the device's default
+  integer or float format. It mixes all channels down to mono and resamples to
+  16 kHz in JavaScript (averaging when downsampling, linear interpolation when
+  upsampling). No SoX or FFmpeg is used. Less than 0.1 seconds of audio is
+  reported as empty, and a blank transcript as no speech.
+- **Errors.** The worker reports a fixed code only, and the session turns it
+  into a fixed message. Native error text, file paths and environment values
+  are never included, and the worker's stderr is discarded.
+- **Environment.** The worker gets only home, temp, locale and audio-session
+  variables (`HOME`, `USERPROFILE`, `SystemRoot`, `windir`, `TEMP`, `TMP`,
+  `TMPDIR`, `XDG_RUNTIME_DIR`, `PULSE_SERVER`, `PULSE_COOKIE`, `LANG`, `LC_ALL`,
+  `LC_CTYPE`). Credentials, `PATH`, `NODE_OPTIONS` and loader variables are
+  dropped.
+- **Protocol.** JSON lines with schema `gentle.voice/v1`. The parent sends
+  `start` (with paths computed from the pinned manifests), then `stop` or
+  `cancel`. The worker answers `recording`, `transcribing`, and one final
+  `result` or `error`. Any other message, an unknown field, more than 16 lines
+  or a line over 64 KB stops the worker.
+
+The session has been tested only with scripted fake workers and with the real
+worker driving fake capture and recognizer modules. It has not loaded the real
+native modules, opened a real microphone or transcribed real speech.
+
 ## Platform support
 
 All five targets get the pinned runtime and a `node-cpal@1.0.0` capture binary
@@ -81,8 +137,10 @@ built for their architecture (checked from the binary headers, not by loading).
 | Linux arm64, glibc 2.34+ | ALSA `libasound.so.2` |
 | Windows x64 | Microsoft Visual C++ runtime (`vcruntime140.dll`) |
 
-node-cpal requires Node 22 or newer. Gentle AI never downloads or installs the
-Visual C++ runtime.
+node-cpal requires Node 22 or newer, and a dictation session refuses to start
+on an older Node. Gentle AI never downloads or installs the Visual C++ runtime;
+a missing runtime is expected to surface as a runtime load failure, which has
+not been observed on hardware.
 
 None of these targets has been verified on real hardware yet: native loading,
 library paths and microphone capture have not been executed. Linux with a glibc
