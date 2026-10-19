@@ -159,7 +159,11 @@ function manualClock() {
 			return id;
 		},
 		clearTimeout: (handle) => { pending.delete(handle as number); },
+		now: () => now,
+		// Runs right after the timer that deferred it, as setImmediate would with no queued input.
+		defer: (callback) => { deferred.push(callback); },
 	};
+	const deferred: Array<() => void> = [];
 	const advance = (ms: number) => {
 		const target = now + ms;
 		for (;;) {
@@ -169,6 +173,7 @@ function manualClock() {
 			pending.delete(due[0]);
 			now = due[1].at;
 			due[1].callback();
+			while (deferred.length > 0) deferred.shift()!();
 		}
 		now = target;
 	};
@@ -550,7 +555,7 @@ function holdSpace(h: Harness, ui: ReturnType<typeof fakeContext>, repeats: numb
 // Holds Space until a dictation is recording, as on the very first hold of a
 // session: the install check runs lazily while the spaces are still typed.
 async function holdUntilRecording(h: Harness, ui: ReturnType<typeof fakeContext>) {
-	holdSpace(h, ui, 2);
+	holdSpace(h, ui, 4);
 	await until(() => h.calls.some((call) => call.startsWith("status:")));
 	await tick();
 	holdSpace(h, ui, 1, false);
@@ -618,7 +623,7 @@ test("holding Space records, releasing it pastes the transcript into the draft a
 	assert.deepEqual(session.calls, ["start", "stop"]);
 	assert.deepEqual(h.calls.filter((call) => call === "probe").length, 1, "the install is checked once per session");
 	// The lock is free again: a second hold starts a second dictation directly.
-	holdSpace(h, ui, 2);
+	holdSpace(h, ui, 4);
 	assert.equal(h.sessions.length, 2);
 });
 
@@ -627,7 +632,7 @@ test("a release before recording starts stops as soon as recording begins", asyn
 	const pi = register(h);
 	const ui = fakeContext();
 	await startSession(pi, ui);
-	holdSpace(h, ui, 2);
+	holdSpace(h, ui, 4);
 	await until(() => h.calls.some((call) => call.startsWith("status:")));
 	await tick();
 	holdSpace(h, ui, 1, false);
@@ -662,10 +667,10 @@ test("not installed: the hold types its spaces, notifies once and disarms", asyn
 	const pi = register(h);
 	const ui = fakeContext();
 	await startSession(pi, ui);
-	holdSpace(h, ui, 2);
+	holdSpace(h, ui, 4);
 	await until(() => ui.notices.length > 0);
 	holdSpace(h, ui, 3, false);
-	assert.equal(ui.editor(), `draft: ${SPACE.repeat(6)}`, "all six spaces typed normally");
+	assert.equal(ui.editor(), `draft: ${SPACE.repeat(8)}`, "all eight spaces typed normally");
 	assert.equal(h.sessions.length, 0);
 	assert.match(ui.notices[0]!.message, /\/gentle:voice/);
 	assert.equal(ui.terminal.unsubscribes, 1, "disarmed");
@@ -749,6 +754,20 @@ test("a successful download enables push-to-talk and arms it", async () => {
 	assert.equal(ui.terminal.subscribes, 1);
 	assert.match(ui.notices.at(-1)!.message, /hold Space/i);
 	// Already known installed: the first hold starts directly.
-	holdSpace(h, ui, 2);
+	holdSpace(h, ui, 4);
 	assert.equal(h.sessions.length, 1);
+});
+
+test("a hold right after a word keeps one space before the pasted transcript", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	ui.type("hi");
+	const session = await holdUntilRecording(h, ui);
+	assert.equal(ui.editor(), "draft: hi ");
+	h.clock.advance(RELEASE);
+	await until(() => session.calls.includes("stop"));
+	session.result.resolve({ text: "there", truncated: false });
+	await until(() => ui.editor() === "draft: hi there");
 });

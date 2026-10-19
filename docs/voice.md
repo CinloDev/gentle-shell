@@ -57,15 +57,21 @@ its release, so push-to-talk relies on the operating system's key auto-repeat.
 Pi lets an extension drop or replace a key as it arrives, but not type one
 later, so every space reaches the editor unchanged:
 
-- **Tap, double space, Space then a letter:** typed exactly as without
-  push-to-talk, with no delay.
-- **Hold:** after the first space, two auto-repeats (the first within 500 ms,
-  the next within 200 ms) confirm the hold, provided each one added exactly one
-  space to the draft. The following repeats are turned into Backspace, through
-  the editor's normal key path, until the spaces the hold typed are removed.
-  Later repeats are dropped. While recording starts, those spaces can be seen
-  briefly.
-- **Release:** no repeat for 200 ms.
+- **Typing:** a tap, several spaces, an indent or Space then a letter are
+  typed exactly as without push-to-talk, with no delay.
+- **Hold:** auto-repeat has a long initial delay followed by short, regular
+  repeats; typing does not. A hold needs a first gap of 180 to 1000 ms (macOS
+  allows at least about 225 ms, X11 defaults to 660 ms), then three repeats
+  each at most 250 ms apart and regular (the slowest at most 1.6 times the
+  fastest), with the first gap at least 1.5 times the slowest repeat. Each
+  space must have added exactly one space to the draft. The following repeats
+  are turned into Backspace, through the editor's normal key path, until the
+  spaces the hold typed are removed; when the hold followed a word, one space
+  stays as the separator before the transcript. Later repeats are dropped.
+  While recording starts, those spaces can be seen briefly.
+- **Release:** no repeat for 2.5 times the observed repeat interval, between
+  150 and 400 ms. The decision waits until input already queued is handled, so
+  a repeat delayed by a busy moment is not taken for a release.
 - **Guards:** only single-space input counts. Pastes, escape sequences and
   multi-character input pass through and end the attempt. If the draft changes
   in any other way, for example Vim NORMAL mode where Space only moves the
@@ -73,11 +79,15 @@ later, so every space reaches the editor unchanged:
   stops, and nothing else is removed. Spaces that were in the draft before the
   hold are never removed.
 
-Limitations: the timing depends on the keyboard repeat settings. A repeat delay
-over 500 ms or a repeat interval over 200 ms prevents a hold from being
-recognized, and a very fast deliberate triple space can be mistaken for a hold.
-Recording starts once the hold is confirmed and the microphone is open; the
-model is verified while you speak (see below). A hold
+Limitations: the timing depends on the keyboard repeat settings. An initial
+repeat delay under 180 ms or over 1000 ms, or a repeat interval over 250 ms,
+prevents a hold from being recognized. Five or more spaces typed with a pause
+and then a very even fast rhythm could still look like a hold. Whether a space
+precedes the hold is judged as if typing at the end of the draft; in the
+middle of existing spaces the separator may be missing. Esc pressed while
+repeats are still arriving, and a release right as the hold is confirmed, can
+leave a stray space. Recording starts once the hold is confirmed and the
+microphone is open; the model is verified while you speak (see below). A hold
 while a dialog or overlay has the focus does not change the draft and is
 ignored. Push-to-talk is tested with fake terminals, editors and sessions
 only.
