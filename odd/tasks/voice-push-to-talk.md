@@ -19,7 +19,7 @@ Design constraints (from verified evidence, see L2):
 ## Tasks
 - T1 [S1-S3] delegated (context backstop): hold detector + toggle + /gentle:voice menu entries + status indicator + tests + docs; done; commit pending in this turn; 161/161 focused, typecheck 0 (parent rerun).
 - T4 [S1] delegated (context backstop): start capture before model verification and recognizer load so the first words of a hold are not lost; pending; commit none.
-- T2 [S4] inline: contract notes update; pending; commit none.
+- T2 [S4] inline: contract notes update (new voice-settings.json preference, TUI-only listener, no RPC change); done; commit in this turn.
 - T3 [S1-S3] user smoke test on this Mac; pending.
 
 ## Log
