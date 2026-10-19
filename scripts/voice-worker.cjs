@@ -6,9 +6,16 @@
 // and one final `result` or `error`. Errors carry a closed code only, never a
 // message, path or native error text.
 //
-// The optional native packages are loaded only after the installed files pass
-// validation, and only from the roots in the start request, which the parent
-// computes from its pinned manifests. The validation refuses links, special
+// Capture starts as soon as the runtime files pass validation and node-cpal is
+// loaded, so the first words are recorded. The model digests are then verified
+// while recording, by streamed hashing that never blocks capture for long.
+// sherpa-onnx and the model are loaded only after every digest matched and stop
+// arrived; their synchronous load would stall capture callbacks. A mismatch
+// found while recording ends the session with model-invalid at once.
+//
+// The optional native packages are loaded only after the files they come from
+// pass validation, and only from the roots in the start request, which the
+// parent computes from its pinned manifests. The validation refuses links, special
 // files, foreign owners and digest mismatches; it does not make the install
 // tamper-proof against the same user, who can replace the files at any time.
 
@@ -16,6 +23,7 @@ const { createHash } = require("node:crypto");
 const { createReadStream } = require("node:fs");
 const { lstat, readdir } = require("node:fs/promises");
 const path = require("node:path");
+const { addAbortSignal } = require("node:stream");
 
 const SCHEMA = "gentle.voice/v1";
 const TARGETS = ["darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64", "win32-x64"];
@@ -108,10 +116,11 @@ async function readTree(root, uid, code) {
 	return files;
 }
 
-function sha256(file) {
+// Hashes a file chunk by chunk, so capture callbacks keep running in between.
+function sha256(openRead, file, signal) {
 	return new Promise((resolve, reject) => {
 		const hash = createHash("sha256");
-		createReadStream(file)
+		addAbortSignal(signal, openRead(file))
 			.on("data", (chunk) => hash.update(chunk))
 			.on("error", reject)
 			.on("end", () => resolve(hash.digest("hex")));
@@ -123,7 +132,7 @@ async function validateRuntime(runtime, uid) {
 	for (const required of runtime.files) if (!files.has(required)) fail("runtime-invalid");
 }
 
-async function validateModel(model, uid, isCancelled) {
+async function validateModel(model, uid, openRead, signal) {
 	const files = await readTree(model.root, uid, "model-invalid");
 	for (const role of MODEL_ROLES) {
 		const pin = model.files[role];
@@ -131,9 +140,9 @@ async function validateModel(model, uid, isCancelled) {
 	}
 	// The digests are checked on every session: the marker only records sizes.
 	for (const role of MODEL_ROLES) {
-		if (isCancelled()) return;
+		if (signal.aborted) fail("model-invalid");
 		const pin = model.files[role];
-		const digest = await sha256(path.join(model.root, pin.name)).catch(() => fail("model-invalid"));
+		const digest = await sha256(openRead, path.join(model.root, pin.name), signal).catch(() => fail("model-invalid"));
 		if (digest !== pin.sha256) fail("model-invalid");
 	}
 }
@@ -219,7 +228,10 @@ class WorkerSession {
 		this.state = "waiting";
 		this.stream = undefined;
 		this.recorder = undefined;
-		this.recognizer = undefined;
+		this.request = undefined;
+		// Settles once every model digest matched; rejects with model-invalid.
+		this.modelVerified = undefined;
+		this.verification = new AbortController();
 		this.truncated = false;
 	}
 
@@ -231,8 +243,8 @@ class WorkerSession {
 	async end(final) {
 		if (this.state === "ended") return;
 		this.state = "ended";
+		this.verification.abort();
 		await this.closeStream();
-		this.recognizer = undefined;
 		if (final) this.send(final);
 		this.exit(final?.type === "error" ? 1 : 0);
 	}
@@ -262,20 +274,43 @@ class WorkerSession {
 		// A cancel can arrive during any await; each step re-checks before going on.
 		await validateRuntime(request.runtime, io.uid);
 		if (this.state !== "loading") return;
-		await validateModel(request.model, io.uid, () => this.state !== "loading");
-		if (this.state !== "loading") return;
-		const fromRuntime = (entry) => path.join(request.runtime.root, ...entry.split("/"));
-		const fromModel = (role) => path.join(request.model.root, request.model.files[role].name);
-		let asr;
+		this.request = request;
 		let cpal;
 		try {
-			asr = io.loadModule(fromRuntime(SHERPA_ENTRY));
-			cpal = io.loadModule(fromRuntime(CPAL_ENTRY));
+			cpal = io.loadModule(this.fromRuntime(CPAL_ENTRY));
+		} catch {
+			fail("runtime-load");
+		}
+		await this.openCapture(cpal?.convenience, request.maxRecordingMs);
+	}
+
+	// Starts in the same step that enters recording, so no stop can see a
+	// session without a pending verification.
+	verifyModel() {
+		this.modelVerified = validateModel(this.request.model, this.io.uid, this.io.openRead ?? createReadStream, this.verification.signal);
+		// While recording, a failed verification ends the session at once: the
+		// audio could never be transcribed. Later, transcribe() reports it.
+		this.modelVerified.catch((error) => {
+			if (this.state === "recording") void this.fail(error);
+		});
+	}
+
+	fromRuntime(entry) {
+		return path.join(this.request.runtime.root, ...entry.split("/"));
+	}
+
+	// Loads sherpa-onnx and the recognizer; only called once the model verified.
+	loadRecognizer() {
+		const { request } = this;
+		const fromModel = (role) => path.join(request.model.root, request.model.files[role].name);
+		let asr;
+		try {
+			asr = this.io.loadModule(this.fromRuntime(SHERPA_ENTRY));
 		} catch {
 			fail("runtime-load");
 		}
 		try {
-			this.recognizer = new asr.OfflineRecognizer({
+			return new asr.OfflineRecognizer({
 				featConfig: { sampleRate: TARGET_RATE, featureDim: 80 },
 				modelConfig: {
 					transducer: { encoder: fromModel("encoder"), decoder: fromModel("decoder"), joiner: fromModel("joiner") },
@@ -288,7 +323,6 @@ class WorkerSession {
 		} catch {
 			fail("model-load");
 		}
-		await this.openCapture(cpal?.convenience, request.maxRecordingMs);
 	}
 
 	async openCapture(convenience, maxRecordingMs) {
@@ -323,6 +357,7 @@ class WorkerSession {
 		if (this.state !== "loading") return this.closeStream();
 		this.state = "recording";
 		this.send({ type: "recording" });
+		this.verifyModel();
 	}
 
 	onData(data) {
@@ -338,16 +373,21 @@ class WorkerSession {
 		this.send({ type: "transcribing" });
 		await this.closeStream();
 		if (this.state !== "transcribing") return;
+		// Nothing from sherpa-onnx or the model is loaded before every digest matched.
+		if (!this.modelVerified) fail("model-invalid");
+		await this.modelVerified;
+		if (this.state !== "transcribing") return;
 		const { sampleRate } = this.recorder.config;
 		const captured = this.recorder.samples();
 		if (captured.length < sampleRate * MIN_SECONDS) fail("empty-audio");
 		const samples = resample(captured, sampleRate);
+		const recognizer = this.loadRecognizer();
 		let text;
 		try {
-			const stream = this.recognizer.createStream();
+			const stream = recognizer.createStream();
 			stream.acceptWaveform({ sampleRate: TARGET_RATE, samples });
-			this.recognizer.decode(stream);
-			text = this.recognizer.getResult(stream)?.text;
+			recognizer.decode(stream);
+			text = recognizer.getResult(stream)?.text;
 		} catch {
 			fail("decode");
 		}
@@ -362,7 +402,8 @@ class WorkerSession {
 }
 
 // Runs one dictation session. `io` supplies stdin, stdout, exit, the module
-// loader and the process facts, so tests can drive the worker in-process with
+// loader, an optional file reader (`openRead`, fs.createReadStream by default)
+// and the process facts, so tests can drive the worker in-process with
 // fake modules; the real entry point below passes Node's own.
 // Resolves after the session has ended and `io.exit` was called once.
 function runVoiceWorker(io) {

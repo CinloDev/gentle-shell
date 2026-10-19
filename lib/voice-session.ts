@@ -19,8 +19,10 @@ export const VOICE_WORKER_URL = new URL("../scripts/voice-worker.cjs", import.me
 export const VOICE_SESSION_DEFAULTS = {
 	// The worker stops capturing by itself at this length and transcribes.
 	maxRecordingMs: 120_000,
-	// Covers verifying the model digests (~670 MB) and loading the recognizer.
+	// Covers the runtime checks and opening the microphone.
 	startTimeoutMs: 120_000,
+	// Covers what is left of the model digest check (~670 MB, verified while
+	// recording), loading the recognizer and the decode.
 	transcribeTimeoutMs: 120_000,
 	// How long a stopping or cancelled worker may take to exit before it is killed.
 	exitGraceMs: 2_000,

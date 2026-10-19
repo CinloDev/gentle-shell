@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -158,11 +159,6 @@ test("records multichannel audio, resamples it to 16 kHz mono and closes its ret
 	const [stream] = worker.streams;
 	assert.deepEqual(stream!.options.config, { sampleRate: 48000, channels: 2, sampleFormat: "i16" });
 	assert.equal(stream!.options.autoStart, true);
-	const config = worker.recognizers[0]!.config;
-	assert.equal(config.modelConfig.modelType, "nemo_transducer");
-	assert.equal(config.modelConfig.transducer.encoder, join(worker.paths.modelRoot, "encoder.int8.onnx"));
-	assert.equal(config.modelConfig.tokens, join(worker.paths.modelRoot, "tokens.txt"));
-	assert.deepEqual(config.featConfig, { sampleRate: 16000, featureDim: 80 });
 
 	// Left at half scale, right silent: the mono downmix is a quarter scale.
 	stream!.options.onData(interleaved(4800, 2, (_frame, channel) => (channel === 0 ? 16384 : 0)));
@@ -175,6 +171,11 @@ test("records multichannel audio, resamples it to 16 kHz mono and closes its ret
 	assert.deepEqual(worker.messages.at(-1), { schema: SCHEMA, type: "result", text: "hello world", truncated: false });
 	assert.equal(stream!.closes, 1);
 	assert.equal(worker.exitCode(), 0);
+	const config = worker.recognizers[0]!.config;
+	assert.equal(config.modelConfig.modelType, "nemo_transducer");
+	assert.equal(config.modelConfig.transducer.encoder, join(worker.paths.modelRoot, "encoder.int8.onnx"));
+	assert.equal(config.modelConfig.tokens, join(worker.paths.modelRoot, "tokens.txt"));
+	assert.deepEqual(config.featConfig, { sampleRate: 16000, featureDim: 80 });
 	const [wave] = worker.recognizers[0]!.waves;
 	assert.equal(wave!.sampleRate, 16000);
 	assert.equal(wave!.samples.length, 3200);
@@ -208,7 +209,8 @@ test("cancel closes capture, discards the audio and reports nothing", async (t) 
 	stream!.options.onData(interleaved(9600, 2, () => 1000));
 	worker.send({ schema: SCHEMA, type: "stop" });
 	assert.deepEqual(worker.types(), ["recording"]);
-	assert.equal(worker.recognizers[0]!.decodes, 0);
+	assert.equal(worker.recognizers.length, 0, "the recognizer is never created for a cancelled session");
+	assert.ok(!worker.loaded.some((file) => file.endsWith("non-streaming-asr.js")));
 	assert.equal(stream!.closes, 1);
 	assert.equal(worker.exitCode(), 0);
 });
@@ -246,15 +248,13 @@ test("rejects malformed and unknown requests before loading anything", async (t)
 	}
 });
 
-test("refuses links, altered model files and a foreign target before native loading", async (t) => {
+test("refuses runtime links, missing runtime files and a foreign target before native loading", async (t) => {
 	const cases: Array<[string, (paths: Install) => Record<string, unknown> | void, string]> = [
 		["symlinked runtime file", (paths) => {
 			rmSync(join(paths.runtimeRoot, NATIVE));
 			symlinkSync(join(paths.modelRoot, "tokens.txt"), join(paths.runtimeRoot, NATIVE));
 		}, "runtime-invalid"],
 		["missing runtime file", (paths) => rmSync(join(paths.runtimeRoot, CPAL_ENTRY)), "runtime-invalid"],
-		["same-size model change", (paths) => writeFileSync(join(paths.modelRoot, "joiner.int8.onnx"), "JOINER weights"), "model-invalid"],
-		["symlinked model directory entry", (paths) => symlinkSync(paths.runtimeRoot, join(paths.modelRoot, "linked")), "model-invalid"],
 		["other target", () => ({ target: "darwin-arm64" }), "runtime-invalid"],
 	];
 	for (const [name, tamper, code] of cases) {
@@ -274,8 +274,15 @@ test("reports native load failures by code only, never their private detail", as
 		await t.test(code, async (st) => {
 			const worker = harness(st, fake);
 			worker.send(startRequest(worker.paths));
+			if (code === "model-load") {
+				// The recognizer is loaded only after stop.
+				await worker.waitFor(() => worker.types().includes("recording"));
+				worker.streams[0]!.options.onData(interleaved(4800, 2, () => 1000));
+				worker.send({ schema: SCHEMA, type: "stop" });
+			}
 			await worker.done;
-			assert.deepEqual(worker.messages, [{ schema: SCHEMA, type: "error", code }]);
+			assert.deepEqual(worker.messages.at(-1), { schema: SCHEMA, type: "error", code });
+			assert.deepEqual(worker.types(), code === "model-load" ? ["recording", "transcribing", "error"] : ["error"]);
 			assert.ok(!worker.raw.join("").includes("someone"));
 			assert.ok(!worker.raw.join("").includes(worker.paths.runtimeRoot));
 		});
@@ -310,4 +317,122 @@ test("refuses to run on Node older than 22", async (t) => {
 	await worker.done;
 	assert.deepEqual(worker.messages, [{ schema: SCHEMA, type: "error", code: "node-version" }]);
 	assert.deepEqual(worker.loaded, []);
+});
+
+// --- capture before model verification (T4) -----------------------------------
+
+const isSherpa = (file: string) => file.endsWith("non-streaming-asr.js");
+const isCpal = (file: string) => file.endsWith(join("node-cpal", "index.js"));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+// Reads model files through streams that deliver nothing until released, so a
+// test controls exactly when model verification can finish.
+function gatedReads() {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const opened: string[] = [];
+	const openRead = (file: string) => {
+		opened.push(file);
+		return Readable.from((async function* () {
+			await gate;
+			yield readFileSync(file);
+		})());
+	};
+	return { openRead, opened, release };
+}
+
+test("capture opens and reports recording before the model is verified; sherpa loads only after stop and verification", async (t) => {
+	const reads = gatedReads();
+	const worker = harness(t, {}, { openRead: reads.openRead });
+	worker.send(startRequest(worker.paths));
+	await worker.waitFor(() => worker.types().includes("recording"));
+	assert.equal(worker.streams.length, 1, "capture is open");
+	assert.equal(worker.loaded.length, 1);
+	assert.ok(isCpal(worker.loaded[0]!), "only node-cpal is loaded while recording");
+	assert.ok(reads.opened.length >= 1, "model digests are streamed while recording");
+	// Audio captured during verification is kept.
+	worker.streams[0]!.options.onData(interleaved(4800, 2, (_frame, channel) => (channel === 0 ? 16384 : 0)));
+	worker.send({ schema: SCHEMA, type: "stop" });
+	await worker.waitFor(() => worker.types().includes("transcribing"));
+	await settle();
+	assert.equal(worker.streams[0]!.closes, 1, "capture stops at once on stop");
+	assert.ok(!worker.loaded.some(isSherpa), "no sherpa load before every digest matched");
+	assert.equal(worker.recognizers.length, 0);
+	reads.release();
+	await worker.done;
+	assert.deepEqual(worker.types(), ["recording", "transcribing", "result"]);
+	assert.ok(isSherpa(worker.loaded[1]!));
+	assert.equal(reads.opened.length, 4, "every model file was hashed");
+	assert.equal(worker.recognizers[0]!.waves[0]!.samples.length, 1600);
+	assert.equal(worker.exitCode(), 0);
+});
+
+test("a model digest mismatch found while recording closes capture, reports model-invalid and never loads sherpa", async (t) => {
+	const worker = harness(t);
+	writeFileSync(join(worker.paths.modelRoot, "joiner.int8.onnx"), "JOINER weights");
+	worker.send(startRequest(worker.paths));
+	await worker.done;
+	assert.deepEqual(worker.messages, [{ schema: SCHEMA, type: "recording" }, { schema: SCHEMA, type: "error", code: "model-invalid" }]);
+	assert.equal(worker.streams[0]!.closes, 1);
+	assert.ok(!worker.loaded.some(isSherpa));
+	assert.equal(worker.recognizers.length, 0);
+	assert.equal(worker.exitCode(), 1);
+});
+
+test("an invalid model tree is reported while recording and never loads sherpa", async (t) => {
+	const worker = harness(t);
+	symlinkSync(worker.paths.runtimeRoot, join(worker.paths.modelRoot, "linked"));
+	worker.send(startRequest(worker.paths));
+	await worker.done;
+	assert.deepEqual(worker.types(), ["recording", "error"]);
+	assert.equal(worker.messages.at(-1)!.code, "model-invalid");
+	assert.ok(!worker.loaded.some(isSherpa));
+});
+
+test("a mismatch found after stop reports model-invalid instead of a transcript", async (t) => {
+	const reads = gatedReads();
+	const worker = harness(t, {}, { openRead: reads.openRead });
+	writeFileSync(join(worker.paths.modelRoot, "joiner.int8.onnx"), "JOINER weights");
+	worker.send(startRequest(worker.paths));
+	await worker.waitFor(() => worker.types().includes("recording"));
+	worker.streams[0]!.options.onData(interleaved(4800, 2, () => 1000));
+	worker.send({ schema: SCHEMA, type: "stop" });
+	await worker.waitFor(() => worker.types().includes("transcribing"));
+	reads.release();
+	await worker.done;
+	assert.deepEqual(worker.messages.at(-1), { schema: SCHEMA, type: "error", code: "model-invalid" });
+	assert.ok(!worker.loaded.some(isSherpa));
+	assert.equal(worker.recognizers.length, 0);
+});
+
+test("cancel during model verification discards everything, stops hashing and never loads sherpa", async (t) => {
+	const reads = gatedReads();
+	const worker = harness(t, {}, { openRead: reads.openRead });
+	worker.send(startRequest(worker.paths));
+	await worker.waitFor(() => worker.types().includes("recording"));
+	worker.streams[0]!.options.onData(interleaved(4800, 2, () => 1000));
+	worker.send({ schema: SCHEMA, type: "cancel" });
+	await worker.done;
+	reads.release();
+	await settle();
+	worker.send({ schema: SCHEMA, type: "stop" });
+	await settle();
+	assert.deepEqual(worker.types(), ["recording"]);
+	assert.equal(worker.streams[0]!.closes, 1);
+	assert.ok(!worker.loaded.some(isSherpa));
+	assert.equal(reads.opened.length, 1, "no further model file is opened after cancel");
+	assert.equal(worker.exitCode(), 0);
+});
+
+test("the recording limit during verification transcribes once the model is verified", async (t) => {
+	const reads = gatedReads();
+	const worker = harness(t, { defaults: { sampleRate: 8000, channels: 1, sampleFormat: "f32" }, formats: ["f32"] }, { openRead: reads.openRead });
+	worker.send(startRequest(worker.paths, { maxRecordingMs: 1000 }));
+	await worker.waitFor(() => worker.types().includes("recording"));
+	worker.streams[0]!.options.onData(new Float32Array(9000).fill(0.5));
+	await worker.waitFor(() => worker.types().includes("transcribing"));
+	assert.ok(!worker.loaded.some(isSherpa));
+	reads.release();
+	await worker.done;
+	assert.deepEqual(worker.messages.at(-1), { schema: SCHEMA, type: "result", text: "hello world", truncated: true });
 });

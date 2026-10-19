@@ -326,6 +326,21 @@ test("worker failures surface as fixed messages; stderr is never forwarded", asy
 	assert.deepEqual(run.worker().signals, []);
 });
 
+test("a model-invalid error while recording ends the session and a later stop reports it", async (t) => {
+	// The worker verifies the model digests while it records (T4).
+	const fixture = await installFixture(t, "linux-x64");
+	const run = scripted(fixture);
+	const started = run.session.start();
+	await run.until(() => run.workers.length === 1);
+	run.worker().say({ type: "recording" });
+	await started;
+	run.worker().say({ type: "error", code: "model-invalid" });
+	await run.until(() => run.session.state === "finished");
+	await rejectsWith(run.session.stop(), "model-invalid");
+	assert.deepEqual(run.states, ["starting", "recording", "finished"]);
+	assert.ok(!run.worker().received.some((message) => message.type === "stop"), "no stop is sent to a finished worker");
+});
+
 test("timeouts, a silent transcript and an early exit fail cleanly", async (t) => {
 	const fixture = await installFixture(t, "linux-x64");
 

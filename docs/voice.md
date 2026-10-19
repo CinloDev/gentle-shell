@@ -76,8 +76,8 @@ later, so every space reaches the editor unchanged:
 Limitations: the timing depends on the keyboard repeat settings. A repeat delay
 over 500 ms or a repeat interval over 200 ms prevents a hold from being
 recognized, and a very fast deliberate triple space can be mistaken for a hold.
-Model verification runs before recording starts (see below), so the first
-words after pressing Space can be lost; wait for the recording status. A hold
+Recording starts once the hold is confirmed and the microphone is open; the
+model is verified while you speak (see below). A hold
 while a dialog or overlay has the focus does not change the draft and is
 ignored. Push-to-talk is tested with fake terminals, editors and sessions
 only.
@@ -154,15 +154,27 @@ submits the text or touches the editor; the caller decides what to do with it.
   creating a session does nothing until `start()`.
 - **Checked before loading.** `start()` first requires both components to be
   reported installed. The worker then checks the files again before it loads
-  any native code: every entry in the runtime and model directories must be a
-  plain directory or regular file, owned by the current user and not writable
-  by everyone (ownership and modes are not checked on Windows). Each required
-  runtime file must be present, and each model file must match its pinned size
-  and SHA-256. The digests are recomputed on every session, which reads the
-  whole model (about 670 MB) before recording starts. Directories above the
+  the native code that uses them: every entry in the runtime and model
+  directories must be a plain directory or regular file, owned by the current
+  user and not writable by everyone (ownership and modes are not checked on
+  Windows). Each required runtime file must be present, and each model file
+  must match its pinned size and SHA-256. The digests are recomputed on every
+  session, which reads the whole model (about 670 MB). Directories above the
   voice home are not checked. These checks catch broken or swapped installs;
   they cannot stop someone with the same user account from replacing the files,
   which is the same as running code as that user.
+- **Order.** So that the first words are recorded, the worker validates the
+  runtime files, loads node-cpal and opens the microphone, then reports
+  `recording` and verifies the model digests while recording, reading each
+  file in chunks so capture keeps running. sherpa-onnx and the model are loaded
+  only after every digest matched and recording stopped, because that load is
+  synchronous and would stall capture. A mismatch found while recording closes
+  the microphone at once and reports the model as invalid; one found after stop
+  is reported instead of a transcript. Cancel stops the verification and loads
+  nothing. The tradeoff: the recognizer load (about 0.85 seconds measured on an
+  Apple Silicon Mac) now happens after stop, so a transcript takes that much
+  longer to arrive, and any verification still running when you stop is
+  awaited too.
 - **Lifecycle.** A session is used once: `start()` resolves when recording
   begins, `stop()` resolves with `{ text, truncated }`, and `cancel()` (or
   `dispose()`) discards everything, including a transcript that arrives late.
@@ -171,8 +183,9 @@ submits the text or touches the editor; the caller decides what to do with it.
   not exit within 2 seconds of finishing or being cancelled is killed. If the parent
   disappears, the worker sees its input close and stops capturing.
 - **Bounds.** Recording stops by itself after 120 seconds, and the worker then
-  transcribes what it has (`truncated: true`). Starting (file checks and model
-  load) and transcribing each have a 120-second limit. Audio is kept in memory
+  transcribes what it has (`truncated: true`). Starting (runtime checks and
+  opening the microphone) and transcribing (the rest of the model
+  verification, the model load and the decode) each have a 120-second limit. Audio is kept in memory
   only up to the recording limit. All of these are options.
 - **Audio.** The worker opens the default input device through node-cpal,
   preferring 32-bit float samples and otherwise using the device's default
