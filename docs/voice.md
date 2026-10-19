@@ -15,23 +15,72 @@ from `/gentle:voice`; nothing described here runs at startup.
    sent automatically. Pi collapses pastes over 1,000 characters or 10 lines into
    a `[paste #N …]` marker; the full text is retained and expanded when you submit.
    Long transcripts are therefore not displayed as editable text in the draft.
+4. Or hold Space in the editor: push-to-talk is turned on by a successful
+   download. See [Push-to-talk](#push-to-talk-hold-space).
 
 ## The command
 
 | Topic | Behavior |
 |-------|----------|
-| Menu | Built-in select and confirm dialogs. **Show status and notices** reports the target, both components, limitations and licenses. |
+| Menu | Built-in select and confirm dialogs. **Show status and notices** reports the target, both components, limitations and licenses. **Disable push-to-talk (hold Space)** appears while it is on; **Enable push-to-talk (hold Space)** appears only when voice is installed. |
 | Download | Only after the confirmation; runtime first, then the model. A cancelled download keeps components that already finished. |
 | Dictation | A compact overlay shows preparing, recording, transcribing. Enter stops recording; the overlay stays until the transcript is ready. |
 | Recording limit | After 2 minutes recording stops by itself, and the transcript is pasted without a key press. |
 | Insertion | The recognized text goes through Pi's editor paste pipeline, which may collapse long text into a paste marker. A blank result pastes nothing. |
-| One at a time | A second `/gentle:voice` while a download or dictation runs is refused with a notice. |
+| One at a time | A second `/gentle:voice` while a download or dictation runs is refused with a notice. A Space hold during either one types spaces as usual. |
 | Cancel and shutdown | Esc, reload or session shutdown aborts the download or cancels the session. A transcript that arrives afterwards is dropped. |
 | Where it runs | Interactive TUI parent sessions only. RPC, print, JSON and delegated child sessions refuse it. No model-callable tool exists. |
 | Errors | Fixed messages with the action to take, such as installing ALSA or the Visual C++ runtime. Gentle AI never runs those installers. |
 
 The command is tested with fake dialogs, downloads and sessions only. No real
 download, native load or microphone recording has been exercised through it.
+
+## Push-to-talk (hold Space)
+
+Hold Space in the editor to record; release it to stop. The transcript is
+pasted at the cursor and never sent. Esc cancels while recording or
+transcribing. A one-line footer status shows preparing, recording and
+transcribing; no overlay opens, so the editor keeps the focus.
+
+| Topic | Behavior |
+|-------|----------|
+| Toggle | Stored as `voice-settings.json` (`gentle-pi.voice-settings/v1`) in the Gentle AI config home. A successful download turns it on; the `/gentle:voice` menu turns it off and on, effective immediately. A missing or malformed file means off. |
+| When it is armed | Only with the toggle on, in an interactive TUI parent session. Delegated child sessions, RPC, print and JSON modes never arm it. Reload or shutdown disarms it and cancels a running dictation. |
+| Startup | Reads the toggle file only. No voice files are checked, nothing is downloaded or loaded, and no worker starts. |
+| First hold | Checks that the runtime and model are installed; the spaces keep typing meanwhile. If voice is not installed, a notice points to `/gentle:voice` and push-to-talk stays off for the session; the saved choice is kept. |
+| One at a time | A hold while a download or dictation runs types spaces normally. |
+
+### How a hold is recognized
+
+With Pi's keyboard mode, terminals report Space as plain text and never report
+its release, so push-to-talk relies on the operating system's key auto-repeat.
+Pi lets an extension drop or replace a key as it arrives, but not type one
+later, so every space reaches the editor unchanged:
+
+- **Tap, double space, Space then a letter:** typed exactly as without
+  push-to-talk, with no delay.
+- **Hold:** after the first space, two auto-repeats (the first within 500 ms,
+  the next within 200 ms) confirm the hold, provided each one added exactly one
+  space to the draft. The following repeats are turned into Backspace, through
+  the editor's normal key path, until the spaces the hold typed are removed.
+  Later repeats are dropped. While recording starts, those spaces can be seen
+  briefly.
+- **Release:** no repeat for 200 ms.
+- **Guards:** only single-space input counts. Pastes, escape sequences and
+  multi-character input pass through and end the attempt. If the draft changes
+  in any other way, for example Vim NORMAL mode where Space only moves the
+  cursor, autocomplete, or another key, the hold is not confirmed, or erasing
+  stops, and nothing else is removed. Spaces that were in the draft before the
+  hold are never removed.
+
+Limitations: the timing depends on the keyboard repeat settings. A repeat delay
+over 500 ms or a repeat interval over 200 ms prevents a hold from being
+recognized, and a very fast deliberate triple space can be mistaken for a hold.
+Model verification runs before recording starts (see below), so the first
+words after pressing Space can be lost; wait for the recording status. A hold
+while a dialog or overlay has the focus does not change the draft and is
+ignored. Push-to-talk is tested with fake terminals, editors and sessions
+only.
 
 ## What gets downloaded
 

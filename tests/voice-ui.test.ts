@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { VoiceDictationView, VoiceProgressView } from "../lib/voice-ui.ts";
+import { pushToTalkStatus, VoiceDictationView, VoiceProgressView } from "../lib/voice-ui.ts";
 
 // The compact /gentle:voice overlays: rendering within the width, the keys
 // each state accepts, and no repaint after disposal.
@@ -85,4 +85,13 @@ test("a disposed view ignores state changes and keys without repainting", () => 
 	assert.equal(c.counts.stops + c.counts.cancels, 0);
 	const throwing = new VoiceDictationView({ theme, requestRender: () => { throw new Error("dead terminal"); }, onStop: c.onStop, onCancel: c.onCancel });
 	assert.doesNotThrow(() => throwing.setState("recording"));
+});
+
+test("push-to-talk status names each phase in one line and how to finish", () => {
+	assert.match(pushToTalkStatus("starting"), /keep holding Space/i);
+	assert.match(pushToTalkStatus("recording"), /recording/i);
+	assert.match(pushToTalkStatus("recording"), /release Space/i);
+	assert.match(pushToTalkStatus("recording"), /esc cancel/i);
+	assert.match(pushToTalkStatus("transcribing"), /transcrib/i);
+	for (const state of ["idle", "starting", "recording", "transcribing", "finished"] as const) assert.ok(!pushToTalkStatus(state).includes("\n"), state);
 });

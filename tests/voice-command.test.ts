@@ -5,6 +5,7 @@ import gentleVoice from "../extensions/gentle-voice.ts";
 import { VoiceInstallError, type VoiceInstallProgress, type VoiceInstallResult } from "../lib/voice-install.ts";
 import { VoiceSessionError, type VoiceSessionState, type VoiceTranscript } from "../lib/voice-session.ts";
 import { VOICE_COMMAND_NAME, type VoiceCommandDeps, type VoiceDictation } from "../lib/voice-command.ts";
+import type { PushToTalkTimers } from "../lib/voice-push-to-talk.ts";
 
 // /gentle:voice through its registered command, with fake UI, acquisition and
 // session adapters: nothing here downloads, loads native code or opens a
@@ -66,6 +67,9 @@ function fakeContext(script: UiScript = {}, mode = "tui", hasUI = true) {
 	let editor = "draft: ";
 	let component: Component | undefined;
 	let open = false;
+	const listeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
+	const statuses: Array<string | undefined> = [];
+	const terminal = { subscribes: 0, unsubscribes: 0 };
 	const tui = { terminal: { rows: 30, columns: 100 }, requestRender: (force?: boolean) => renders.push(force) };
 	const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
 	const ctx = {
@@ -85,9 +89,30 @@ function fakeContext(script: UiScript = {}, mode = "tui", hasUI = true) {
 			pasteToEditor: (text: string) => { editor += text; events.push(`paste:${text}`); },
 			getEditorText: () => editor,
 			setEditorText: (text: string) => { editor = text; },
+			onTerminalInput: (listener: (data: string) => { consume?: boolean; data?: string } | undefined) => {
+				terminal.subscribes++;
+				listeners.push(listener);
+				return () => {
+					const index = listeners.indexOf(listener);
+					if (index >= 0) { listeners.splice(index, 1); terminal.unsubscribes++; }
+				};
+			},
+			setStatus: (key: string, text: string | undefined) => { if (key === "gentle-voice") statuses.push(text); },
 		},
 	} as unknown as ExtensionCommandContext;
-	return { ctx, notices, selects, confirms, events, renders, editor: () => editor, component: () => component, open: () => open };
+	// Raw input as Pi's TUI routes it: listeners first, then the focused editor,
+	// which appends text and treats DEL as Backspace.
+	const type = (data: string) => {
+		let current = data;
+		for (const listener of [...listeners]) {
+			const result = listener(current);
+			if (result?.consume) return;
+			if (result?.data !== undefined) current = result.data;
+		}
+		if (current === "\x7f") editor = editor.slice(0, -1);
+		else editor += current;
+	};
+	return { ctx, notices, selects, confirms, events, renders, statuses, terminal, type, editor: () => editor, component: () => component, open: () => open };
 }
 
 class FakeSession implements VoiceDictation {
@@ -123,17 +148,49 @@ class FakeSession implements VoiceDictation {
 	}
 }
 
+function manualClock() {
+	let now = 0;
+	let nextId = 1;
+	const pending = new Map<number, { at: number; callback: () => void }>();
+	const timers: PushToTalkTimers = {
+		setTimeout: (callback, ms) => {
+			const id = nextId++;
+			pending.set(id, { at: now + ms, callback });
+			return id;
+		},
+		clearTimeout: (handle) => { pending.delete(handle as number); },
+	};
+	const advance = (ms: number) => {
+		const target = now + ms;
+		for (;;) {
+			let due: [number, { at: number; callback: () => void }] | undefined;
+			for (const entry of pending) if (entry[1].at <= target && (!due || entry[1].at < due[1].at)) due = entry;
+			if (!due) break;
+			pending.delete(due[0]);
+			now = due[1].at;
+			due[1].callback();
+		}
+		now = target;
+	};
+	return { timers, advance };
+}
+
 interface Harness {
 	deps: VoiceCommandDeps;
 	calls: string[];
 	sessions: FakeSession[];
 	installs: Array<{ kind: string; options: Record<string, unknown> }>;
+	settings: { enabled: boolean; reads: number; writes: boolean[] };
+	clock: ReturnType<typeof manualClock>;
 }
 
-function harness(overrides: { platform?: string; arch?: string; installed?: boolean; install?: (kind: "runtime" | "model", options: { signal: AbortSignal; onProgress(progress: VoiceInstallProgress): void }) => Promise<VoiceInstallResult>; env?: NodeJS.ProcessEnv } = {}): Harness {
+function harness(overrides: { platform?: string; arch?: string; installed?: boolean; install?: (kind: "runtime" | "model", options: { signal: AbortSignal; onProgress(progress: VoiceInstallProgress): void }) => Promise<VoiceInstallResult>; env?: NodeJS.ProcessEnv; pushToTalk?: boolean } = {}): Harness {
 	const calls: string[] = [];
 	const sessions: FakeSession[] = [];
 	const installs: Harness["installs"] = [];
+	// The toggle store is always faked: no test reads or writes the real config home.
+	const settings = { enabled: overrides.pushToTalk ?? false, reads: 0, writes: [] as boolean[] };
+	const clock = manualClock();
 	const state = overrides.installed ? "installed" : "missing";
 	const install = overrides.install ?? (async (kind) => ({ kind, path: `${VOICE_HOME}/${kind}`, alreadyInstalled: false }));
 	const deps: VoiceCommandDeps = {
@@ -151,8 +208,13 @@ function harness(overrides: { platform?: string; arch?: string; installed?: bool
 			sessions.push(session);
 			return session;
 		},
+		settings: {
+			read: () => { settings.reads++; return settings.enabled; },
+			write: (enabled) => { settings.writes.push(enabled); settings.enabled = enabled; },
+		},
+		pushToTalk: { timers: clock.timers },
 	};
-	return { deps, calls, sessions, installs };
+	return { deps, calls, sessions, installs, settings, clock };
 }
 
 const pick = (pattern: RegExp) => (_title: string, options: string[]) => options.find((option) => pattern.test(option));
@@ -463,4 +525,230 @@ test("a transcript that arrives while cancelling is dropped", async () => {
 	await done;
 	assert.equal(ui.editor(), "draft: ");
 	assert.ok(!ui.events.some((event) => event.startsWith("paste:")));
+});
+
+// --- push-to-talk (hold Space) ------------------------------------------------
+
+const SPACE = " ";
+const REPEAT_DELAY = 400;
+const REPEAT_INTERVAL = 40;
+const RELEASE = 250;
+
+async function startSession(pi: ReturnType<typeof fakePi>, ui: ReturnType<typeof fakeContext>) {
+	await pi.fire("session_start", ui.ctx);
+}
+
+// Space pressed and held: the first space, then `repeats` OS auto-repeats.
+function holdSpace(h: Harness, ui: ReturnType<typeof fakeContext>, repeats: number, first = true) {
+	if (first) ui.type(SPACE);
+	for (let index = 0; index < repeats; index++) {
+		h.clock.advance(first && index === 0 ? REPEAT_DELAY : REPEAT_INTERVAL);
+		ui.type(SPACE);
+	}
+}
+
+// Holds Space until a dictation is recording, as on the very first hold of a
+// session: the install check runs lazily while the spaces are still typed.
+async function holdUntilRecording(h: Harness, ui: ReturnType<typeof fakeContext>) {
+	holdSpace(h, ui, 2);
+	await until(() => h.calls.some((call) => call.startsWith("status:")));
+	await tick();
+	holdSpace(h, ui, 1, false);
+	assert.equal(h.sessions.length, 1, "the hold started one dictation");
+	holdSpace(h, ui, 4, false);
+	const session = h.sessions[0]!;
+	session.started.resolve();
+	await until(() => session.state === "recording");
+	return session;
+}
+
+test("startup arms push-to-talk only when enabled, reading the toggle and nothing else", async () => {
+	const enabled = harness({ installed: true, pushToTalk: true });
+	const pi = register(enabled);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	assert.equal(ui.terminal.subscribes, 1);
+	assert.equal(enabled.settings.reads, 1);
+	assert.deepEqual(enabled.calls, [], "no probe, status read, download or session at startup");
+
+	const disabled = harness({ installed: true });
+	const off = register(disabled);
+	const typing = fakeContext();
+	await startSession(off, typing);
+	assert.equal(typing.terminal.subscribes, 0, "no listener when disabled");
+	holdSpace(disabled, typing, 6);
+	typing.type("a");
+	assert.equal(typing.editor(), `draft: ${SPACE.repeat(7)}a`, "typing is unchanged");
+	assert.deepEqual(disabled.calls, []);
+});
+
+test("child sessions and non-TUI modes never arm or read the toggle", async () => {
+	const child = harness({ installed: true, pushToTalk: true, env: { GENTLE_PI_AGENTS_CHILD: "1" } });
+	const childPi = register(child);
+	const childUi = fakeContext();
+	await startSession(childPi, childUi);
+	assert.equal(childUi.terminal.subscribes, 0);
+	for (const [mode, hasUI] of [["rpc", true], ["print", false]] as const) {
+		const h = harness({ installed: true, pushToTalk: true });
+		const pi = register(h);
+		const ui = fakeContext({}, mode, hasUI);
+		await startSession(pi, ui);
+		assert.equal(ui.terminal.subscribes, 0, mode);
+		assert.equal(h.settings.reads, 0, mode);
+	}
+	assert.equal(child.settings.reads, 0);
+});
+
+test("holding Space records, releasing it pastes the transcript into the draft and never sends", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	const session = await holdUntilRecording(h, ui);
+	assert.equal(ui.editor(), "draft: ", "every space typed by the hold was erased");
+	assert.match(ui.statuses.at(-1) ?? "", /recording/i);
+	assert.ok(!ui.open(), "no overlay steals the editor focus");
+	h.clock.advance(RELEASE);
+	await until(() => session.calls.includes("stop"));
+	assert.match(ui.statuses.at(-1) ?? "", /transcrib/i);
+	session.result.resolve({ text: "hola mundo", truncated: false });
+	await until(() => ui.editor() === "draft: hola mundo");
+	await until(() => ui.statuses.at(-1) === undefined);
+	assert.equal(pi.counts.sends, 0);
+	assert.deepEqual(session.calls, ["start", "stop"]);
+	assert.deepEqual(h.calls.filter((call) => call === "probe").length, 1, "the install is checked once per session");
+	// The lock is free again: a second hold starts a second dictation directly.
+	holdSpace(h, ui, 2);
+	assert.equal(h.sessions.length, 2);
+});
+
+test("a release before recording starts stops as soon as recording begins", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	holdSpace(h, ui, 2);
+	await until(() => h.calls.some((call) => call.startsWith("status:")));
+	await tick();
+	holdSpace(h, ui, 1, false);
+	const session = h.sessions[0]!;
+	h.clock.advance(RELEASE);
+	assert.ok(!session.calls.includes("stop"));
+	session.started.resolve();
+	await until(() => session.calls.includes("stop"));
+	session.result.resolve({ text: "short", truncated: false });
+	await until(() => ui.editor().endsWith("short"));
+});
+
+test("Esc during a hold cancels the dictation and leaves the draft unchanged", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	const session = await holdUntilRecording(h, ui);
+	ui.type(ESC);
+	await until(() => session.calls.includes("cancel"));
+	session.result.resolve({ text: "dropped", truncated: false });
+	await until(() => ui.statuses.at(-1) === undefined);
+	await tick();
+	assert.equal(ui.editor(), "draft: ", "Esc was consumed and nothing was pasted");
+	assert.match(ui.notices.at(-1)!.message, /cancelled/i);
+	h.clock.advance(RELEASE);
+	assert.ok(!session.calls.includes("stop"));
+});
+
+test("not installed: the hold types its spaces, notifies once and disarms", async () => {
+	const h = harness({ pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	holdSpace(h, ui, 2);
+	await until(() => ui.notices.length > 0);
+	holdSpace(h, ui, 3, false);
+	assert.equal(ui.editor(), `draft: ${SPACE.repeat(6)}`, "all six spaces typed normally");
+	assert.equal(h.sessions.length, 0);
+	assert.match(ui.notices[0]!.message, /\/gentle:voice/);
+	assert.equal(ui.terminal.unsubscribes, 1, "disarmed");
+	h.clock.advance(RELEASE);
+	holdSpace(h, ui, 4);
+	assert.equal(ui.notices.length, 1, "notified once");
+	assert.equal(h.settings.writes.length, 0, "the saved choice is kept");
+});
+
+test("a hold while /gentle:voice is dictating does not start a second session", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext({ select: pick(/start dictation/i) });
+	await startSession(pi, ui);
+	const { done, session } = await startDictation(h, pi, ui);
+	holdSpace(h, ui, 6);
+	await tick();
+	assert.equal(h.sessions.length, 1);
+	assert.equal(ui.editor(), `draft: ${SPACE.repeat(7)}`, "spaces pass through");
+	ui.component()!.handleInput!(ENTER);
+	session.result.resolve({ text: "one", truncated: false });
+	await done;
+});
+
+test("session shutdown cancels a held dictation, disarms and drops a late transcript", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext();
+	await startSession(pi, ui);
+	const session = await holdUntilRecording(h, ui);
+	await pi.fire("session_shutdown");
+	assert.equal(ui.terminal.unsubscribes, 1);
+	await until(() => session.calls.includes("cancel"));
+	session.result.resolve({ text: "too late", truncated: false });
+	await tick();
+	await tick();
+	assert.equal(ui.editor(), "draft: ");
+	h.clock.advance(RELEASE);
+	assert.ok(!session.calls.includes("stop"));
+});
+
+test("the /gentle:voice menu toggles push-to-talk, persists it and arms or disarms immediately", async () => {
+	const h = harness({ installed: true, pushToTalk: true });
+	const pi = register(h);
+	const ui = fakeContext({ select: pick(/disable push-to-talk/i) });
+	await startSession(pi, ui);
+	await run(pi, ui);
+	assert.ok(ui.selects[0]!.options.includes("Disable push-to-talk (hold Space)"));
+	assert.deepEqual(h.settings.writes, [false]);
+	assert.equal(ui.terminal.unsubscribes, 1);
+	holdSpace(h, ui, 4);
+	assert.equal(h.sessions.length, 0, "disarmed in the live session");
+
+	const again = fakeContext({ select: pick(/enable push-to-talk/i) });
+	await run(pi, again);
+	assert.ok(again.selects[0]!.options.includes("Enable push-to-talk (hold Space)"));
+	assert.deepEqual(h.settings.writes, [false, true]);
+	assert.equal(again.terminal.subscribes, 1, "armed in the live session");
+	// A reload reads the persisted choice.
+	const reloaded = register(h);
+	const fresh = fakeContext();
+	await startSession(reloaded, fresh);
+	assert.equal(fresh.terminal.subscribes, 1);
+});
+
+test("Enable is offered only when voice is installed", async () => {
+	const h = harness();
+	const pi = register(h);
+	const ui = fakeContext({ select: () => undefined });
+	await run(pi, ui);
+	assert.ok(!ui.selects[0]!.options.some((option) => /push-to-talk/i.test(option)));
+});
+
+test("a successful download enables push-to-talk and arms it", async () => {
+	const h = harness();
+	const pi = register(h);
+	const ui = fakeContext({ select: pick(/download/i), confirm: () => true });
+	await startSession(pi, ui);
+	await run(pi, ui);
+	assert.deepEqual(h.settings.writes, [true]);
+	assert.equal(ui.terminal.subscribes, 1);
+	assert.match(ui.notices.at(-1)!.message, /hold Space/i);
+	// Already known installed: the first hold starts directly.
+	holdSpace(h, ui, 2);
+	assert.equal(h.sessions.length, 1);
 });
