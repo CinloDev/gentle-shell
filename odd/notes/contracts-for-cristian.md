@@ -7,6 +7,41 @@ a consumer, and what did not. Newest first.
 Status words: **public** = a consumer may rely on it; **internal** = documented
 for context only, may change without notice; **open** = not designed yet.
 
+## 2026-10-19 — Voice push-to-talk, hold Space (`feat/voice-push-to-talk`)
+
+Builds on `feat/optional-parakeet-voice`.
+
+### Summary for the backend
+
+- **No change to any existing contract.** No RPC command or event, no model-callable tool,
+  no change to the session protocol.
+- **TUI only, like `/gentle:voice`.** Push-to-talk listens to raw terminal input through
+  `ctx.ui.onTerminalInput`, which exists only in interactive mode. A workspace driven over
+  RPC never arms it, so typing and input sent through RPC are unaffected.
+- **open:** the same note as before applies: browser push-to-talk for Gentle Cloud would
+  need its own capture and a contract that does not exist yet.
+
+### New preference file (internal, additive)
+
+`<config home>/voice-settings.json`, next to the other per-feature preference files:
+
+```json
+{ "schema": "gentle-pi.voice-settings/v1", "pushToTalk": true }
+```
+
+- Exactly these two keys. Missing, malformed or foreign content reads as `pushToTalk: false`.
+- Written atomically (temporary file plus rename, mode `0600`).
+- Set to `true` after a successful voice download; toggled from `/gentle:voice`.
+- Read once at session start; no other startup IO for voice.
+- If a workspace image pre-seeds the config home, leaving this file out keeps push-to-talk off.
+
+### Behavior a consumer might observe (internal)
+
+- When enabled and installed, holding Space in the TUI dictates into the draft. Taps and
+  normal typing reach the editor unchanged. Confirming a hold erases the spaces the hold
+  typed by rewriting later repeats to Backspace (`\x7f`), verified against the draft text.
+- Disabled or not installed: no input listener is registered at all.
+
 ## 2026-10-17 — Optional local voice dictation (`feat/optional-parakeet-voice`)
 
 ### Summary for the backend

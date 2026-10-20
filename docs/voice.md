@@ -15,23 +15,82 @@ from `/gentle:voice`; nothing described here runs at startup.
    sent automatically. Pi collapses pastes over 1,000 characters or 10 lines into
    a `[paste #N …]` marker; the full text is retained and expanded when you submit.
    Long transcripts are therefore not displayed as editable text in the draft.
+4. Or hold Space in the editor: push-to-talk is turned on by a successful
+   download. See [Push-to-talk](#push-to-talk-hold-space).
 
 ## The command
 
 | Topic | Behavior |
 |-------|----------|
-| Menu | Built-in select and confirm dialogs. **Show status and notices** reports the target, both components, limitations and licenses. |
+| Menu | Built-in select and confirm dialogs. **Show status and notices** reports the target, both components, limitations and licenses. **Disable push-to-talk (hold Space)** appears while it is on; **Enable push-to-talk (hold Space)** appears only when voice is installed. |
 | Download | Only after the confirmation; runtime first, then the model. A cancelled download keeps components that already finished. |
 | Dictation | A compact overlay shows preparing, recording, transcribing. Enter stops recording; the overlay stays until the transcript is ready. |
 | Recording limit | After 2 minutes recording stops by itself, and the transcript is pasted without a key press. |
 | Insertion | The recognized text goes through Pi's editor paste pipeline, which may collapse long text into a paste marker. A blank result pastes nothing. |
-| One at a time | A second `/gentle:voice` while a download or dictation runs is refused with a notice. |
+| One at a time | A second `/gentle:voice` while a download or dictation runs is refused with a notice. A Space hold during either one types spaces as usual. |
 | Cancel and shutdown | Esc, reload or session shutdown aborts the download or cancels the session. A transcript that arrives afterwards is dropped. |
 | Where it runs | Interactive TUI parent sessions only. RPC, print, JSON and delegated child sessions refuse it. No model-callable tool exists. |
 | Errors | Fixed messages with the action to take, such as installing ALSA or the Visual C++ runtime. Gentle AI never runs those installers. |
 
 The command is tested with fake dialogs, downloads and sessions only. No real
 download, native load or microphone recording has been exercised through it.
+
+## Push-to-talk (hold Space)
+
+Hold Space in the editor to record; release it to stop. The transcript is
+pasted at the cursor and never sent. Esc cancels while recording or
+transcribing. A one-line footer status shows preparing, recording and
+transcribing; no overlay opens, so the editor keeps the focus.
+
+| Topic | Behavior |
+|-------|----------|
+| Toggle | Stored as `voice-settings.json` (`gentle-pi.voice-settings/v1`) in the Gentle AI config home. A successful download turns it on; the `/gentle:voice` menu turns it off and on, effective immediately. A missing or malformed file means off. |
+| When it is armed | Only with the toggle on, in an interactive TUI parent session. Delegated child sessions, RPC, print and JSON modes never arm it. Reload or shutdown disarms it and cancels a running dictation. |
+| Startup | Reads the toggle file only. No voice files are checked, nothing is downloaded or loaded, and no worker starts. |
+| First hold | Checks that the runtime and model are installed; the spaces keep typing meanwhile. If voice is not installed, a notice points to `/gentle:voice` and push-to-talk stays off for the session; the saved choice is kept. |
+| One at a time | A hold while a download or dictation runs types spaces normally. |
+
+### How a hold is recognized
+
+With Pi's keyboard mode, terminals report Space as plain text and never report
+its release, so push-to-talk relies on the operating system's key auto-repeat.
+Pi lets an extension drop or replace a key as it arrives, but not type one
+later, so every space reaches the editor unchanged:
+
+- **Typing:** a tap, several spaces, an indent or Space then a letter are
+  typed exactly as without push-to-talk, with no delay.
+- **Hold:** auto-repeat has a long initial delay followed by short, regular
+  repeats; typing does not. A hold needs a first gap of 180 to 1000 ms (macOS
+  allows at least about 225 ms, X11 defaults to 660 ms), then three repeats
+  each at most 250 ms apart and regular (the slowest at most 1.6 times the
+  fastest), with the first gap at least 1.5 times the slowest repeat. Each
+  space must have added exactly one space to the draft. The following repeats
+  are turned into Backspace, through the editor's normal key path, until the
+  spaces the hold typed are removed; when the hold followed a word, one space
+  stays as the separator before the transcript. Later repeats are dropped.
+  While recording starts, those spaces can be seen briefly.
+- **Release:** no repeat for 2.5 times the observed repeat interval, between
+  150 and 400 ms. The decision waits until input already queued is handled, so
+  a repeat delayed by a busy moment is not taken for a release.
+- **Guards:** only single-space input counts. Pastes, escape sequences and
+  multi-character input pass through and end the attempt. If the draft changes
+  in any other way, for example Vim NORMAL mode where Space only moves the
+  cursor, autocomplete, or another key, the hold is not confirmed, or erasing
+  stops, and nothing else is removed. Spaces that were in the draft before the
+  hold are never removed.
+
+Limitations: the timing depends on the keyboard repeat settings. An initial
+repeat delay under 180 ms or over 1000 ms, or a repeat interval over 250 ms,
+prevents a hold from being recognized. Five or more spaces typed with a pause
+and then a very even fast rhythm could still look like a hold. Whether a space
+precedes the hold is judged as if typing at the end of the draft; in the
+middle of existing spaces the separator may be missing. Esc pressed while
+repeats are still arriving, and a release right as the hold is confirmed, can
+leave a stray space. Recording starts once the hold is confirmed and the
+microphone is open; the model is verified while you speak (see below). A hold
+while a dialog or overlay has the focus does not change the draft and is
+ignored. Push-to-talk is tested with fake terminals, editors and sessions
+only.
 
 ## What gets downloaded
 
@@ -105,15 +164,27 @@ submits the text or touches the editor; the caller decides what to do with it.
   creating a session does nothing until `start()`.
 - **Checked before loading.** `start()` first requires both components to be
   reported installed. The worker then checks the files again before it loads
-  any native code: every entry in the runtime and model directories must be a
-  plain directory or regular file, owned by the current user and not writable
-  by everyone (ownership and modes are not checked on Windows). Each required
-  runtime file must be present, and each model file must match its pinned size
-  and SHA-256. The digests are recomputed on every session, which reads the
-  whole model (about 670 MB) before recording starts. Directories above the
+  the native code that uses them: every entry in the runtime and model
+  directories must be a plain directory or regular file, owned by the current
+  user and not writable by everyone (ownership and modes are not checked on
+  Windows). Each required runtime file must be present, and each model file
+  must match its pinned size and SHA-256. The digests are recomputed on every
+  session, which reads the whole model (about 670 MB). Directories above the
   voice home are not checked. These checks catch broken or swapped installs;
   they cannot stop someone with the same user account from replacing the files,
   which is the same as running code as that user.
+- **Order.** So that the first words are recorded, the worker validates the
+  runtime files, loads node-cpal and opens the microphone, then reports
+  `recording` and verifies the model digests while recording, reading each
+  file in chunks so capture keeps running. sherpa-onnx and the model are loaded
+  only after every digest matched and recording stopped, because that load is
+  synchronous and would stall capture. A mismatch found while recording closes
+  the microphone at once and reports the model as invalid; one found after stop
+  is reported instead of a transcript. Cancel stops the verification and loads
+  nothing. The tradeoff: the recognizer load (about 0.85 seconds measured on an
+  Apple Silicon Mac) now happens after stop, so a transcript takes that much
+  longer to arrive, and any verification still running when you stop is
+  awaited too.
 - **Lifecycle.** A session is used once: `start()` resolves when recording
   begins, `stop()` resolves with `{ text, truncated }`, and `cancel()` (or
   `dispose()`) discards everything, including a transcript that arrives late.
@@ -122,8 +193,9 @@ submits the text or touches the editor; the caller decides what to do with it.
   not exit within 2 seconds of finishing or being cancelled is killed. If the parent
   disappears, the worker sees its input close and stops capturing.
 - **Bounds.** Recording stops by itself after 120 seconds, and the worker then
-  transcribes what it has (`truncated: true`). Starting (file checks and model
-  load) and transcribing each have a 120-second limit. Audio is kept in memory
+  transcribes what it has (`truncated: true`). Starting (runtime checks and
+  opening the microphone) and transcribing (the rest of the model
+  verification, the model load and the decode) each have a 120-second limit. Audio is kept in memory
   only up to the recording limit. All of these are options.
 - **Audio.** The worker opens the default input device through node-cpal,
   preferring 32-bit float samples and otherwise using the device's default

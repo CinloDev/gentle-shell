@@ -111,6 +111,20 @@ const STATE_TEXT: Record<VoiceSessionState, string> = {
 	finished: "Finishing…",
 };
 
+const PUSH_TO_TALK_STATUS: Record<VoiceSessionState, string> = {
+	idle: "Voice: preparing… keep holding Space",
+	starting: "Voice: preparing… keep holding Space",
+	recording: "● Voice: recording · release Space to insert · esc cancel",
+	transcribing: "Voice: transcribing…",
+	finished: "Voice: finishing…",
+};
+
+// The one-line footer status of a push-to-talk dictation. Push-to-talk uses no
+// overlay, so the editor keeps the focus and the transcript lands at its cursor.
+export function pushToTalkStatus(state: VoiceSessionState): string {
+	return PUSH_TO_TALK_STATUS[state];
+}
+
 export class VoiceDictationView extends VoiceView {
 	private state: VoiceSessionState = "starting";
 	private stopping = false;
