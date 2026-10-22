@@ -36,7 +36,7 @@ Runner: gentle-pi `npm test` (focused: `node --experimental-strip-types --test <
 
 | ID | Spec | Work | Route | Status |
 |---|---|---|---|---|
-| T1 | S1-S3, S4 (gentle-pi copy), S5 | gentle-pi edits + tests, one work-unit commit | delegated (parallel with T2; context backstop), then parent compaction | focused green; full suite vs base running |
+| T1 | S1-S3, S4 (gentle-pi copy), S5 | gentle-pi edits + tests, one work-unit commit | delegated (parallel with T2; context backstop), then parent compaction | done `8f8666b62` (full suite: 0 new failures vs base fd29abd0b, 37 env failures on both) |
 | T2 | S4, S5 | gentle-ai canon edit + tests, one work-unit commit | delegated (parallel with T1) | pending |
 | T3 | S6 | Sol arm econ2 (risk vs base), compare | bench | done (L3: no regression) |
 | T4 | S1-S5 | Independent verifier (high risk item 3: mirrored canon) over both commits | delegated | pending |
