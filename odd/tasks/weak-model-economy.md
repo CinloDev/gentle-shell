@@ -39,7 +39,7 @@ Runner: gentle-pi `npm test` (focused: `node --experimental-strip-types --test <
 | T1 | S1-S3, S4 (gentle-pi copy), S5 | gentle-pi edits + tests, one work-unit commit | delegated (parallel with T2; context backstop), then parent compaction | done `8f8666b62` (full suite: 0 new failures vs base fd29abd0b, 37 env failures on both) |
 | T2 | S4, S5 | gentle-ai canon edit + tests, one work-unit commit | delegated (parallel with T1) | pending |
 | T3 | S6 | Sol arm econ2 (risk vs base), compare | bench | done (L3: no regression) |
-| T4 | S1-S5 | Independent verifier (high risk item 3: mirrored canon) over both commits | delegated | pending |
+| T4 | S1-S5 | Independent verifier (high risk item 3: mirrored canon) over both commits | delegated | gentle-pi PASS (L6); gentle-ai pending |
 
 ## Log
 
@@ -62,3 +62,8 @@ Runner: gentle-pi `npm test` (focused: `node --experimental-strip-types --test <
   gentle-ai canon (T2) should take the same compact item-1 wording.
 - L5 (user, 2026-10-22): chose "Subir budget a 9,250 B" with a comment citing the bench evidence. Done in
   tests/orchestrator-budget.test.ts and tests/orchestrator-rdd-ownership.test.ts; focused suites 107/107 pass.
+- L6 gentle-pi verifier (fresh read-only, no writer context) on fd29abd0b..d5d63d959: PASS S1-S5, no blockers;
+  focused 107/107; rendered prompt has no remaining small-task todo, unconditional differential check, or dev/test
+  database high-risk sentence; mirrored bundles untouched. Advisory follow-up: assets/orchestrator-delegation-
+  reference.md:55,80 still say "once each" for the small path checks (compatible, pre-existing wording). Native
+  assess: medium, reviewDue false. PR gentle-shell#2457 (Refs #1494, type:bug).
