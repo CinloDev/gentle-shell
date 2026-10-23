@@ -16,6 +16,8 @@ import {
 	bundledUpdatePlan,
 	parseBundledUpgradeArgs,
 	withBundledNpmCommand,
+	withoutBundledNpmCommand,
+	withoutMissingBundledNpmCommand,
 	resolveBundledInstall,
 	setBundledInstallForTesting,
 	type BundledFs,
@@ -172,6 +174,38 @@ test("withBundledNpmCommand sets only npmCommand and leaves an already bundled s
 	assert.deepEqual(JSON.parse(replaced.status === "write" ? replaced.text : "{}"), { npmCommand: command });
 	assert.deepEqual(JSON.parse((withBundledNpmCommand(undefined, command) as { text: string }).text), { npmCommand: command });
 	for (const malformed of ["{", "[]", "null"]) assert.deepEqual(withBundledNpmCommand(malformed, command), { status: "malformed" });
+});
+
+// #2469: the npmCommand a bundled self-uninstall left behind names a node.exe
+// the uninstall removed, so Pi package installs fail with ENOENT until it is
+// gone; a command naming nothing inside the removed prefix stays.
+test("withoutBundledNpmCommand removes the key when an entry names the removed prefix and keeps the rest", () => {
+	const text = '{\n    "theme": "gentle",\n    "npmCommand": ["/p/runtime/node.exe", "--update-notifier=false"]\n}\n';
+	const removed = withoutBundledNpmCommand(text, (path) => path === "/p/runtime/node.exe");
+	assert.ok(removed.status === "removed", removed.status);
+	assert.deepEqual(JSON.parse(removed.text), { theme: "gentle" });
+	assert.match(removed.text, /^\{\n {4}"theme"/);
+	assert.ok(removed.text.endsWith("}\n"));
+	assert.deepEqual(withoutBundledNpmCommand(undefined, () => true), { status: "unchanged" });
+	assert.deepEqual(withoutBundledNpmCommand('{"npmCommand":"npm"}', () => true), { status: "unchanged" });
+	assert.deepEqual(withoutBundledNpmCommand('{"npmCommand":["node"]}', () => true), { status: "unchanged" });
+	assert.deepEqual(withoutBundledNpmCommand('{"npmCommand":["/other/node"]}', () => false), { status: "unchanged" });
+	assert.deepEqual(withoutBundledNpmCommand('{"theme":"gentle"}', () => true), { status: "unchanged" });
+	for (const malformed of ["{", "[]", "null"]) assert.deepEqual(withoutBundledNpmCommand(malformed, () => true), { status: "malformed" });
+});
+
+test("withoutMissingBundledNpmCommand removes the key only when its executable is an absolute path that is gone", () => {
+	const text = '{\n    "theme": "gentle",\n    "npmCommand": ["/gone/node", "/p/npm-cli.js"]\n}\n';
+	const removed = withoutMissingBundledNpmCommand(text, (path) => path !== "/gone/node");
+	assert.ok(removed.status === "removed", removed.status);
+	assert.deepEqual(JSON.parse(removed.text), { theme: "gentle" });
+	// An executable that exists, a PATH command, a non-array value, no key, no file.
+	assert.deepEqual(withoutMissingBundledNpmCommand(text, () => true), { status: "unchanged" });
+	assert.deepEqual(withoutMissingBundledNpmCommand('{"npmCommand":["npm"]}', () => false), { status: "unchanged" });
+	assert.deepEqual(withoutMissingBundledNpmCommand('{"npmCommand":"npm"}', () => false), { status: "unchanged" });
+	assert.deepEqual(withoutMissingBundledNpmCommand('{"theme":"gentle"}', () => false), { status: "unchanged" });
+	assert.deepEqual(withoutMissingBundledNpmCommand(undefined, () => false), { status: "unchanged" });
+	for (const malformed of ["{", "[]", "null"]) assert.deepEqual(withoutMissingBundledNpmCommand(malformed, () => false), { status: "malformed" });
 });
 
 test("bundledUpdatePlan redirects Pi's own update and keeps the extension updates", () => {
