@@ -25,6 +25,11 @@ const SECTION_MARKER = "## Skills";
 const EXCLUDE_NAMES = new Set(["_shared", "skill-registry"]);
 const EXCLUDE_PREFIXES = ["sdd-"];
 const WATCH_DEBOUNCE_MS = 500;
+// inotify budgets are finite (ENOSPC/EMFILE) and recursive watches degrade
+// silently on exhausted systems -- WSL2 hits this constantly -- so a slow
+// poll is the floor that keeps regeneration working when the OS cannot
+// deliver change events. The fingerprint gate makes a redundant poll cheap.
+const WATCH_FALLBACK_POLL_MS = 2_000;
 const REGISTRY_SCHEMA_VERSION = 7;
 const NO_SKILL_REGISTRY_FLAG = "no-skill-registry";
 const NO_SKILL_REGISTRY_ENV = "GENTLE_PI_NO_SKILL_REGISTRY";
@@ -530,6 +535,7 @@ async function regenerateRegistry(
 }
 
 const watchedCwds = new Set<string>();
+const watcherPolls = new Map<string, ReturnType<typeof setInterval>>();
 // Startup regeneration runs after session_start returns; watcher refreshes
 // wait for it so an older startup scan never overwrites a newer refresh.
 const pendingStartups = new Map<string, Promise<void>>();
@@ -608,6 +614,8 @@ function closeSkillRegistryWatchers(): void {
 		}
 	}
 	activeWatchers.clear();
+	for (const poll of watcherPolls.values()) clearInterval(poll);
+	watcherPolls.clear();
 	watchedCwds.clear();
 }
 
@@ -654,6 +662,9 @@ async function startSkillRegistryWatcher(
 			// Some filesystems do not support recursive watches; session_start/manual refresh still work.
 		}
 	}
+	// Watchers may be absent (unsupported filesystem) or silently eventless
+	// (exhausted inotify budget): the poll keeps regeneration alive either way.
+	if (!watcherPolls.has(cwd)) watcherPolls.set(cwd, setInterval(refresh, WATCH_FALLBACK_POLL_MS));
 }
 
 export const __testing = {
