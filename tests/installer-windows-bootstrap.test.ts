@@ -1377,7 +1377,7 @@ function cleanNativeProcesses(root: string) {
 	// is idempotent — it kills only verified owned processes and exits 0 — so a
 	// timeout is retried once with a wider bound before failing the fixture.
 	let result = spawnGuard(GUARD_TIMEOUT_MS);
-	if (result.error?.code === "ETIMEDOUT") result = spawnGuard(GUARD_TIMEOUT_MS * 4);
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") result = spawnGuard(GUARD_TIMEOUT_MS * 4);
 	assert.equal(result.error, undefined, "fixture guard must be bounded and available");
 	assert.equal(result.status, 0, `fixture guard must only clean verified owned processes: ${(result.stderr ?? "").slice(0, 4000)}`);
 	assert.ok(["", "fixture guard reaped residual owned process"].includes(result.stdout.trim()), "unexpected fixture guard output");
