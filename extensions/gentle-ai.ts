@@ -4505,7 +4505,10 @@ async function showProfilesPanel(
 		agentHome: resolveGentlePiAgentHome(),
 	};
 	const discoveredAgents = discoverAgents(discoveryRoots).agents;
-	const discoveredAgentNames = discoveredAgents.map((agent) => agent.name);
+	// gentle-pi#2271: review-refuter and review-validator are provider review
+	// roles the relay routes by key; they never have an agent file, so they
+	// count as matched instead of being flagged "no matching agent".
+	const discoveredAgentNames = [...new Set([...PROVIDER_REVIEW_ROLES, ...discoveredAgents.map((agent) => agent.name)])];
 	// Issue #2400: launches resolve from the subagents.json model_profiles, which
 	// the effective table only reads per discovered agent, so a key with no match
 	// and no suggestion never appeared. When a session binding or a pin wins, the
@@ -4513,7 +4516,7 @@ async function showProfilesPanel(
 	const unmatchedKeys = sessionBoundName !== undefined || pinnedEffectiveModelConfig(ctx.cwd) !== undefined
 		? []
 		: unmatchedProfileKeys(loadAgentsConfig(discoveryRoots).modelProfiles, discoveredAgents)
-			.filter((entry) => entry.suggestion === undefined)
+			.filter((entry) => entry.suggestion === undefined && !isProviderReviewRole(entry.key))
 			.map((entry) => entry.key);
 	return ctx.ui.custom<ProfilesPanelResult>(
 		(tui, theme, keybindings, done) => {
