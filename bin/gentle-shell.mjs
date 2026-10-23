@@ -1126,7 +1126,7 @@ async function runSetupFlow(home, runtime, { dryRun, stdio, timeoutMs }) {
 		if (!engram.ok) return engram;
 	}
 	// The memory decision never skips setup: it only selects the Engram
-	// environment (core or guard, policy, ENGRAM_URL) setup's children and the
+	// environment (guard, policy, ENGRAM_URL) setup's children and the
 	// launched Pi get. Gentle AI's `install --agent pi` and `pi-engram init` open
 	// no store. Reclassified now that the verified core may just be published.
 	if (bundledInstall) {
@@ -1871,7 +1871,7 @@ async function main() {
 	if (home.mode === "path") home = { ...home, dir: resolvePath(home.dir) };
 
 	// Version and help runs (Shell's own or forwarded to Pi) never probe Engram,
-	// ensure the companion, print memory notices or touch provenance.
+	// ensure the companion, print memory notices or start a server.
 	const engramQuiet = args.version || piVersionOrHelpRequested(args.passthrough);
 	let runtime;
 	if (bundled) {

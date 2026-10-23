@@ -539,10 +539,17 @@ test("bundled memory never requires or selects a session-owned server, with the 
 	assert.equal(lastLaunch(result).env.ENGRAM_SERVER_MODE, undefined);
 	assert.doesNotMatch(result.stderr, /session-owned/);
 	assert.deepEqual(JSON.parse(readFileSync(prefix.metadata, "utf8")).engram, { startupPolicy: 1 });
-	const explicit = prefix.run([], { ENGRAM_SERVER_MODE: "shared" });
-	assert.equal(explicit.status, 0, explicit.stderr);
-	assert.deepEqual(memoryOf(explicit), ["allow", prefix.guard, DEFAULT_URL]);
-	assert.equal(lastLaunch(explicit).env.ENGRAM_SERVER_MODE, "shared");
+});
+
+test("an explicit Engram server mode is a selection: kept, never probed or started, memory disabled", { skip: posixHost }, (t) => {
+	for (const mode of ["session-owned", "bogus"]) {
+		const prefix = bundledPrefix(t);
+		const result = prefix.run([], { ENGRAM_SERVER_MODE: mode, FIXTURE_NO_PROBE: "1" });
+		assert.equal(result.status, 0, result.stderr);
+		assert.deepEqual(memoryOf(result), ["disabled", prefix.guard, undefined], mode);
+		assert.equal(lastLaunch(result).env.ENGRAM_SERVER_MODE, mode);
+		assert.deepEqual(prefix.serves(), [], mode);
+	}
 });
 
 test("a mixed local and npm companion selection is preserved and memory still uses the shared server", { skip: posixHost }, (t) => {

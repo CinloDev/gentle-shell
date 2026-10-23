@@ -260,7 +260,7 @@ function outdatedServerVersion(version: string | undefined): string | undefined 
 // The default endpoint gentle-engram uses without ENGRAM_URL or ENGRAM_PORT.
 export const ENGRAM_DEFAULT_PORT = 7437;
 export const ENGRAM_DEFAULT_URL = `http://127.0.0.1:${ENGRAM_DEFAULT_PORT}`;
-const ENGRAM_SELECTIONS = ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_SOCKET", "ENGRAM_DATABASE_URL"];
+const ENGRAM_SELECTIONS = ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_SOCKET", "ENGRAM_DATABASE_URL", "ENGRAM_SERVER_MODE"];
 const HEX32 = /^[a-f0-9]{32}$/;
 
 export type EngramProbe = { kind: "refused" } | { kind: "unknown" } | { kind: "listening"; compatible: boolean; healthInstanceId?: string; healthVersion?: string };

@@ -18,7 +18,7 @@ Branch: fix/engram-352-session-owned-pin (worktree .worktrees/engram-352-pin). D
 ## Tasks
 
 - T1 [S1-S9] delegated (context backstop) — implement shared global server startup, tests, docs. Status: implemented, uncommitted (see L5). Commit: —
-- T2 [S1-S9] delegated — independent verification (high risk: items 1, 5). Status: pending.
+- T2 [S1-S9] delegated — independent verification (high risk: items 1, 5). Status: done; B1 (S6) fixed and rechecked. Commit: ecc7cae5a + correction.
 
 ## Log
 
@@ -27,3 +27,5 @@ Branch: fix/engram-352-session-owned-pin (worktree .worktrees/engram-352-pin). D
 - L3 (2026-10-23) User: "pero porque un servidor privado? comparte el global papu" → decision approved with "ahora si": replace session-owned design (#2199) with shared global server.
 - L4 Evidence: engram 3.5.2 plain `serve` on an isolated HOME answers `/compatibility` `{"status":"ready","active_reuse_authorized":true,"capability":"startup-verified-store-v1","revision":1,"source":"active",...}` and `/health` version 3.5.2. Pin bump to core 3.5.2 (6 archive hashes) already in the worktree diff.
 - L5 (2026-10-23) T1 evidence. RED before implementation: engram-safety 5 failing (spawn decision, missing-core shape, existing store/newer schema, explicit selections never spawn, shared env without session-owned); gentle-shell-bundled 18 failing (S1 start+reuse+detached, S5 failure and race, S2 no session-owned, mixed companion, S3 existing store and newer schema, recheck after auto setup, 0.4.2 pin, help text, list subcommand env, setup/version-change/companion flows). GREEN: `npm run -s check:runtime-modules` ok; `node --experimental-strip-types --no-warnings --test tests/engram-safety.test.ts tests/gentle-shell-bundled.test.ts tests/bundled-install.test.ts tests/installer-posix-bootstrap.test.ts` 227 pass, 0 fail. Startup provisioning/provenance, session-owned gate, `supportsEngramSessionOwned`, `supportsBundledSessionOwned`, `engramProvenanceMatches` and their notices removed; `gentle-shell memory migrate` kept. Open: bin/engram-guard fallback text still mentions Shell-provisioned identity (outside T1 edit surfaces).
+
+- L6 (2026-10-23) Independent verify of ecc7cae5a: S1-S5, S7-S9 pass (227/227 focused; real 3.5.2 serve accepted by isReadyCompatibility; 22 module-importing test files fail identically on base and change, environmental). Blocker B1 (S6): explicit ENGRAM_SERVER_MODE silently ignored. Correction: ENGRAM_SERVER_MODE joins ENGRAM_SELECTIONS (kept, never probed or started, memory disabled). RED 2 failing tests, GREEN 228/228 focused + package-manifest 287/287. Stale 'core or guard' wording (A5) fixed.

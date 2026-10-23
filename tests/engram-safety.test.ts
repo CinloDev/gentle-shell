@@ -85,7 +85,7 @@ test("a current, unparsable or hostile server version keeps the generic notice a
 });
 
 test("explicit selections and invalid policies are disabled without depending on probes", () => {
-	for (const key of ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_SOCKET", "ENGRAM_DATABASE_URL"]) {
+	for (const key of ["ENGRAM_BIN", "ENGRAM_URL", "ENGRAM_DATA_DIR", "ENGRAM_PORT", "ENGRAM_SOCKET", "ENGRAM_DATABASE_URL", "ENGRAM_SERVER_MODE"]) {
 		for (const endpoint of [listening(true), REFUSED]) {
 			const result = classify({ env: { [key]: "chosen" }, endpoint });
 			assert.deepEqual([result.policy, result.spawn], ["disabled", undefined], key);
