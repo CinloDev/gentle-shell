@@ -630,6 +630,9 @@ async function startSkillRegistryWatcher(
 		...userSkillDirs(),
 	]);
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	// The poll re-asks a state the watchers already answered: without this,
+	// an unchanged tracked-target warning would repeat every poll interval.
+	let lastWarning: string | undefined;
 	const refresh = () => {
 		if (timer) clearTimeout(timer);
 		timer = setTimeout(() => {
@@ -637,9 +640,14 @@ async function startSkillRegistryWatcher(
 				try {
 					await pendingStartups.get(cwd);
 					const result = await regenerateRegistry(cwd, false);
-					if (result.warning) notify(result.warning, "warning");
-					if (result.regenerated) {
-						notify(`Skill registry refreshed (${result.skillCount} skills)`, "info");
+					if (result.warning) {
+						if (result.warning !== lastWarning) notify(result.warning, "warning");
+						lastWarning = result.warning;
+					} else {
+						lastWarning = undefined;
+						if (result.regenerated) {
+							notify(`Skill registry refreshed (${result.skillCount} skills)`, "info");
+						}
 					}
 				} catch (error) {
 					notify(`Skill registry refresh failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
