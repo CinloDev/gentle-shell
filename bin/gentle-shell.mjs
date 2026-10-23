@@ -1793,8 +1793,9 @@ async function ensureBundledNpmCommand(bundled, home, homeHadContentBeforeBootst
 // The npmCommand a bundled install wrote into a home it owns must not outlive
 // it (#2469): Pi runs it for every package install, so a key naming a deleted
 // node.exe fails them all with ENOENT. A main-channel bootstrap drops the key
-// when its executable is gone; an existing executable, a link home and a
-// foreign home are never touched.
+// when it has the shape a bundled install writes and its node is gone; a
+// command the user set is never touched, and neither are an existing
+// executable, a link home and a foreign home.
 async function removeMissingNpmCommand(home, homeHadContentBeforeBootstrap) {
 	if (home.mode === "link") return;
 	const previous = provisionedEntry(readRawConfig(resolveConfigPath()), safeRealpath(home.dir));
@@ -1805,7 +1806,7 @@ async function removeMissingNpmCommand(home, homeHadContentBeforeBootstrap) {
 		process.stderr.write(`gentle-shell: ${settingsPath} is not a JSON object, so a stale npmCommand in it is not repaired\n`);
 	} else if (edit.status === "removed") {
 		writeFileAtomically(settingsPath, edit.text);
-		process.stderr.write(`gentle-shell: removed the npmCommand naming a missing executable from ${settingsPath}; Pi installs packages with the npm on your PATH\n`);
+		process.stderr.write(`gentle-shell: removed the bundled npmCommand naming a missing executable from ${settingsPath}; Pi installs packages with the npm on your PATH\n`);
 	}
 }
 

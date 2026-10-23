@@ -517,17 +517,30 @@ export function withoutBundledNpmCommand(settingsText                    , withi
 	return { status: "removed", text: settingsWithoutNpmCommand(settingsText, settings) };
 }
 
-// The agent home's settings.json without an `npmCommand` whose executable (its
-// first entry) no longer exists, as after a bundled self-uninstall that kept
-// the home (#2469): Pi runs that command for every package install, so a key
-// naming a deleted node.exe fails them all with ENOENT. A command whose
-// executable exists, or that names no absolute path, stays.
+// An `npmCommand` a bundled install wrote (scripts/bundled-install.mjs
+// bundledNpmCommand, with npm-cli.js and --prefix in earlier releases): our
+// node in runtime/node-<v>, then npm's settings and cache flags, and
+// --update-notifier=false last. A command the user chose never matches, even
+// when its program is missing.
+export function isBundledNpmCommand(command                    )          {
+	const [node] = command;
+	return typeof node === "string" && /[\\/]runtime[\\/]node-[^\\/]+[\\/](node\.exe|bin[\\/]node)$/.test(node)
+		&& ["--userconfig=", "--globalconfig=", "--cache="].every((flag) => command.some((part) => typeof part === "string" && part.startsWith(flag)))
+		&& command[command.length - 1] === "--update-notifier=false";
+}
+
+// The agent home's settings.json without an `npmCommand` a bundled install
+// wrote whose executable (its first entry) no longer exists, as after a
+// bundled self-uninstall that kept the home (#2469): Pi runs that command for
+// every package install, so a key naming a deleted node.exe fails them all
+// with ENOENT. A command whose executable exists, that names no absolute
+// path, or that the user set themselves is never touched.
 export function withoutMissingBundledNpmCommand(settingsText                    , exists                           )                           {
 	if (settingsText === undefined) return { status: "unchanged" };
 	const settings = parseJson(settingsText);
 	if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return { status: "malformed" };
 	const executable = Array.isArray(settings.npmCommand) ? settings.npmCommand[0] : undefined;
-	if (typeof executable !== "string" || !isAbsolute(executable) || exists(executable)) return { status: "unchanged" };
+	if (typeof executable !== "string" || !isAbsolute(executable) || exists(executable) || !isBundledNpmCommand(settings.npmCommand             )) return { status: "unchanged" };
 	return { status: "removed", text: settingsWithoutNpmCommand(settingsText, settings) };
 }
 
