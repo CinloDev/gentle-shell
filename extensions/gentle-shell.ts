@@ -12,7 +12,7 @@ import { resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles
 import * as os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { buildShellHeaderModel, renderShellBar, renderShellBelowInputFloat, renderShellBottomOnlyBar, renderShellHeaderChrome, renderShellSidebarBar, keepNativeWorkingRow, shellEnabled, shellHeaderUsageHit, shellJobsCount, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
-import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, UNBORN_CHANGES_HINT, WorktreeChangesTracker, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
+import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, WorktreeChangesTracker, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, worktreeGitEnvironment, type WorktreeResolver, type WorktreeIdentity } from "../lib/session-worktree-registry.ts";
@@ -405,7 +405,7 @@ export function createFooterStatusMemo(deps: FooterStatusMemoDeps): { key(): str
 		const tracker = deps.tracker();
 		const built: ShellBarModel = {
 			...buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: deps.usage(), profile: deps.profile(), jobs: deps.jobs() }),
-			changes: { files: tracker.model.files.length, added: tracker.model.added, deleted: tracker.model.deleted, ...(tracker.unbornRoots.length ? { notice: UNBORN_CHANGES_HINT } : {}) },
+			changes: { files: tracker.model.files.length, added: tracker.model.added, deleted: tracker.model.deleted },
 			review: deps.review(),
 		};
 		cache = { key: k, model: built };
@@ -1614,8 +1614,8 @@ async function showCommandPalette(pi: ExtensionAPI, ctx: ExtensionContext, env: 
 	if (result?.type === "run") pi.sendUserMessage(`/${result.name}`, { expandPromptTemplates: true });
 }
 
-function showChanges(ctx: ExtensionContext, model: ChangesModel, visible = true, grouped: (width: number) => boolean = () => false, unbornRootCount = 0): void {
-	if (!visible || (model.files.length === 0 && unbornRootCount === 0)) {
+function showChanges(ctx: ExtensionContext, model: ChangesModel, visible = true, grouped: (width: number) => boolean = () => false): void {
+	if (!visible || model.files.length === 0) {
 		ctx.ui.setWidget(CHANGES_WIDGET_KEY, undefined);
 		return;
 	}
@@ -1623,7 +1623,7 @@ function showChanges(ctx: ExtensionContext, model: ChangesModel, visible = true,
 		CHANGES_WIDGET_KEY,
 		(tui, theme) => sidebarPart(tui, "changes", {
 			render(width: number) {
-				return grouped(width) ? [] : renderChangesWidget(model, theme, width, unbornRootCount);
+				return grouped(width) ? [] : renderChangesWidget(model, theme, width);
 			},
 			invalidate() {},
 		}),
@@ -2025,7 +2025,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	let groupedChangesOwner: (width: number) => boolean = () => false;
 	const refreshVisual = () => {
 		visualSettings = resolveVisualSettings(animationOptions).settings;
-		if (currentContext && changes) showChanges(currentContext, changes.model, visualSettings.visibility.changes, (width) => groupedChangesOwner(width), changes.unbornRoots.length);
+		if (currentContext && changes) showChanges(currentContext, changes.model, visualSettings.visibility.changes, (width) => groupedChangesOwner(width));
 		if (sidebarTui?.terminal) sidebarState(sidebarTui).visibility = { todo: visualSettings.visibility.todo };
 		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
@@ -2063,13 +2063,10 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	});
 	let shown = "";
 	const applyChanges = (ctx: ExtensionContext, model: ChangesModel) => {
-		// The unborn hint is part of what is shown: a root gaining its first commit
-		// must repaint even when the file fingerprint did not change.
-		const unbornRootCount = changes?.unbornRoots.length ?? 0;
-		const fingerprint = `${changesFingerprint(model)}\0${unbornRootCount}`;
+		const fingerprint = changesFingerprint(model);
 		if (fingerprint === shown) return;
 		shown = fingerprint;
-		showChanges(ctx, model, visualSettings.visibility.changes, (width) => groupedChangesOwner(width), unbornRootCount);
+		showChanges(ctx, model, visualSettings.visibility.changes, (width) => groupedChangesOwner(width));
 	};
 	const gitForRoot = (root: string) => deps.gitRunner(root);
 	// Changes is the Git state of the session's roots that still exist: read
@@ -2163,7 +2160,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const statusOwner = () => narrowStatusOwner({ mode: (tui as TUI & { mode?: string }).mode, columns: tui.terminal?.columns ?? 0, statusPlacement: visualSettings.statusPlacement, headerPlacement: visualSettings.headerPlacement });
 			const statusCardVisible = () => Boolean(tui.terminal && tui.terminal.columns >= SIDEBAR_BREAKPOINT && sidebarState(tui).ownsHost?.() && visualSettings.statusPlacement !== "hidden");
 			const belowFloat = (width: number, statuses: boolean) => (tui as TUI & { mode?: string }).mode === "fullscreen"
-				? renderShellBelowInputFloat({ ...footerModel(), ...(statuses ? {} : { statuses: [] }), ...(statusCardVisible() ? { jobs: undefined } : {}) }, theme, width, usageShortcutKey, visualSettings, tracker.model, gaugePaint(ctx), tracker.unbornRoots.length)
+				? renderShellBelowInputFloat({ ...footerModel(), ...(statuses ? {} : { statuses: [] }), ...(statusCardVisible() ? { jobs: undefined } : {}) }, theme, width, usageShortcutKey, visualSettings, tracker.model, gaugePaint(ctx))
 				: undefined;
 			// Match sidebarPart's live paint ownership, including an unavailable rail.
 			const footerSuppressed = () => {
@@ -2174,7 +2171,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			groupedChangesOwner = (width) => belowFloat(width, !footerSuppressed()) !== undefined;
 			const bottomBar = {
 				...bottom,
-				render: (width: number) => belowFloat(width, true)?.rows ?? (statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, visualSettings, undefined, gaugePaint(ctx), tracker.unbornRoots.length) : bottom.render(width)),
+				render: (width: number) => belowFloat(width, true)?.rows ?? (statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, visualSettings, undefined, gaugePaint(ctx)) : bottom.render(width)),
 				handleMouse(event: Parameters<NonNullable<SidebarRail["handleMouse"]>>[0]) {
 					if (footerSuppressed() || event.type !== "click" || event.button !== "left") return undefined;
 					const chrome = belowFloat(event.width, true);
