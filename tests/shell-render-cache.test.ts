@@ -137,8 +137,11 @@ function footerMemoFixture() {
 	let projections = 0;
 	let leaf = "leaf-1";
 	const entries = [{ type: "message", message: { role: "assistant", usage: { cost: { total: 1 } } } }];
+	// One stable model object, replaced only by setModelId: real hosts keep the
+	// model identity stable, and sessionStatsKey compares it by identity.
+	let model: { id: string; contextWindow: number } = { id: "model", contextWindow: 1000 };
 	const ctx = {
-		model: { id: "model", contextWindow: 1000 },
+		get model() { return model; },
 		getContextUsage() { projections++; return { percent: 10, contextWindow: 1000 }; },
 		modelRegistry: { isUsingOAuth: () => false },
 		sessionManager: {
@@ -151,7 +154,6 @@ function footerMemoFixture() {
 		},
 	};
 	let branch: string | null = "main";
-	let modelId = "model";
 	let statuses = new Map<string, string>();
 	let usage: ProviderUsage | undefined;
 	let added = 0;
@@ -164,7 +166,7 @@ function footerMemoFixture() {
 	const footerData = { getGitBranch: () => branch, getExtensionStatuses: () => statuses } as unknown as ShellFooterData;
 	let profile: string | undefined = "team";
 	const memo = createFooterStatusMemo({
-		pi, ctx: { ...ctx, get model() { return { id: modelId, contextWindow: 1000 }; } } as unknown as ExtensionContext, footerData,
+		pi, ctx: ctx as unknown as ExtensionContext, footerData,
 		usage: () => usage,
 		profile: () => profile,
 		jobs: () => jobs,
@@ -179,7 +181,7 @@ function footerMemoFixture() {
 		counts: () => [reads, projections],
 		setLeaf: (value: string) => { leaf = value; },
 		spend: () => { entries[0]!.message.usage.cost.total += 1; },
-		setModelId: (value: string) => { modelId = value; },
+		setModelId: (value: string) => { model = { ...model, id: value }; },
 		setProfile: (value: string | undefined) => { profile = value; },
 		setBranch: (value: string | null) => { branch = value; },
 		setStatuses: (value: Map<string, string>) => { statuses = value; },
@@ -222,10 +224,20 @@ test("the footer status digest key notices every live input the model reads", ()
 		["session name", () => (f.ctx.sessionManager as { getSessionName(): string }).getSessionName = () => "renamed"],
 		["leaf", () => f.setLeaf("leaf-2")],
 	];
+	let previous = before;
 	for (const [name, mutate] of mutations) {
 		mutate();
-		assert.notEqual(f.memo.key(), before, `a moved ${name} changes the digest key`);
+		const current = f.memo.key();
+		assert.notEqual(current, previous, `a moved ${name} changes the digest key`);
+		previous = current;
 	}
+	// A branch or profile move rebuilds the model without rescanning statistics:
+	// the model object identity stays stable across those rebuilds.
+	const settled = f.memo.model();
+	const [reads, projections] = f.counts();
+	f.setBranch("release");
+	assert.notEqual(f.memo.model(), settled);
+	assert.deepEqual(f.counts(), [reads, projections]);
 });
 
 test("a moved leaf rebuilds the footer model with fresh statistics", () => {
