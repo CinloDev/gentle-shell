@@ -561,7 +561,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		};
 		return PresencePublisher.start({ profile: agentHome, sessionId, label: labelSource(), labelSource, activity: [] });
 	};
-	const publishActivity = () => {
+	const publishActivityNow = () => {
 		if (!sessions) return;
 		try {
 			if (!presence || presence.error) {
@@ -583,6 +583,34 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					scope: scopeCache.project(sessions.getCwd(), tasks, registered), state: stateCache.get(sessions) });
 			}
 		} catch { presence?.dispose(); presence = undefined; }
+	};
+	// Coalesced like requestRender: the first call publishes immediately so an
+	// idle→working transition or a resumed session never waits, and every call
+	// inside the window collapses into one trailing publish, so a burst of child
+	// deltas costs one publication instead of one per event.
+	let activityPublishQueued = false;
+	let activityPublishTrailing = false;
+	let cancelActivityPublish: (() => void) | undefined;
+	const resetActivityPublish = () => {
+		cancelActivityPublish?.();
+		cancelActivityPublish = undefined;
+		activityPublishQueued = false;
+		activityPublishTrailing = false;
+	};
+	const publishActivity = () => {
+		if (activityPublishQueued) {
+			activityPublishTrailing = true;
+			return;
+		}
+		publishActivityNow();
+		activityPublishQueued = true;
+		cancelActivityPublish = deps.schedule(() => {
+			cancelActivityPublish = undefined;
+			activityPublishQueued = false;
+			if (!activityPublishTrailing) return;
+			activityPublishTrailing = false;
+			publishActivityNow();
+		}, RENDER_COALESCE_MS);
 	};
 	const unsubscribeScope = pi.events.on(SESSION_WORKTREE_CHANGED, (event) => {
 		if ((event as { sessionId?: string } | undefined)?.sessionId !== sessions?.getSessionId()) return;
@@ -2415,6 +2443,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		if (preexisting && sessionId) void restoreSessionHistory(ctx, sessionId);
 		try {
 			presence = startPresence(ctx.sessionManager);
+			resetActivityPublish();
 			publishActivity();
 		} catch { presence = undefined; }
 		void startSessionTransport(ctx);
@@ -2458,6 +2487,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		rpcActivityPublisher?.stop();
 		rpcActivityPublisher = undefined;
 		cancelClock?.();
+		resetActivityPublish();
 		for (const view of overlays) { view.handleInput("q"); view.dispose(); }
 		overlays.clear();
 		sessions = undefined;
