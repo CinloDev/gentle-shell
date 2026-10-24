@@ -20,9 +20,10 @@ import { JOB_GLYPH, JOB_NOTICE_TYPE, jobDetails, jobNoticeText, monitorEventsTex
 import { createMonitorController, mergeMonitorBatches, type MonitorNotice } from "../lib/background-monitor.ts";
 import { JobsView } from "../lib/jobs-view.ts";
 import { JOBS_SIDEBAR_EVENT, JOBS_STATUS_KEY } from "../lib/jobs-sidebar-state.ts";
-import { Text, type TUI } from "@earendil-works/pi-tui";
+import { Text, type Component, type TUI } from "@earendil-works/pi-tui";
 import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
-import { VISUAL_SETTINGS_CHANGED } from "../lib/shell-sidebar.ts";
+import { sidebarPart, VISUAL_SETTINGS_CHANGED } from "../lib/shell-sidebar.ts";
+import { NativePointerRegion } from "../lib/native-pointer-region.ts";
 import { resolveVisualSettings } from "../lib/visual-customization-policy.ts";
 import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { createAgentMessageQueue, type PendingAgentMessage } from "../lib/agents-message-delivery.ts";
@@ -58,8 +59,8 @@ import { OrchestratorScopeCache, type RepositoryFact } from "../lib/orchestrator
 import { createRpcActivityPublisher, type RpcActivityPublisher } from "../lib/agents-rpc-publisher.ts";
 import { isInteractiveRpcHost } from "../lib/rpc-host.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
-import { AGENTS_GLYPH, renderAgentsCard, widgetExpiryMs, widgetRows } from "../lib/agents-widget.ts";
-import { CARD_TONE, renderCard } from "../lib/shell-card.ts";
+import { AGENTS_GLYPH, agentsCardTone, renderAgentsCard, widgetExpiryMs, widgetRows } from "../lib/agents-widget.ts";
+import { CARD_TONE, panelHeaderRow, renderCard } from "../lib/shell-card.ts";
 import { openInExternalEditor } from "./gentle-shell.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { resolveAgentHomeDirectory } from "../lib/agent-model-resolution.ts";
@@ -1597,21 +1598,74 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			host?.requestRender();
 		});
 		tickClock();
-		// Agents is not a rail part: the fullscreen sidebar only suppresses
-		// bottom components registered through sidebarPart, and this widget is
-		// the only Agents surface in every mode, so it stays a plain component.
+		// Agents follows Todos: the fullscreen rail shows it when the terminal is
+		// wide enough, and sidebarPart suppresses the above-editor copy only
+		// while the rail owns the host; narrower terminals keep the widget.
 		ui?.setWidget(AGENTS_WIDGET_KEY, (tui, theme) => {
 			host = tui;
 			sidebarTui = tui;
-			return {
-				render(width: number) {
-					if (!agentsVisible) return [];
-					const lines = renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: widgetRows(tui.terminal?.rows), viewKey });
-					return lines.length === 0 ? [] : [...lines, ""];
-				},
-				invalidate() {},
-			};
+			return sidebarPart(tui, "agents", agentsCard(tui, theme, false), agentsCard(tui, theme, true));
 		});
+	};
+
+	const toggleCollapsed = () => {
+		collapsed = !collapsed;
+		if (sidebarTui) invalidateSidebar(sidebarTui);
+		host?.requestRender();
+	};
+
+	// One surface of the Agents card. The rail is natively scrollable, so it
+	// lists every task; the above-editor widget keeps its row budget. Only the
+	// header row is the clickable collapse control, exactly like Todos.
+	const agentsCard = (tui: TUI, theme: Parameters<typeof renderAgentsCard>[1], rail: boolean): Component & { dispose(): void; digest(): string } => {
+		let hovered = false;
+		let headerRow = 0;
+		const card: Component = {
+			render(width: number) {
+				if (!agentsVisible) return [];
+				const tasks = visibleTasks();
+				const now = deps.now();
+				headerRow = panelHeaderRow(theme, width, agentsCardTone(tasks, now));
+				const lines = renderAgentsCard(tasks, theme, width, now, { collapsed, collapseKey, maxRows: rail ? undefined : widgetRows(tui.terminal?.rows), viewKey, collapseControl: true, hovered });
+				return lines.length === 0 || rail ? lines : [...lines, ""];
+			},
+			invalidate() {
+				hovered = false;
+			},
+		};
+		const region = new NativePointerRegion(card, {
+			onHover(event) {
+				const next = event.y === headerRow;
+				if (next === hovered) return { handled: true };
+				hovered = next;
+				return { handled: true, render: true };
+			},
+			onLeave() {
+				if (!hovered) return;
+				hovered = false;
+				host?.requestRender();
+			},
+			onClick(event) {
+				if (event.button !== "left" || event.y !== headerRow) return undefined;
+				toggleCollapsed();
+				return { handled: true, render: true };
+			},
+		});
+		return {
+			// The rail memo repaints a part only when its digest moves: task
+			// state, the local controls, and the elapsed clock (to the second)
+			// only while a task is still running, so an idle or finished card
+			// never forces a rail rebuild every second.
+			digest: () => {
+				const tasks = visibleTasks();
+				const clock = tasks.some((task) => !isFinished(task.status)) ? Math.floor(deps.now() / 1000) : 0;
+				return JSON.stringify([agentsVisible, collapsed, hovered, tui.terminal?.rows, clock, tasks.map((task) => [task.id, task.status, task.tokens, task.cost, task.label, task.lastStep, task.error])]);
+			},
+			render: (width) => region.render(width),
+			handleMouse: (event) => region.handleMouse(event),
+			invalidate: () => region.invalidate(),
+			dispose: () => region.dispose(),
+		};
 	};
 
 	const roots = (ctx: ExtensionContext) => ({ cwd: ctx.sessionManager.getCwd(), home: deps.home, agentHome });
@@ -2313,11 +2367,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	if (collapseKey) {
 		pi.registerShortcut(collapseKey as Parameters<ExtensionAPI["registerShortcut"]>[0], {
 			description: "Collapse or expand the agents card",
-			handler: async () => {
-				collapsed = !collapsed;
-				if (sidebarTui) invalidateSidebar(sidebarTui);
-				host?.requestRender();
-			},
+			handler: async () => toggleCollapsed(),
 		});
 	}
 
