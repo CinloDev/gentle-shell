@@ -13,7 +13,7 @@ import test, { after, afterEach, before, mock } from "node:test";
 import type { TestContext } from "node:test";
 import { generateUnifiedPatch, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
-import { visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sidebarState } from "../lib/shell-sidebar.ts";
 import { CHILD_PACKAGE_INJECTION_ENV, encodeChildPackageInjection } from "../lib/child-package-injection.ts";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, agentResultPreview, answerThroughUi, childContextExtensionPaths, completionText, createDefaultSessionTransport, legacySubagentsInstalled, PARENT_WAKE_GRACE_MS, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
@@ -243,7 +243,8 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 		const factory = widgets.get("gentle-agents");
 		return factory ? factory(tui, plainTheme).render(72).map(stripAnsi) : undefined;
 	};
-	return { ctx, widget, dialogs, overlays, customCompletions, customOptions };
+	const widgetComponent = () => widgets.get("gentle-agents")?.(tui, plainTheme) as Component | undefined;
+	return { ctx, widget, widgetComponent, dialogs, overlays, customCompletions, customOptions };
 }
 
 for (const scenario of ["background", "task", "append-failure", "overflow", "bytes", "replacement", "task-replacement", "unsafe-id", "no-transport"] as const) {
@@ -3629,7 +3630,7 @@ test("subagent_list_agents and subagent_run in task mode launch a child with the
 	assert.equal(args[args.indexOf("--tools") + 1], "read,grep,subagent_parent_message");
 	await tick();
 	assert.match(String(harness.children[0].written[1].message), /Map lib\/ and report every module\.\n\n## Context\nFocus on agents-\*\.ts/);
-	assert.match(widget()![0], /^╭─ ❀ Agents · 1 active ─+╮$/);
+	assert.match(widget()![0], /^╭─ ❀ Agents ▾ Collapse · 1 active ─+╮$/);
 	assert.match(widget()![1], /^│ ◐  explore  map lib modules +gpt-5\.6-terra · low · \d+s │$/);
 	harness.children[0].emit({ type: "tool_execution_start", toolCallId: "c", toolName: "grep", args: {} });
 	harness.children[0].emit({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 12_000, cost: { total: 0.09 } } } });
@@ -3679,7 +3680,7 @@ test("running subagent_result polls hide only their tool chrome, not the model r
 	assert.match(renderers.get("gentle-agents.result")!(sent[0].message, { expanded: true }, plainTheme).render(80).join("\n"), /Agent result.*All done\./s, "background completion card remains visible");
 });
 
-test("the Agents widget never registers a sidebar rail part and stays visible even while the fullscreen sidebar owns the host", async () => {
+test("the Agents card moves to the fullscreen rail like Todos and its header toggles collapse on left click", async () => {
 	const { pi, tools, fire } = fakePi();
 	const harness = deps();
 	gentleAgents(pi, {}, harness.deps);
@@ -3687,22 +3688,54 @@ test("the Agents widget never registers a sidebar rail part and stays visible ev
 	// (a host with no .terminal is already a passthrough); this is the host
 	// shape the fullscreen layout actually uses.
 	const terminalTui = { requestRender() {}, terminal: { columns: 160, rows: 40 } };
-	const { ctx, widget } = fakeContext(terminalTui);
+	const { ctx, widgetComponent } = fakeContext(terminalTui);
 	await fire("session_start", ctx);
 	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Map lib/", label: "map lib modules", mode: "background" }, undefined, undefined, ctx);
+	await tools.get("subagent_run")!.execute("c2", { agent: "explore", task: "Map tests/", label: "map test suites", mode: "background" }, undefined, undefined, ctx);
 	await tick();
 
-	// The factory only runs (and only then could register a rail part) once
-	// something actually renders the widget, exactly like the real host.
-	assert.match(widget()![1]!, /explore  map lib modules/);
-	const state = sidebarState(terminalTui as unknown as TUI);
-	assert.equal(state.parts.has("agents"), false, "Agents never claims a rail slot; the above-editor widget is its only surface");
+	const component = widgetComponent()!;
+	const bottom = component.render(72).map(stripAnsi);
+	assert.match(bottom[0]!, /Agents ▾ Collapse/, "the header carries the same clickable control as Todos");
+	assert.match(bottom.join("\n"), /explore  map lib modules/);
+	assert.match(bottom.join("\n"), /explore  map test suites/);
 
-	// Simulate the fullscreen sidebar actively owning the host, the same
-	// condition sidebarPart used to suppress a registered bottom widget under.
+	const state = sidebarState(terminalTui as unknown as TUI);
+	const rail = state.parts.get("agents");
+	assert.ok(rail, "Agents claims the rail slot, so a wide fullscreen terminal shows it at the right");
+	assert.equal(rail.render(46).filter((line) => /explore/.test(stripAnsi(line))).length, 2, "the rail lists every task");
+	assert.ok(rail.digest?.(), "the rail declares a digest so its clock and counters repaint");
+
+	// While the fullscreen sidebar owns the host, the bottom copy steps aside.
 	state.active = true;
 	state.ownsHost = () => true;
-	assert.match(widget()![1]!, /explore  map lib modules/, "the widget keeps rendering regardless of sidebar ownership");
+	assert.deepEqual(component.render(72), [], "the bottom card paints nothing while the rail shows it");
+	state.active = false;
+
+	const event = (type: "press" | "click", button: "left" | "right", y = 0) => ({
+		type, button, x: 1, y, screenX: 1, screenY: y, width: 72, height: bottom.length, shift: false, alt: false, ctrl: false,
+	});
+	assert.equal(component.handleMouse?.(event("click", "right")), undefined);
+	assert.equal(component.handleMouse?.(event("click", "left", 1)), undefined);
+	assert.match(stripAnsi(component.render(72)[0]!), /Agents ▾ Collapse/, "only a left click on the header toggles");
+	assert.equal(component.handleMouse?.(event("click", "left"))?.handled, true);
+	const collapsed = component.render(72).map(stripAnsi);
+	assert.match(collapsed[0]!, /Agents ▸ Expand/);
+	assert.doesNotMatch(collapsed.join("\n"), /map test suites/, "the collapsed card keeps one row");
+	assert.equal(rail.render(46).filter((line) => /explore/.test(stripAnsi(line))).length, 1, "both surfaces share the collapsed state");
+});
+
+test("the Agents rail digest stays stable while no task is running, so an idle card never rebuilds the rail every second", async () => {
+	const { pi, fire } = fakePi();
+	gentleAgents(pi, {}, deps().deps);
+	const terminalTui = { requestRender() {}, terminal: { columns: 160, rows: 40 } };
+	const { ctx, widgetComponent } = fakeContext(terminalTui);
+	await fire("session_start", ctx);
+	widgetComponent();
+	const rail = sidebarState(terminalTui as unknown as TUI).parts.get("agents")!;
+	// The harness clock advances on every read, so three digests span more than a second.
+	const digests = [rail.digest!(), rail.digest!(), rail.digest!()];
+	assert.deepEqual(new Set(digests).size, 1, "the clock only enters the digest while a task runs");
 });
 
 test("background runs return at once; status, result, send_message, cancel, and continue follow the task", async () => {
