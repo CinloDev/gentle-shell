@@ -561,7 +561,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		};
 		return PresencePublisher.start({ profile: agentHome, sessionId, label: labelSource(), labelSource, activity: [] });
 	};
-	const publishActivityNow = () => {
+	const publishActivityNow = (deferred = false) => {
 		if (!sessions) return;
 		try {
 			if (!presence || presence.error) {
@@ -580,7 +580,12 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					return data?.sessionId === activeSessionId() && typeof data.root === "string" && typeof data.evidence === "string" ? [data.root] : [];
 				});
 				presence?.updateDiscovery(transport.listener.record, { workspace: sessions.getCwd(), tasks, registered,
-					scope: scopeCache.project(sessions.getCwd(), tasks, registered), state: stateCache.get(sessions) });
+					// A deferred (render-cadence trailing) publish must never resolve Git:
+					// its timer can land while a peer metadata query is being served, and
+					// that contract adds no caller Git probes. It reuses the snapshot the
+					// last event-time publication projected; the next event-time publish
+					// refreshes the facts.
+					scope: deferred ? scopeCache.cachedScope() : scopeCache.project(sessions.getCwd(), tasks, registered), state: stateCache.get(sessions) });
 			}
 		} catch { presence?.dispose(); presence = undefined; }
 	};
@@ -597,6 +602,13 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		activityPublishQueued = false;
 		activityPublishTrailing = false;
 	};
+	const flushDeferredPublish = () => {
+		cancelActivityPublish = undefined;
+		activityPublishQueued = false;
+		if (!activityPublishTrailing) return;
+		activityPublishTrailing = false;
+		publishActivityNow(true);
+	};
 	const publishActivity = () => {
 		if (activityPublishQueued) {
 			activityPublishTrailing = true;
@@ -604,18 +616,23 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		}
 		publishActivityNow();
 		activityPublishQueued = true;
-		cancelActivityPublish = deps.schedule(() => {
-			cancelActivityPublish = undefined;
-			activityPublishQueued = false;
-			if (!activityPublishTrailing) return;
-			activityPublishTrailing = false;
-			publishActivityNow();
-		}, RENDER_COALESCE_MS);
+		cancelActivityPublish = deps.schedule(flushDeferredPublish, RENDER_COALESCE_MS);
+	};
+	// Discrete semantic events publish immediately so peers and readers see them
+	// promptly (a consult binds to the published snapshot); the coalescing window
+	// stays armed so a child-delta burst that follows still collapses into one
+	// trailing publish.
+	const publishActivityPrompt = () => {
+		publishActivityNow();
+		if (!activityPublishQueued) {
+			activityPublishQueued = true;
+			cancelActivityPublish = deps.schedule(flushDeferredPublish, RENDER_COALESCE_MS);
+		}
 	};
 	const unsubscribeScope = pi.events.on(SESSION_WORKTREE_CHANGED, (event) => {
 		if ((event as { sessionId?: string } | undefined)?.sessionId !== sessions?.getSessionId()) return;
 		scopeCache.clear();
-		publishActivity();
+		publishActivityPrompt();
 	});
 	// The todo list is the session's progress: publish it for peers so the model
 	// spends no turn on orchestrator_session_id. Merged into the owner's curated
@@ -764,7 +781,11 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					await closeStartupTransport();
 					return;
 				}
-				publishActivity();
+				// Publish immediately, not on the coalescing trailing edge: this is the
+				// session's first discovery publication, and a peer metadata query binds
+				// to the activation only through it — a 400 ms lag here makes a prompt
+				// consult read publication-unknown-or-stale.
+				publishActivityPrompt();
 			} catch {
 				if (activeSessionTransport?.generation === generation) activeSessionTransport = undefined;
 				await closeStartupTransport();
@@ -1893,7 +1914,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		if (launched && foreignRequest) foreignTasks.set(task.id, foreignRequest);
 		ownedTaskIds.add(task.id);
 		publishWork?.(task.id);
-		publishActivity(); // Admission's summary notification precedes runtime ownership.
+		publishActivityPrompt(); // Admission's summary notification precedes runtime ownership.
 		store.subscribe(task.id, () => { publishActivity(); requestRender(); });
 		if (request.mode === AGENT_MODE.BACKGROUND) return text(`Started ${task.agent} in the background as task ${task.id}. Retain that id; completion is pushed automatically. Never sleep or periodically poll subagent_status/subagent_result for completion or cache maintenance. Inspect status only at a real orchestration decision boundary; never relaunch equivalent queued/running work.`, taskDetails(task));
 		// A tool call aborted by the host (a human interrupting the turn, a timeout)
@@ -2006,7 +2027,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			if (declared && !ctx.sessionManager.getSessionName?.()) pi.setSessionName(declared);
 			const alias = sanitizeDisplayLabel(ctx.sessionManager.getSessionName?.() ?? "");
 			const aliases = stateCache.get(ctx.sessionManager)?.aliases;
-			if (state !== undefined || declared) publishActivity();
+			if (state !== undefined || declared) publishActivityPrompt();
 			presence?.refreshLabel();
 			return text(`Active session ID: ${transport.sessionId}\nCurrent alias (CURRENT TASK): ${aliases?.currentAlias ?? "unknown"}\nInitial alias (FIRST TASK): ${aliases?.initialAlias ?? "unknown"}\nSession name: ${alias || "unnamed"}`,
 				{ gentleAgents: { senderSessionId: transport.sessionId, alias, sessionName: alias, initialAlias: aliases?.initialAlias ?? null, currentAlias: aliases?.currentAlias ?? null } });
@@ -2401,7 +2422,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		helperPermission.clear();
 		if (sessions !== ctx.sessionManager) return;
 		stateCache.load(ctx.sessionManager);
-		publishActivity();
+		publishActivityPrompt();
 	});
 	pi.on("session_start", async (event, ctx) => {
 		// gentle-shell#1064 slice 3b-ii: a parent session that has no explicit
@@ -2444,7 +2465,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		try {
 			presence = startPresence(ctx.sessionManager);
 			resetActivityPublish();
-			publishActivity();
+			publishActivityPrompt();
 		} catch { presence = undefined; }
 		void startSessionTransport(ctx);
 		// The desktop app's own pi process: publish live subagent state through
