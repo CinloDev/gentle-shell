@@ -17,7 +17,7 @@ import { visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@ear
 import { sidebarState } from "../lib/shell-sidebar.ts";
 import { CHILD_PACKAGE_INJECTION_ENV, encodeChildPackageInjection } from "../lib/child-package-injection.ts";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, agentResultPreview, answerThroughUi, childContextExtensionPaths, completionText, createDefaultSessionTransport, legacySubagentsInstalled, PARENT_WAKE_GRACE_MS, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
-import { ActiveSessionClient, ActiveSessionListener, SessionPresenceError, SessionPresenceRegistry } from "../lib/agents-session-transport.ts";
+import { ActiveSessionClient, ActiveSessionListener, SessionPresenceError, SessionPresenceRegistry, type PresenceRecord } from "../lib/agents-session-transport.ts";
 import { WindowsActiveSessionClient, WindowsActiveSessionListener } from "../lib/windows-session-transport.ts";
 import { historyDir, loadHistory, saveTask } from "../lib/agents-history.ts";
 import { STALE_COMPLETION_MS } from "../lib/agents-completion-delivery.ts";
@@ -1416,6 +1416,152 @@ test("live-only extension instances discover same-profile peers across cwd bound
 	panel.overlay.handleInput("q");
 	peerPanel.overlay.handleInput("q");
 	await Promise.all([panel.opened, peerPanel.opened]);
+});
+
+test("rapid child deltas coalesce presence publication to a leading publish plus one trailing publish", async (t) => {
+	const profile = liveProfile("live-coalesce-profile");
+	const h = fakePi();
+	const runtime = deps();
+	const timers = recordTimers(runtime.deps);
+	const { ctx } = fakeContext();
+	Object.assign(ctx.sessionManager, {
+		getSessionId: () => "coalesce-live",
+		getSessionName: () => "coalesce-live",
+		getCwd: () => join(realpathSync(root), "coalesce-live"),
+	});
+	gentleAgents(h.pi, {}, { ...runtime.deps, agentHome: profile });
+	const update = t.mock.method(PresencePublisher.prototype, "update");
+	await h.fire("session_start", ctx);
+	timers.run(400); // expire session_start's own publication window
+	update.mock.resetCalls(); // session_start's own publication is out of scope
+
+	const launch = await h.tools.get("subagent_run")!.execute("coalesce", { agent: "local", task: "Stream", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const taskId = (launch.details.gentleAgents as { taskId: string }).taskId;
+	assert.ok(taskId);
+	assert.equal(runtime.children.length, 1);
+	// The admission burst publishes its discrete semantic events immediately:
+	// the admission itself plus the child's worktree registration. Per-delta
+	// events below still collapse into one trailing publish.
+	assert.equal(update.mock.callCount(), 2, "the admission burst publishes its semantic events on the leading edge");
+	update.mock.resetCalls();
+
+	for (let delta = 0; delta < 20; delta++) {
+		runtime.children[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `delta ${delta}` } });
+	}
+	assert.equal(update.mock.callCount(), 0, "per-delta events must not publish while the coalescing window is open");
+
+	timers.run(400);
+	assert.equal(update.mock.callCount(), 1, "exactly one trailing publish after the burst");
+	update.mock.resetCalls();
+
+	// After the window closes, a new burst publishes on the leading edge again.
+	runtime.children[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "after window" } });
+	assert.equal(update.mock.callCount(), 1, "a call after the window publishes immediately again");
+});
+
+test("the trailing publication reuses cached scope facts: a served metadata query sees no Git probes", async (t) => {
+	// gentle-shell#2522 regression: the coalesced trailing publish ran while a
+	// peer metadata query (orchestrator_consult/orchestrator_list) was being
+	// served, and its scope projection cache-missed into a synchronous Git
+	// resolve. A metadata query adds no caller Git probes, so the trailing
+	// publication reuses the snapshot the last event-time publish projected —
+	// never probing, never dropping — until an event-time publish refreshes.
+	const profile = liveProfile("live-coalesce-scope-profile");
+	const h = fakePi();
+	const runtime = deps();
+	const timers = recordTimers(runtime.deps);
+	let releaseActivations: () => void = () => {};
+	// A recorded listener makes publishActivityNow project the discovery scope;
+	// the registry holds the consult's activation read until the test releases it.
+	runtime.deps.sessionTransport = {
+		...inertSessionTransport,
+		createRegistry: async () => ({ list: async () => [], listActivations: async () => await new Promise<readonly PresenceRecord[]>(resolve => { releaseActivations = () => resolve([]); }) }),
+		createListener: registry => ({ registry, record: { version: 1, sessionId: "coalesce-scope", endpoint: "/fixture/coalesce-scope", createdAt: 1 }, start: async () => {}, close: async () => {} }),
+	};
+	const probes: string[] = [];
+	// Count only scope-projection probes: admission and launch also resolve
+	// worktrees outside the projection, and only the projection can leak into a
+	// peer metadata query.
+	const realProject = OrchestratorScopeCache.prototype.project;
+	let projecting = false;
+	OrchestratorScopeCache.prototype.project = function (...args: Parameters<typeof realProject>) {
+		projecting = true;
+		try { return realProject.apply(this, args); } finally { projecting = false; }
+	};
+	t.after(() => { OrchestratorScopeCache.prototype.project = realProject; });
+	runtime.deps.resolveWorktree = (path, base) => {
+		if (projecting) probes.push(resolve(base, path));
+		return { root: resolve(base, path), commonDir: "/fixture/common" };
+	};
+	const { ctx } = fakeContext();
+	Object.assign(ctx.sessionManager, {
+		getSessionId: () => "coalesce-scope",
+		getSessionName: () => "coalesce-scope",
+		getCwd: () => join(realpathSync(root), "coalesce-scope"),
+	});
+	gentleAgents(h.pi, {}, { ...runtime.deps, agentHome: profile });
+	const update = t.mock.method(PresencePublisher.prototype, "update");
+	await h.fire("session_start", ctx);
+	assert.ok(probes.length > 0, "the semantic startup publish resolves its facts eagerly");
+	// Wait for the asynchronous session transport to bind its record without
+	// publishing; the metadata tool answers "not ready" until it has.
+	for (let i = 0; i < 100; i++) {
+		const result = await h.tools.get("orchestrator_session_id")!.execute("id", {}, undefined, undefined, ctx);
+		if ((result.details?.gentleAgents as { senderSessionId?: string } | undefined)?.senderSessionId) break;
+		assert.ok(i < 99, "session transport binds within bounded ticks");
+		await tick();
+	}
+	timers.run(400); // expire startup's own publication window
+	update.mock.resetCalls();
+	probes.length = 0;
+
+	const launch = await h.tools.get("subagent_run")!.execute("coalesce", { agent: "local", task: "Stream", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const taskId = (launch.details.gentleAgents as { taskId: string }).taskId;
+	assert.ok(taskId);
+	assert.ok(probes.length > 0, "the semantic admission publish resolves new membership facts eagerly");
+	// Let a settle publish absorb any late membership change before the measured window.
+	timers.run(400);
+	runtime.children[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "settle" } });
+	await tick();
+	timers.run(400);
+	update.mock.resetCalls();
+	probes.length = 0;
+
+	runtime.children[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "delta" } });
+	assert.equal(update.mock.callCount(), 1, "the delta publishes on the leading edge");
+	assert.equal(probes.length, 0, "an unchanged membership never re-resolves facts");
+
+	// Membership changes mid-window (the child settles, leaving the coalesced
+	// path to queue the publish) while a peer metadata query starts being
+	// served — the exact collision of the regression.
+	runtime.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }] });
+	runtime.children[0].emit({ type: "agent_settled" });
+	for (let i = 0; i < 100; i++) {
+		const status = await h.tools.get("subagent_status")!.execute("status", { task_id: taskId }, undefined, undefined, ctx);
+		if (/completed/.test(status.content[0]?.text ?? "")) break;
+		assert.ok(i < 99, "child completes within bounded ticks");
+		await tick();
+	}
+	assert.equal(update.mock.callCount(), 1, "the membership change stays behind the trailing edge");
+	assert.equal(probes.length, 0, "queued events must not publish");
+	const pendingConsult = h.tools.get("orchestrator_consult")!.execute("consult", { recipient_session_id: "peer123" }, undefined, undefined, ctx);
+	await tick(); // the consult suspends on its activation read, holding the window open
+
+	timers.run(400); // the trailing publish comes due while the query is being served
+	assert.equal(update.mock.callCount(), 2, "the trailing publication still runs, never dropped");
+	assert.equal(probes.length, 0, "a served metadata query adds no caller Git probes");
+
+	releaseActivations();
+	await pendingConsult;
+	assert.equal(probes.length, 0, "the whole served query stayed probe-free");
+
+	// After the window, an event-time publish refreshes the facts the trailing
+	// reuse deferred: the changed membership resolves eagerly again.
+	h.pi.events.emit(SESSION_WORKTREE_CHANGED, { sessionId: "coalesce-scope" });
+	assert.ok(probes.length > 0, "an event-time publish refreshes the deferred facts");
+	assert.equal(update.mock.callCount(), 3, "the refresh publishes immediately");
 });
 
 test("manual agents command warns once in RPC mode and stays quiet without UI", async (t) => {
@@ -4478,6 +4624,7 @@ test("session transport startup failure cleans the constructed Windows-capable t
 
 test("registered task aliases persist independently of human names and curated state", async () => {
 	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const timers = recordTimers(runtime.deps);
 	const profile = realpathSync(mkdtempSync(join(root, "aliases-runtime-")));
 	runtime.deps.agentHome = profile;
 	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/aliases.sock", createdAt: 1 };
@@ -4494,8 +4641,15 @@ test("registered task aliases persist independently of human names and curated s
 	gentleAgents(h.pi, {}, runtime.deps);
 	await h.fire("session_start", ctx);
 	const tool = h.tools.get("orchestrator_session_id")!;
-	const declare = (params: unknown = {}, context = ctx) => tool.execute("aliases", params, undefined, undefined, context);
-	const aliases = () => readDiscovery(profile, listPresence(profile).entries[0])?.aliases;
+	const declare = async (params: unknown = {}, context = ctx) => {
+		const result = await tool.execute("aliases", params, undefined, undefined, context);
+		timers.run(400); // the activity publication is coalesced; close the window
+		return result;
+	};
+	const aliases = () => {
+		timers.run(400);
+		return readDiscovery(profile, listPresence(profile).entries[0])?.aliases;
+	};
 	const first = await declare({ subject: "Task A", state: { progress: "Starting", work: { area: "Auth" } } });
 	const initial = h.entries.at(-1)!;
 	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task A" });
@@ -4545,6 +4699,7 @@ test("registered task aliases persist independently of human names and curated s
 test("registered session identity declares subjects and refreshes canonical idle renames", async (t) => {
 	const h = fakePi();
 	const runtime = deps();
+	const timers = recordTimers(runtime.deps);
 	const profile = realpathSync(mkdtempSync(join(root, "subject-runtime-")));
 	runtime.deps.agentHome = profile;
 	let ready = false;
@@ -4572,7 +4727,11 @@ test("registered session identity declares subjects and refreshes canonical idle
 	await h.fire("session_start", ctx);
 	await eventually(() => ready, "subject transport ready");
 	const tool = h.tools.get("orchestrator_session_id")!;
-	const declare = (subject?: unknown, context = ctx) => tool.execute("id", { subject }, undefined, undefined, context);
+	const declare = async (subject?: unknown, context = ctx) => {
+		const result = await tool.execute("id", { subject }, undefined, undefined, context);
+		timers.run(400); // the activity publication is coalesced; close the window
+		return result;
+	};
 	const initialWrites = h.entries.length;
 	await assert.rejects(() => tool.execute("invalid-work", { subject: "No effect", state: { work: { topic: "Login" } } }, undefined, undefined, ctx), /invalid/);
 	assert.equal(name, "");
@@ -4590,6 +4749,7 @@ test("registered session identity declares subjects and refreshes canonical idle
 		{ kind: "issue", repository: "github.com/Owner/Repo", id: "12" },
 	] };
 	await tool.execute("publish", { state: { objective: "Verify auth", decisions: "Advisory only", work } }, undefined, undefined, ctx);
+	timers.run(400);
 	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.state?.state?.objective, "Verify auth");
 	assert.deepEqual(readDiscovery(profile, listPresence(profile).entries[0])?.state?.state?.work, work);
 	const published = h.entries.at(-1)!;
@@ -4611,6 +4771,7 @@ test("registered session identity declares subjects and refreshes canonical idle
 	assert.equal(readDiscovery(profile, renamed)?.scope?.host.resolvedAt, readDiscovery(profile, before)?.scope?.host.resolvedAt);
 	registrations.push({ ...registrations[0], data: { ...registrations[0].data, root: join(cwd, "registered") } });
 	h.pi.events.emit(SESSION_WORKTREE_CHANGED, { sessionId: "s1" });
+	timers.run(400);
 	assert.deepEqual(readDiscovery(profile, listPresence(profile).entries[0])?.scope?.registered.map(fact => fact.root), [cwd, join(cwd, "registered")]);
 	await declare("Do not overwrite");
 	assert.deepEqual(names, ["Fix auth"]);
@@ -4621,10 +4782,12 @@ test("registered session identity declares subjects and refreshes canonical idle
 	await declare("😀".repeat(130));
 	assert.equal(Array.from(name).length, 120);
 	await tool.execute("withdraw", { state: null }, undefined, undefined, ctx);
+	timers.run(400);
 	await h.fire("session_start", ctx, { reason: "reload" });
 	await eventually(() => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state === null, "withdrawal reload");
 	Object.assign(ctx.sessionManager, { getBranch: () => [published] });
 	await h.fire("session_tree", ctx);
+	timers.run(400);
 	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.state?.state?.objective, "Verify auth");
 	const sameId = fakeContext().ctx;
 	Object.assign(sameId.sessionManager, { getSessionName: () => name, getBranch: () => [] });
@@ -4633,6 +4796,7 @@ test("registered session identity declares subjects and refreshes canonical idle
 	const replacement = fakeContext().ctx;
 	Object.assign(replacement.sessionManager, { getSessionId: () => "s2", getSessionName: () => "Replacement" });
 	await h.fire("session_start", replacement, { reason: "new" });
+	timers.run(400); // the post-transport-start publication is coalesced; close the window
 	heartbeats[0]();
 	assert.equal(listPresence(profile).entries.length, 1);
 	assert.equal(listPresence(profile).entries[0].label, "Replacement");
@@ -6771,6 +6935,7 @@ test("a human stop of a monitor from /gentle:jobs delivers its pending lines, th
 // orchestrator_session_id, and never replaces the owner's curated fields.
 test("todo progress publishes merged into the owner's curated state, only for this session", async () => {
 	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const timers = recordTimers(runtime.deps);
 	const profile = realpathSync(mkdtempSync(join(root, "todo-progress-")));
 	runtime.deps.agentHome = profile;
 	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/todo-progress.sock", createdAt: 1 };
@@ -6784,7 +6949,10 @@ test("todo progress publishes merged into the owner's curated state, only for th
 	Object.assign(ctx.sessionManager, { getSessionName: () => "", getBranch: () => h.entries });
 	gentleAgents(h.pi, {}, runtime.deps);
 	await h.fire("session_start", ctx);
-	const published = () => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	const published = () => {
+		timers.run(400); // the activity publication is coalesced; close the window
+		return readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	};
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 0, total: 2, current: "Write parser" });
 	// PR #2290 review: a todo title is private work text; peers see counts only.
 	assert.deepEqual(published(), { progress: "0/2 done" }, "progress publishes before any curated state, without the todo title");
@@ -6812,6 +6980,7 @@ test("todo progress publishes merged into the owner's curated state, only for th
 // progress line, so peers lost it until the next todo write.
 test("an owner publication without progress keeps the automatic progress; explicit progress and null still win", async () => {
 	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const timers = recordTimers(runtime.deps);
 	const profile = realpathSync(mkdtempSync(join(root, "todo-progress-merge-")));
 	runtime.deps.agentHome = profile;
 	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/todo-progress-merge.sock", createdAt: 1 };
@@ -6825,7 +6994,10 @@ test("an owner publication without progress keeps the automatic progress; explic
 	Object.assign(ctx.sessionManager, { getSessionName: () => "", getBranch: () => h.entries });
 	gentleAgents(h.pi, {}, runtime.deps);
 	await h.fire("session_start", ctx);
-	const published = () => readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	const published = () => {
+		timers.run(400); // the activity publication is coalesced; close the window
+		return readDiscovery(profile, listPresence(profile).entries[0])?.state?.state;
+	};
 	const own = (state: unknown) => h.tools.get("orchestrator_session_id")!.execute("own", { state }, undefined, undefined, ctx);
 	h.pi.events.emit(TODO_PROGRESS_EVENT, { sessionId: "s1", done: 1, total: 3, current: "Parser" });
 	await own({ objective: "Ship the ledger" });
