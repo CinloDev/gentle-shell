@@ -110,7 +110,7 @@ interface ModeIdentity {
 }
 /** UI/slash authoring only. Defaults are read from the dedicated trusted user store. */
 export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessEnv,
-	options: { onChange?: () => void } = {}): YoloSessionController {
+	options: { onChange?: () => void; resolveIdentity?: typeof resolveCanonicalGitRepositoryIdentity } = {}): YoloSessionController {
 	const store = { gentlePiConfigHome: gentlePiConfigHome(env) };
 	let generation = 0;
 	let ownerGeneration = 0;
@@ -121,6 +121,11 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	const seen = new WeakMap<object, Set<string>>();
 	const observers = new Set<() => void>();
 	const pendingCaptures = new Set<{ manager: ModeIdentity["manager"]; id: string }>();
+	// Captured identity is pure per (session binding, cwd). A generation bump
+	// (any changed()) or a cwd change invalidates it, so a mode answer is never stale.
+	let capturedMode: (ModeIdentity & { cwd: string; generation: number }) | undefined;
+	// Rendered strings last published for each context; identical repaints are skipped.
+	const published = new WeakMap<ExtensionContext, { yolo: string | undefined; modeText: string }>();
 	const primary = () => env.GENTLE_PI_AGENTS_CHILD !== "1";
 	const interactive = (ctx: ExtensionContext): boolean => {
 		if (!primary() || !ctx.hasUI) return false;
@@ -139,9 +144,14 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	};
 	const publish = (ctx: ExtensionContext): void => {
 		const yolo = liveMode === "yolo" ? YOLO_STATUS_TEXT : liveMode === "super-yolo" ? SUPER_YOLO_STATUS_TEXT : undefined;
-		try { ctx.ui.setStatus(YOLO_STATUS_KEY, yolo); } catch { /* display only */ }
-		try { ctx.ui.setWidget(YOLO_STATUS_KEY, yolo ? [yolo] : undefined); } catch { /* display only */ }
-		try { ctx.ui.setStatus(MODE_STATUS_KEY, `Permissions: ${liveMode.toUpperCase()}`); } catch { /* display only */ }
+		const modeText = `Permissions: ${liveMode.toUpperCase()}`;
+		const previous = published.get(ctx);
+		if (previous && previous.yolo === yolo && previous.modeText === modeText) return;
+		let painted = true;
+		try { ctx.ui.setStatus(YOLO_STATUS_KEY, yolo); } catch { painted = false; /* display only */ }
+		try { ctx.ui.setWidget(YOLO_STATUS_KEY, yolo ? [yolo] : undefined); } catch { painted = false; /* display only */ }
+		try { ctx.ui.setStatus(MODE_STATUS_KEY, modeText); } catch { painted = false; /* display only */ }
+		if (painted) published.set(ctx, { yolo, modeText });
 	};
 	const changed = (ctx: ExtensionContext): void => {
 		generation += 1; publish(ctx);
@@ -171,7 +181,7 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 		try {
 			const canonical = await realpath(cwd);
 			if (!current()) return undefined;
-			const clone = await resolveCanonicalGitRepositoryIdentity(canonical);
+			const clone = await (options.resolveIdentity ?? resolveCanonicalGitRepositoryIdentity)(canonical);
 			if (!current()) return undefined;
 			return { ...scope, workspace: clone ?? `cwd:${canonical}` };
 		} catch { return undefined; }
@@ -179,9 +189,15 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	};
 	const defaultMode = (): PermissionMode => resolvePermissionModePolicy(store).mode;
 	const mode = async (ctx: ExtensionContext): Promise<PermissionMode> => {
-		const epoch = generation;
-		const identity = await capture(ctx);
-		if (epoch !== generation) return "normal";
+		const scope = session(ctx);
+		let identity: ModeIdentity | undefined;
+		if (scope && capturedMode && capturedMode.generation === generation &&
+			capturedMode.manager === scope.manager && capturedMode.id === scope.id && capturedMode.cwd === ctx.cwd) identity = capturedMode;
+		if (!identity) {
+			const epoch = generation;
+			identity = await capture(ctx);
+			if (epoch !== generation) return "normal";
+		}
 		if (binding && (!identity || binding.manager !== identity.manager || binding.id !== identity.id ||
 			binding.workspace !== identity.workspace || (interactiveGrant && !interactive(ctx)))) {
 			binding = undefined; liveMode = "normal"; interactiveGrant = false; changed(ctx);
@@ -191,13 +207,16 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 			remember(identity); binding = identity;
 			if (fresh) { liveMode = defaultMode(); interactiveGrant = false; changed(ctx); }
 		}
+		// Record after the binding pass: internal changed() bumps above must not strand
+		// a cache entry stamped with a superseded generation.
+		if (identity && scope) capturedMode = { ...identity, cwd: ctx.cwd, generation };
 		publish(ctx);
 		return identity && binding ? liveMode : "normal";
 	};
 	const active = async (ctx: ExtensionContext): Promise<boolean> => await mode(ctx) === "yolo";
 	const superActive = async (ctx: ExtensionContext): Promise<boolean> => await mode(ctx) === "super-yolo";
 	const reset = (ctx: ExtensionContext): void => {
-		ownerGeneration += 1;
+		ownerGeneration += 1; capturedMode = undefined;
 		// Initial session_start remains fresh; shutdown/reload of an observed session revokes.
 		if (binding) remember(binding);
 		const scope = session(ctx);
