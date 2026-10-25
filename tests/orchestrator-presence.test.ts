@@ -22,7 +22,7 @@ function fixture(t: test.TestContext) {
 		if (fs.existsSync(root) && !fs.lstatSync(root).isSymbolicLink()) {
 			for (const name of fs.readdirSync(root)) {
 				const path = join(root, name);
-				if (["tasks", "presence"].includes(name) && fs.lstatSync(path).isDirectory()) {
+				if (["tasks", "presence", "catalog"].includes(name) && fs.lstatSync(path).isDirectory()) {
 					for (const file of fs.readdirSync(path)) fs.unlinkSync(join(path, file));
 					fs.rmdirSync(path);
 				} else fs.unlinkSync(path);
@@ -135,6 +135,23 @@ test("heartbeat path validations never overlap", async (t) => {
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	assert.equal(chains, 2, "the next heartbeat validates again");
 	assert.equal(pub.error, undefined);
+});
+
+test("first publication lands immediately after start() with no heartbeat wait", (t) => {
+	const profile = fixture(t);
+	const pub = publisher(t, profile);
+	// The first updateDiscovery lands in the same tick: no heartbeat may be
+	// required for the first header, discovery, or catalog publication.
+	pub.updateDiscovery({ sessionId: "same session", endpoint: "/fixture/first.sock", createdAt: 1 },
+		{ workspace: "/repo", tasks: [{ id: "child", label: "Check auth", status: "waiting", cwd: "/repo-child" }] });
+	const header = listPresence(profile).entries[0];
+	assert.equal(header.label, "Workspace");
+	assert.equal(presence.readDiscovery(profile, header)?.workspace, "/repo");
+	assert.equal(presence.readDiscovery(profile, header)?.tasks[0].id, "child");
+	const catalog = JSON.parse(fs.readFileSync(
+		join(profile, "gentle-agents", "catalog", `${header.sessionHash}.${header.incarnation}.json`), "utf8"));
+	assert.equal(catalog.schema, 1);
+	assert.deepEqual(catalog.catalog.tasks.map((row: { id: string }) => row.id), ["child"]);
 });
 
 function rows(text = "full retained output") {

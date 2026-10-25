@@ -437,9 +437,17 @@ export class PresencePublisher {
 			&& ((stat.mode & (privateMode ? 0o077 : 0o022)) !== 0 || stat.uid !== process.getuid?.()))) throw new Error("unsafe-directory");
 	}
 	private write(kind: "header" | "activity" | "discovery" | "catalog", bytes: string) {
-		// A cold or failed cache skips this tick; the next heartbeat revalidates.
+		// A cold cache validates synchronously exactly once for that path — the same
+		// rootFor() validation the old per-write path performed — then caches and
+		// writes, so the first publication after a cold start is never deferred to a
+		// heartbeat. A failed validation (vanished or unsafe tree) is the only skip
+		// path; the heartbeat's async refresh re-warms the cache once the tree returns.
 		const root = this.rootPath(kind);
-		if (!this.validRoots.has(root)) return;
+		if (!this.validRoots.has(root)) {
+			try { rootFor(this.profile, kind === "catalog", kind === "catalog"); }
+			catch { return; }
+			this.validRoots.add(root);
+		}
 		const name = kind === "catalog" ? `${this.target.sessionHash}.${this.target.incarnation}.json` : filename(this.target, kind);
 		let identity: { dev: number; ino: number };
 		try { identity = atomicWrite(root, name, bytes); }
