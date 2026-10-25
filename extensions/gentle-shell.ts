@@ -12,7 +12,7 @@ import { resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles
 import * as os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { buildShellHeaderModel, renderShellBar, renderShellBelowInputFloat, renderShellBottomOnlyBar, renderShellHeaderChrome, renderShellSidebarBar, keepNativeWorkingRow, shellEnabled, shellHeaderUsageHit, shellJobsCount, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
-import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, WorktreeChangesTracker, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
+import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, WorktreeChangesTracker, changesDigest, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, worktreeGitEnvironment, type WorktreeResolver, type WorktreeIdentity } from "../lib/session-worktree-registry.ts";
@@ -1537,8 +1537,11 @@ function changesPollMs(env: NodeJS.ProcessEnv): number {
 const USAGE_FETCH_TIMEOUT_DEFAULT_MS = 10_000;
 const usageFetchTimeoutMs = (env: NodeJS.ProcessEnv): number => positiveMs(env.GENTLE_PI_SHELL_USAGE_TIMEOUT_MS, USAGE_FETCH_TIMEOUT_DEFAULT_MS);
 
+// The footer memo reads this every keystroke: tracker models store the
+// digest once per scan (lib/shell-changes.ts), so this is O(1); hand-built
+// models without a stored digest fall back to computing it here.
 function changesFingerprint(model: ChangesModel): string {
-	return model.files.map((file) => `${file.path}:${file.status}:${file.added}:${file.deleted}:${file.diffRevision ?? ""}:${file.countsUnavailable ?? ""}`).join("|");
+	return model.digest ?? changesDigest(model);
 }
 
 interface OverlayDeps {
