@@ -10582,7 +10582,7 @@ function createGentleAiExtensionForTesting(
 		const primaryToolCall = permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && (processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) === 0;
 		// One early mode read settles the session binding (and its one-time epoch
 		// bump) before the guarded region below captures its own epoch.
-		const settledMode = primaryToolCall ? await yolo.mode(ctx) : "normal";
+		const settledMode = primaryToolCall ? await yolo.mode(ctx, { toolCallId: event.toolCallId }) : "normal";
 		const yoloActive = primaryToolCall && settledMode === "yolo";
 		const superYoloActive = primaryToolCall && settledMode === "super-yolo";
 		const sensitivePathDenied = evaluateSensitivePathTool(
@@ -10630,6 +10630,10 @@ function createGentleAiExtensionForTesting(
 			if (childDenied) return childDenied;
 		}
 		const modeEpoch = yolo.epoch();
+		// The admission's authoritative mode read is always a fresh capture, never
+		// the admission slot: a reselection while this lookup is in flight must
+		// invalidate it (mode() answers Normal, the epoch check below blocks), and
+		// tests/auto-mode-invariants.test.ts holds exactly this lookup to lock it.
 		const permissionMode = primaryToolCall ? await yolo.mode(ctx) : "normal";
 		// A superseded lookup returns Normal for display, not permission to skip Auto.
 		if (primaryToolCall && modeEpoch !== yolo.epoch()) {

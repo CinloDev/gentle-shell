@@ -95,7 +95,7 @@ export function discoverYoloUiAdapter(pi: ExtensionAPI, context: ExtensionContex
 export interface YoloSessionController {
 	active(context: ExtensionContext): Promise<boolean>;
 	superActive(context: ExtensionContext): Promise<boolean>;
-	mode(context: ExtensionContext): Promise<PermissionMode>;
+	mode(context: ExtensionContext, admission?: { toolCallId: string }): Promise<PermissionMode>;
 	setMode(mode: PermissionMode, context: ExtensionContext): Promise<boolean>;
 	defaultMode(): PermissionMode;
 	saveDefault(mode: PermissionMode, context: ExtensionContext): Promise<boolean>;
@@ -121,9 +121,13 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	const seen = new WeakMap<object, Set<string>>();
 	const observers = new Set<() => void>();
 	const pendingCaptures = new Set<{ manager: ModeIdentity["manager"]; id: string }>();
-	// Captured identity is pure per (session binding, cwd). A generation bump
-	// (any changed()) or a cwd change invalidates it, so a mode answer is never stale.
-	let capturedMode: (ModeIdentity & { cwd: string; generation: number }) | undefined;
+	// Identity is re-captured for every tool admission: freshness is a security
+	// invariant, so cross-admission reuse is never allowed (a mid-lookup mode
+	// reselection must invalidate). Within one admission the redundant mode()
+	// lookups of the same tool call share at most ONE capture, keyed by that
+	// admission's tool call id; a different or absent id re-captures, and a
+	// generation bump or cwd change still invalidates a shared slot.
+	let capturedMode: (ModeIdentity & { cwd: string; generation: number; admission: string }) | undefined;
 	// Rendered strings last published for each context; identical repaints are skipped.
 	const published = new WeakMap<ExtensionContext, { yolo: string | undefined; modeText: string }>();
 	const primary = () => env.GENTLE_PI_AGENTS_CHILD !== "1";
@@ -188,10 +192,12 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 		finally { pendingCaptures.delete(scope); }
 	};
 	const defaultMode = (): PermissionMode => resolvePermissionModePolicy(store).mode;
-	const mode = async (ctx: ExtensionContext): Promise<PermissionMode> => {
+	const mode = async (ctx: ExtensionContext, admission?: { toolCallId: string }): Promise<PermissionMode> => {
 		const scope = session(ctx);
+		const admissionId = admission?.toolCallId;
 		let identity: ModeIdentity | undefined;
-		if (scope && capturedMode && capturedMode.generation === generation &&
+		if (admissionId !== undefined && scope && capturedMode &&
+			capturedMode.admission === admissionId && capturedMode.generation === generation &&
 			capturedMode.manager === scope.manager && capturedMode.id === scope.id && capturedMode.cwd === ctx.cwd) identity = capturedMode;
 		if (!identity) {
 			const epoch = generation;
@@ -208,8 +214,9 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 			if (fresh) { liveMode = defaultMode(); interactiveGrant = false; changed(ctx); }
 		}
 		// Record after the binding pass: internal changed() bumps above must not strand
-		// a cache entry stamped with a superseded generation.
-		if (identity && scope) capturedMode = { ...identity, cwd: ctx.cwd, generation };
+		// a cache entry stamped with a superseded generation. Only admission-keyed
+		// lookups record; the slot is overwritten when a different admission id arrives.
+		if (identity && scope && admissionId !== undefined) capturedMode = { ...identity, cwd: ctx.cwd, generation, admission: admissionId };
 		publish(ctx);
 		return identity && binding ? liveMode : "normal";
 	};

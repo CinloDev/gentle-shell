@@ -6,9 +6,11 @@ import { join } from "node:path";
 import { registerYoloSessionPolicy } from "../lib/yolo-session-policy.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// Captured identity is a pure function of (session binding, cwd): the hot mode()
-// path must not repeat filesystem/Git work per call, and publish must not repaint
-// unchanged strings. Generation bumps and cwd changes must invalidate the cache.
+// Identity is re-captured for every tool admission: freshness is a security
+// invariant, so cross-admission reuse is never allowed. Within one admission
+// the redundant mode() lookups share at most ONE capture, keyed by that
+// admission's tool call id; a different or absent id re-captures. Generation
+// bumps and cwd changes still invalidate a shared slot.
 
 const isolatedConfigHomes: string[] = [];
 process.once("exit", () => { for (const home of isolatedConfigHomes) rmSync(home, { recursive: true, force: true }); });
@@ -42,13 +44,27 @@ function harness() {
 	};
 }
 
-test("repeated mode() calls with no session change capture the identity only once", async () => {
+test("lookups of one tool admission share one capture; a second admission re-captures", async () => {
 	const h = harness();
-	assert.equal(await h.controller.mode(h.ctx), "normal");
-	assert.equal(h.resolveCalls(), 1);
+	assert.equal(await h.controller.mode(h.ctx, { toolCallId: "call-1" }), "normal");
+	assert.equal(h.resolveCalls(), 1, "the first admission captures");
+	await h.controller.mode(h.ctx, { toolCallId: "call-1" });
+	assert.equal(h.resolveCalls(), 1, "lookups of one tool call share one capture");
+	await h.controller.mode(h.ctx, { toolCallId: "call-2" });
+	assert.equal(h.resolveCalls(), 2, "a second admission re-captures even with unchanged generation and cwd");
 	await h.controller.mode(h.ctx);
-	await h.controller.mode(h.ctx);
-	assert.equal(h.resolveCalls(), 1, "unchanged session and cwd reuse the captured identity");
+	assert.equal(h.resolveCalls(), 3, "an absent admission id keeps the uncached capture path");
+});
+
+// The tool admission key never outranks the generation: a bump mid-admission
+// (a reselected mode, a revocation) must force a fresh capture, never replay.
+test("a generation bump invalidates a shared admission slot", async () => {
+	const h = harness();
+	assert.equal(await h.controller.mode(h.ctx, { toolCallId: "call-1" }), "normal");
+	assert.equal(await h.controller.setMode("yolo", h.ctx), true);
+	const before = h.resolveCalls();
+	assert.equal(await h.controller.mode(h.ctx, { toolCallId: "call-1" }), "yolo", "the same admission id never answers a mode captured before the bump");
+	assert.equal(h.resolveCalls(), before + 1, "the bump forced a fresh capture");
 });
 
 test("after a mode change the next mode() re-captures and never answers the stale mode", async () => {
@@ -83,6 +99,6 @@ test("a cwd change re-captures and revokes instead of answering a stale workspac
 		assert.equal(await h.controller.mode(h.ctx), "normal", "the new workspace never inherits the old binding");
 		assert.equal(h.resolveCalls(), 2, "the cwd change forced a fresh capture");
 		await h.controller.mode(h.ctx);
-		assert.equal(h.resolveCalls(), 2, "the new workspace is then cached like any other");
+		assert.equal(h.resolveCalls(), 3, "a call without an admission id keeps the uncached capture path");
 	} finally { rmSync(other, { recursive: true, force: true }); }
 });
