@@ -119,6 +119,20 @@ test("a GET carrying a foreign Origin is rejected", async (t) => {
 	assert.equal((await rawRequest(port, `${base}api/designs`, { headers: { Origin: `http://127.0.0.1:${port}` } })).status, 200);
 });
 
+test("sandboxed artboards load their subresources with Origin null, but nothing else accepts it", async (t) => {
+	// Chrome sends `Origin: null` for script requests from an opaque-origin (sandboxed) artboard.
+	const { port, base } = await start(t);
+	const nullOrigin = { headers: { Origin: "null" } };
+	for (const path of ["assets/inspector.js", "files/alpha/01-hero.html", "files/alpha/styles.css", "files/alpha/logo.svg"]) {
+		assert.equal((await rawRequest(port, `${base}${path}`, nullOrigin)).status, 200, path);
+	}
+	for (const path of ["", "d/alpha/", "assets/canvas.js", "assets/canvas.css", "api/designs", "api/designs/alpha", "events"]) {
+		assert.equal((await rawRequest(port, `${base}${path}`, nullOrigin)).status, 403, path);
+	}
+	assert.equal((await rawRequest(port, `${base}assets/inspector.js`, { headers: { Origin: "http://evil.example" } })).status, 403);
+	assert.equal((await rawRequest(port, `${base}files/alpha/01-hero.html`, { headers: { Origin: "http://evil.example" } })).status, 403);
+});
+
 test("the canvas page carries a strict CSP and a JSON config, never inline code", async (t) => {
 	const { port, base } = await start(t);
 	const page = await rawRequest(port, base);

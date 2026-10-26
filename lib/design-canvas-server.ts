@@ -481,8 +481,11 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		}
 		if (isComment) return receiveComment(req, res);
 		// Browsers send Origin on cross-origin reads; only this server's pages may read it.
+		// Sandboxed artboards fetch their own subresources with `Origin: null`.
 		const requestOrigin = req.headers.origin;
-		if (requestOrigin !== undefined && requestOrigin !== origin && requestOrigin !== `http://localhost:${port}`) return reply(res, 403, { error: "forbidden" });
+		const artboardSubresource = rest[0] === "files" || (rest.length === 2 && rest[0] === "assets" && rest[1] === "inspector.js");
+		const trusted = requestOrigin === undefined || requestOrigin === origin || requestOrigin === `http://localhost:${port}` || (requestOrigin === "null" && artboardSubresource);
+		if (!trusted) return reply(res, 403, { error: "forbidden" });
 		const found = route(rest);
 		if (!found) return reply(res, 404, { error: "not-found" });
 		return found(req, res);
