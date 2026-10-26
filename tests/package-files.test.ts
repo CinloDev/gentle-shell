@@ -13,3 +13,10 @@ test("the package check requires the voice command, its modules and the worker s
 	for (const path of voice) assert.ok(requiredPaths.includes(path), `${path} is required`);
 	assert.deepEqual(missingRequiredPaths(root, voice), []);
 });
+
+// The design command names its skill file by path when Pi has not loaded it.
+test("the package check requires the design command, its helpers and its skill", () => {
+	const design = ["extensions/gentle-design.ts", "lib/gentle-design.ts", "skills/design/SKILL.md"];
+	for (const path of design) assert.ok(requiredPaths.includes(path), `${path} is required`);
+	assert.deepEqual(missingRequiredPaths(root, design), []);
+});

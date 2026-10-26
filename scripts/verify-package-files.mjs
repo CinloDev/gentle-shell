@@ -61,6 +61,8 @@ export const requiredPaths = [
   // would notice it missing from the packed tarball.
   "scripts/voice-worker.cjs",
   "docs/voice.md",
+  "extensions/gentle-design.ts",
+  "lib/gentle-design.ts",
   "scripts/npm-pack-result.mjs",
   "assets/orchestrator.md",
   "assets/orchestrator-delegation.md",
@@ -165,6 +167,7 @@ export const requiredPaths = [
   "skills/chained-pr/SKILL.md",
   "skills/cognitive-doc-design/SKILL.md",
   "skills/comment-writer/SKILL.md",
+  "skills/design/SKILL.md",
   "skills/gentle-ai/SKILL.md",
   "skills/issue-creation/SKILL.md",
   "skills/judgment-day/SKILL.md",
