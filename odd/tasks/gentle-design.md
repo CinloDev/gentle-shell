@@ -144,3 +144,8 @@ Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413
   - no CI size gate exists, and recent merged PRs carry no size label.
   The PR body lists the per-slice commits as a review guide. Merge only on green required CI.
 - **L25** (2026-10-26) RDD assess of `e5a06f923..1d337314c` (T6-T8): medium, `reviewDue: false` (under budget), so the writers' self-verification stands. A privacy scan of the branch diff found no personal paths. Issue #2561 created and labeled `status:approved`. Branch pushed. PR #2562 opened (`type:feature`, `Closes #2561`). Waiting on CI.
+- **L26** (2026-10-26) The CI on `b4e479d47` was all green. CodeRabbit posted 4 actionable comments; the parent acted on 3 of them, test-first (RED 2 → GREEN; focused 219/219; types 0):
+  - Fixed: `TOKEN_FILE` matched auth and tokenizer files, which would have triggered the automatic sync. It now requires `tokens` as a whole word and excludes test files.
+  - Fixed: `truncateUtf16` left a lone high surrogate when the canvas had already cut at 300 units; it now strips a trailing high surrogate at any length.
+  - Done: the 256 KiB read buffer is now reused.
+  - Deferred as a follow-up: consolidating the duplicated path validators of the server and the store. It is a refactor of security code, and the current differences are deliberate (the server maps EACCES to 404).
