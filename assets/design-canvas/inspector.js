@@ -2,6 +2,9 @@
 // artboard. In comment mode it highlights the hovered element and reports the
 // clicked one to the canvas; otherwise it only forwards canvas zoom and pan.
 // It also reports where each commented element is, so the canvas can pin it.
+// In navigation mode the canvas covers the artboard with a shield and routes
+// comment-mode hovers and clicks here as points; in focus mode the artboard
+// owns the wheel and the keyboard, and Shift+Esc asks the canvas to leave.
 (() => {
 	"use strict";
 
@@ -11,6 +14,7 @@
 	const MARK = "data-gd-inspector";
 	const MAX_PINS = 500;
 	let enabled = false;
+	let focused = false;
 	let pins = [];
 	let reportQueued = false;
 	let hovered = null;
@@ -77,10 +81,19 @@
 		return node instanceof Element && node.hasAttribute(MARK);
 	}
 
-	function targetOf(event) {
-		const node = event.target;
+	function elementOf(node) {
 		if (!(node instanceof Element) || isOwn(node)) return null;
 		return node === document.documentElement ? document.body : node;
+	}
+
+	function targetOf(event) {
+		return elementOf(event.target);
+	}
+
+	/** The element under a point the canvas routed from its shield, in artboard coordinates. */
+	function elementAt(data) {
+		if (typeof data.x !== "number" || typeof data.y !== "number" || !Number.isFinite(data.x) || !Number.isFinite(data.y)) return null;
+		return elementOf(document.elementFromPoint(data.x, data.y));
 	}
 
 	function hasUniqueId(element) {
@@ -174,11 +187,31 @@
 		if (event.data.type === "gd:mode") setEnabled(event.data.enabled === true);
 		else if (event.data.type === "gd:pins") setPins(event.data.pins);
 		else if (event.data.type === "gd:highlight") highlight(event.data.id);
-		else if (event.data.type === "gd:clear") {
+		else if (event.data.type === "gd:focus") focused = event.data.enabled === true;
+		else if (event.data.type === "gd:pick-at") {
+			if (enabled) pick(elementAt(event.data));
+		} else if (event.data.type === "gd:hover-at") {
+			if (!enabled) return;
+			hovered = elementAt(event.data);
+			refresh();
+		} else if (event.data.type === "gd:clear") {
 			selected = null;
 			refresh();
 		}
 	});
+
+	function pick(element) {
+		if (!element) return;
+		selected = element;
+		refresh();
+		const rect = element.getBoundingClientRect();
+		post({
+			type: "gd:pick",
+			selector: cssSelector(element),
+			excerpt: excerptOf(element),
+			rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+		});
+	}
 
 	window.addEventListener("pointerover", (event) => {
 		if (!enabled) return;
@@ -191,17 +224,7 @@
 		event.preventDefault();
 		event.stopPropagation();
 		event.stopImmediatePropagation();
-		const element = targetOf(event);
-		if (!element) return;
-		selected = element;
-		refresh();
-		const rect = element.getBoundingClientRect();
-		post({
-			type: "gd:pick",
-			selector: cssSelector(element),
-			excerpt: excerptOf(element),
-			rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-		});
+		pick(targetOf(event));
 	}, true);
 
 	// While commenting, the artboard's own handlers, links and forms stay inert.
@@ -214,8 +237,15 @@
 		}, true);
 	}
 
+	// Shift+Esc is reserved for leaving focus mode, even while typing; plain Esc stays with the design.
+	// The canvas accepts the request only from the focused artboard.
 	window.addEventListener("keydown", (event) => {
-		if (event.key === "Escape" && enabled) post({ type: "gd:escape" });
+		if (event.key !== "Escape") return;
+		if (event.shiftKey) {
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			post({ type: "gd:exit-focus" });
+		} else if (enabled) post({ type: "gd:escape" });
 	}, true);
 
 	function scrollableBy(element, dx, dy) {
@@ -237,8 +267,14 @@
 
 	// Ctrl/Cmd + wheel (and trackpad pinch) always zooms the canvas; a plain wheel
 	// pans the canvas only when the artboard itself cannot scroll that way.
+	// In focus mode the canvas stays put: the artboard scrolls natively, and
+	// Ctrl/Cmd + wheel is swallowed so it never zooms the browser page.
 	window.addEventListener("wheel", (event) => {
 		const zoom = event.ctrlKey || event.metaKey;
+		if (focused) {
+			if (zoom) event.preventDefault();
+			return;
+		}
 		if (!zoom && canScroll(event.target, event.deltaX, event.deltaY)) return;
 		event.preventDefault();
 		post({ type: "gd:wheel", deltaX: event.deltaX, deltaY: event.deltaY, deltaMode: event.deltaMode, zoom, shift: event.shiftKey, x: event.clientX, y: event.clientY });

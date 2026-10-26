@@ -71,11 +71,11 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 | T3 | S7, S3 (`sync`) | delegated: context backstop | done (risk medium: writer self-verification + parent spot check; new server route goes to the feature-end verifier) | commit `feat(design): sync the project design system into a system board`; RED 9 new → GREEN; parent re-run 113/113, types 0; real-browser proof all PASS |
 | T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | done (risk high: independent verifier, no blockers); commit `e8cd68c2b` | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
 | T6 | S11 | delegated: Writer trigger (a) parallel with T7, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): drive the design flow from natural language`; RED 11/12 → GREEN 46/46; mutation on the child guard caught; focused 149/149, types 0 |
-| T7 | S12 | delegated: Writer trigger (a) parallel with T6, disjoint surfaces; docs paragraph reported to the parent | pending | |
+| T7 | S12 | delegated: Writer trigger (a) parallel with T6, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + real-browser proof + parent spot check) | commit `feat(design): add canvas navigation and focus modes`; RED 0/7 → GREEN 9/9; real-browser a-h PASS, plus the panel auto-hide rows; seam check 204/204, types 0 |
 | T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | done (risk high: feature-end independent verifier PASS after one correction) | commit `feat(design): hand artboards off to code and link designs to ODD features`; RED 11 new → GREEN; parent re-run 123/123, types 0; real-browser proof all PASS |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
-Slice boundaries: PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + `81f227e27` (T4) + `8c4ac796b` (verifier correction); PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 `e8cd68c2b` + advisory fix `643c70795`. PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
+Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + `81f227e27` (T4) + `8c4ac796b` (verifier correction); PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 `e8cd68c2b` + advisory fix `643c70795`. PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
 
 ## Log
 
@@ -119,3 +119,13 @@ Slice boundaries: PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + `81f22
   - not to also skip in-process named agents: `isNamedAgentStartEvent` is private to extensions/gentle-ai.ts, and the delegated children are already excluded by the env marker;
   - not to re-add `/gentle:design` to the skill description.
   The writer briefly copied extensions/gentle-design.ts to /tmp for a mutation check, restored it, and removed the copy (reported).
+- **L20** (2026-10-26) T7 is implemented. Navigation shields, focus at 100%, Shift+Esc / "Back to canvas", and comment mode in both modes. RED 0/7 → GREEN 8/8 in tests/design-canvas-assets.test.ts; a mutation on the exit-focus source check was caught; real-browser a-h PASS. Parent decisions:
+  - an artboard wider than the viewport keeps its designed width at 100%, and focus auto-hides the comments panel, restoring it on exit (follow-up running);
+  - pins re-rendering under a continuously mutating artboard DOM predates T7 and is recorded as a follow-up, out of scope.
+  The writer put scratch under ~/work/gentle-pi-scratch (outside the project); the parent removed it and told the writer to use only `mktemp -d` under the system temp dir.
+- **L21** (2026-10-26) T7 follow-up done:
+  - Focus hides the comments panel and restores it on exit.
+  - centerFocus measures with layout offsets, which fixes a 1 px re-center drift seen in the browser.
+  - A failed `mktemp` in the writer's shell left `~/server.out` and `~/server.pid`, from a server that never started. The parent inspected and removed both, plus the writer's scratch.
+  - Seam check over every design test file: 204/204, types 0, syntax ok.
+  - Follow-up recorded, not done: pins re-render on every MutationObserver report, which detaches them under a continuously mutating artboard DOM. This was already the case before T7.

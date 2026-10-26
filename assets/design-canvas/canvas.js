@@ -4,6 +4,10 @@
 // kept out of state.boards so comments never apply to it.
 // Artboards run in iframes sandboxed with scripts only, so each one has an opaque
 // origin; messages are trusted only by matching event.source to a known artboard.
+// Navigation mode (the default) covers every artboard with a shield, so the wheel,
+// drags and clicks always reach the canvas; a click on a shield enters focus mode,
+// which shows that artboard at 100% and lets it own the pointer and the keyboard
+// until "Back to canvas" or Shift+Esc restores the previous view.
 (() => {
 	"use strict";
 
@@ -12,6 +16,10 @@
 	const MIN_ZOOM = 0.05;
 	const MAX_ZOOM = 4;
 	const FIT_PADDING = 48;
+	const FOCUS_MARGIN = 16;
+	// Room below a focused artboard for the floating "Back to canvas" button.
+	const BACK_SPACE = 64;
+	const CLICK_SLOP = 4;
 	const LIMITS = { selector: 500, excerpt: 300, comment: 2000, pins: 500 };
 	const MODE_KEY = "gentle-design:send-mode";
 	const SYSTEM_LABEL = { title: "Design system", tradeoff: "Project tokens (design/system.md)" };
@@ -27,6 +35,8 @@
 		zoomIn: $("gd-zoom-in"),
 		zoomLevel: $("gd-zoom-level"),
 		fit: $("gd-fit"),
+		navMode: $("gd-nav-mode"),
+		back: $("gd-back"),
 		comment: $("gd-comment"),
 		status: $("gd-status"),
 		viewport: $("gd-viewport"),
@@ -74,6 +84,12 @@
 		filter: "open",
 		mode: storedMode(),
 		activeId: null,
+		designCount: 0,
+		// The focused board, and the view to restore when focus mode ends.
+		focus: null,
+		savedView: null,
+		savedPanel: null,
+		hoverBoard: null,
 	};
 
 	function setStatus(text, isError) {
@@ -131,6 +147,7 @@
 	}
 
 	function fit() {
+		if (state.focus) return;
 		const rect = els.viewport.getBoundingClientRect();
 		const width = els.world.offsetWidth;
 		const height = els.world.offsetHeight;
@@ -149,6 +166,7 @@
 
 	/** Shared by native wheel events and wheel events forwarded from artboards. */
 	function handleWheel(deltaX, deltaY, deltaMode, zooming, shift, clientX, clientY) {
+		if (state.focus) return;
 		const dx = wheelPixels(deltaX, deltaMode);
 		const dy = wheelPixels(deltaY, deltaMode);
 		if (zooming) {
@@ -167,30 +185,40 @@
 		handleWheel(event.deltaX, event.deltaY, event.deltaMode, event.ctrlKey || event.metaKey, event.shiftKey, event.clientX, event.clientY);
 	}, { passive: false });
 
+	// A press on a shield pans like the background; released without moving, it is a
+	// click on that artboard: a routed pick in comment mode, else focus mode.
 	let drag = null;
 	els.viewport.addEventListener("pointerdown", (event) => {
-		if (event.button !== 0 || event.target.closest("button")) return;
-		if (event.target !== els.viewport && event.target !== els.world && !event.target.closest(".gd-artboard-label")) return;
-		drag = { id: event.pointerId, x: event.clientX, y: event.clientY };
+		if (state.focus || event.button !== 0 || event.target.closest("button")) return;
+		const shield = event.target.closest(".gd-shield");
+		if (!shield && event.target !== els.viewport && event.target !== els.world && !event.target.closest(".gd-artboard-label")) return;
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false, board: shield ? boardOfShield(shield) : null };
 		els.viewport.setPointerCapture(event.pointerId);
 		els.viewport.classList.add("gd-panning");
 	});
 	els.viewport.addEventListener("pointermove", (event) => {
-		if (!drag || drag.id !== event.pointerId) return;
+		if (!drag || drag.id !== event.pointerId) {
+			if (!drag) hoverAt(event);
+			return;
+		}
 		panBy(event.clientX - drag.x, event.clientY - drag.y);
 		drag.x = event.clientX;
 		drag.y = event.clientY;
+		if (Math.abs(event.clientX - drag.startX) > CLICK_SLOP || Math.abs(event.clientY - drag.startY) > CLICK_SLOP) drag.moved = true;
 	});
 	const endDrag = (event) => {
 		if (!drag || drag.id !== event.pointerId) return;
+		const ended = drag;
 		drag = null;
 		els.viewport.classList.remove("gd-panning");
+		if (event.type === "pointerup" && ended.board && !ended.moved) activateBoard(ended.board, event.clientX, event.clientY);
 	};
 	els.viewport.addEventListener("pointerup", endDrag);
 	els.viewport.addEventListener("pointercancel", endDrag);
+	els.viewport.addEventListener("pointerleave", () => setHoverBoard(null));
 
 	els.viewport.addEventListener("keydown", (event) => {
-		if (event.target !== els.viewport) return;
+		if (event.target !== els.viewport || state.focus) return;
 		const step = event.shiftKey ? 200 : 50;
 		const actions = {
 			ArrowLeft: () => panBy(step, 0),
@@ -212,9 +240,133 @@
 	els.zoomOut.addEventListener("click", () => zoomAtCenter(0.8));
 	els.fit.addEventListener("click", fit);
 
+	// ---- navigation and focus modes ---------------------------------------
+
+	function allBoards() {
+		return state.systemBoard ? [state.systemBoard, ...state.boards] : state.boards;
+	}
+
+	function boardOfShield(shield) {
+		return allBoards().find((board) => board.shield === shield) ?? null;
+	}
+
+	/** A viewport point in the artboard's own CSS pixels. */
+	function framePoint(board, clientX, clientY) {
+		const rect = board.frame.getBoundingClientRect();
+		const scale = rect.width / board.artboard.width || 1;
+		return { x: (clientX - rect.left) / scale, y: (clientY - rect.top) / scale };
+	}
+
+	function activateBoard(board, clientX, clientY) {
+		if (!state.commenting) enterFocus(board);
+		else if (!board.system) board.frame.contentWindow?.postMessage({ type: "gd:pick-at", ...framePoint(board, clientX, clientY) }, "*");
+	}
+
+	function setHoverBoard(board) {
+		if (state.hoverBoard && state.hoverBoard !== board) state.hoverBoard.frame.contentWindow?.postMessage({ type: "gd:hover-at", x: null, y: null }, "*");
+		state.hoverBoard = board;
+	}
+
+	/** Comment mode in navigation: the shield routes the hover to the inspector so it can outline the element. */
+	function hoverAt(event) {
+		if (!state.commenting || state.focus) return setHoverBoard(null);
+		const shield = event.target.closest(".gd-shield");
+		const board = shield ? boardOfShield(shield) : null;
+		setHoverBoard(board && !board.system ? board : null);
+		if (state.hoverBoard) state.hoverBoard.frame.contentWindow?.postMessage({ type: "gd:hover-at", ...framePoint(board, event.clientX, event.clientY) }, "*");
+	}
+
+	function sendFocus(board) {
+		board.frame.contentWindow?.postMessage({ type: "gd:focus", enabled: board === state.focus }, "*");
+	}
+
+	/** The artboard's visible height: its manifest height, or the viewport's while focused on a taller one. */
+	function setFrameHeight(board, height) {
+		board.viewHeight = height;
+		board.frame.style.height = `${height}px`;
+	}
+
+	/**
+	 * 100% zoom with the focused artboard centered and its label (Implement this) in view.
+	 * A taller artboard is top-aligned and its frame is clipped to the viewport, so it
+	 * scrolls inside like a browser window instead of leaving its bottom out of reach
+	 * while the canvas cannot pan.
+	 */
+	function centerFocus() {
+		const board = state.focus;
+		if (!board) return;
+		const viewport = els.viewport.getBoundingClientRect();
+		// Layout offsets inside the world ignore its transform, so re-centering is idempotent
+		// (a scaled bounding rect carries sub-pixel error that shifted the board by 1 px).
+		const box = board.frame.parentElement;
+		const left = box.offsetLeft;
+		const top = box.offsetTop;
+		const labelSpace = box.offsetTop - board.wrapper.offsetTop;
+		const { width, height } = board.artboard;
+		const minTop = FOCUS_MARGIN + labelSpace;
+		const available = viewport.height - minTop - BACK_SPACE;
+		const tall = height > available;
+		setFrameHeight(board, tall ? Math.max(120, Math.floor(available)) : height);
+		state.zoom = 1;
+		state.x = Math.round(width + FOCUS_MARGIN * 2 <= viewport.width ? (viewport.width - width) / 2 - left : FOCUS_MARGIN - left);
+		state.y = Math.round((tall ? minTop : Math.max(minTop, (viewport.height - height) / 2)) - top);
+		applyView();
+	}
+
+	/** Shields, dimming, inert boards, toolbar controls and the mode label follow state.focus. */
+	function applyFocusState() {
+		const focused = state.focus;
+		els.viewport.classList.toggle("gd-focused", Boolean(focused));
+		for (const board of allBoards()) {
+			const active = board === focused;
+			board.wrapper.classList.toggle("gd-focus-board", active);
+			board.wrapper.inert = Boolean(focused) && !active;
+			board.shield.hidden = active;
+			if (!active && board.viewHeight !== board.artboard.height) setFrameHeight(board, board.artboard.height);
+			sendFocus(board);
+		}
+		for (const control of [els.zoomOut, els.zoomIn, els.fit]) control.disabled = Boolean(focused);
+		els.design.disabled = Boolean(focused) || state.designCount === 0;
+		els.back.hidden = !focused;
+		els.navMode.textContent = focused ? `Using: ${focused.artboard.title} · Shift+Esc to exit` : "Navigating";
+		els.navMode.classList.toggle("gd-using", Boolean(focused));
+	}
+
+	function enterFocus(board) {
+		if (state.focus === board) return;
+		if (!state.focus) {
+			state.savedView = { zoom: state.zoom, x: state.x, y: state.y };
+			// The artboard keeps its designed width at 100%; hiding the panel gains room for it.
+			state.savedPanel = !els.panel.hidden;
+			setPanel(false);
+		}
+		closePopover();
+		setHoverBoard(null);
+		state.focus = board;
+		centerFocus();
+		applyFocusState();
+		board.frame.focus();
+	}
+
+	function exitFocus() {
+		if (!state.focus) return;
+		closePopover();
+		state.focus = null;
+		if (state.savedPanel !== null) setPanel(state.savedPanel);
+		state.savedPanel = null;
+		if (state.savedView) Object.assign(state, state.savedView);
+		state.savedView = null;
+		applyView();
+		applyFocusState();
+		els.viewport.focus();
+	}
+
+	els.back.addEventListener("click", exitFocus);
+
 	// ---- designs and artboards -------------------------------------------
 
 	function showEmpty(text) {
+		exitFocus();
 		els.world.replaceChildren();
 		state.boards = [];
 		els.empty.textContent = text;
@@ -229,7 +381,8 @@
 			return option;
 		});
 		els.design.replaceChildren(...options);
-		els.design.disabled = designs.length === 0;
+		state.designCount = designs.length;
+		els.design.disabled = designs.length === 0 || Boolean(state.focus);
 		els.designField.hidden = designs.length === 0;
 		if (state.slug) els.design.value = state.slug;
 	}
@@ -280,20 +433,38 @@
 		frame.setAttribute("referrerpolicy", "no-referrer");
 		frame.title = `${artboard.title} artboard`;
 		frame.style.width = `${artboard.width}px`;
-		frame.style.height = `${artboard.height}px`;
 		const box = document.createElement("div");
 		box.className = "gd-frame-box";
+		const shield = document.createElement("div");
+		shield.className = "gd-shield";
+		shield.setAttribute("role", "button");
+		shield.tabIndex = 0;
+		shield.setAttribute("aria-label", system ? `View ${artboard.title} (read-only)` : `Use ${artboard.title}`);
+		const hint = document.createElement("span");
+		hint.className = "gd-shield-hint";
+		hint.setAttribute("aria-hidden", "true");
+		hint.textContent = system ? "Click to view the design system" : "Click to use this design";
+		shield.append(hint);
 		const pins = document.createElement("div");
 		pins.className = "gd-pins";
 		// rects: null until the artboard reports where each commented element is.
-		const board = { slug, artboard, frame, wrapper, pins, rects: null, system };
+		const board = { slug, artboard, frame, wrapper, shield, pins, rects: null, system, viewHeight: 0 };
+		setFrameHeight(board, artboard.height);
+		shield.addEventListener("keydown", (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			event.preventDefault();
+			enterFocus(board);
+		});
 		frame.addEventListener("load", () => {
 			board.rects = null;
 			sendMode(board);
+			sendFocus(board);
 			if (!system) sendPins(board);
+			// A live reload of the focused artboard keeps focus mode and its keyboard focus.
+			if (state.focus === board && els.popover.hidden && (document.activeElement === frame || document.activeElement === document.body)) frame.focus();
 		});
 		frame.src = boardUrl(board);
-		box.append(frame, pins);
+		box.append(frame, shield, pins);
 		wrapper.append(label, box);
 		return board;
 	}
@@ -394,8 +565,12 @@
 			return;
 		}
 		els.empty.hidden = true;
+		const focusFile = state.focus && !state.focus.system ? state.focus.artboard.file : null;
 		state.boards = manifest.artboards.map((artboard) => createBoard(slug, artboard));
+		// A manifest reload keeps focus mode on the same artboard file while it still exists.
+		if (focusFile) state.focus = state.boards.find((board) => board.artboard.file === focusFile) ?? state.focus;
 		placeBoards();
+		if (state.focus) requestAnimationFrame(centerFocus);
 		const warnings = Array.isArray(manifest.warnings) ? manifest.warnings.filter((warning) => typeof warning === "string") : [];
 		setStatus(warnings.length > 0 ? `design.json: ${warnings.join("; ")}` : state.boards.length === 0 ? "This design has no artboards yet." : "", warnings.length > 0);
 		if (!keepView) requestAnimationFrame(fit);
@@ -409,8 +584,10 @@
 
 	/** The system board first, then the design's artboards. */
 	function placeBoards() {
-		const boards = state.systemBoard ? [state.systemBoard, ...state.boards] : state.boards;
+		const boards = allBoards();
 		els.world.replaceChildren(...boards.map((board) => board.wrapper));
+		if (state.focus && !boards.includes(state.focus)) exitFocus();
+		else applyFocusState();
 	}
 
 	/** Reads api/system and creates or drops the system board; true when it appeared or went away. */
@@ -429,6 +606,7 @@
 			if (state.systemBoard) reloadBoard(state.systemBoard);
 			return;
 		}
+		if (state.focus && !allBoards().includes(state.focus)) exitFocus();
 		if (!state.slug) {
 			showSystemOnly();
 			return;
@@ -530,7 +708,7 @@
 		for (const comment of commentsForBoard(board)) {
 			const rect = board.rects?.get(comment.id);
 			if (!rect) continue;
-			if (rect.x + rect.width < 0 || rect.y + rect.height < 0 || rect.x > board.artboard.width || rect.y > board.artboard.height) continue;
+			if (rect.x + rect.width < 0 || rect.y + rect.height < 0 || rect.x > board.artboard.width || rect.y > board.viewHeight) continue;
 			const pin = document.createElement("button");
 			pin.type = "button";
 			pin.className = "gd-pin";
@@ -646,6 +824,11 @@
 		board?.frame.contentWindow?.postMessage({ type: "gd:highlight", id }, "*");
 		if (options.focusList) els.list.querySelector(`[data-id="${CSS.escape(id)}"] .gd-comment-show`)?.focus();
 		if (!options.scroll) return;
+		// The focused artboard is already at 1:1; another board's comment leaves focus mode first.
+		if (state.focus) {
+			if (state.focus === board) return;
+			exitFocus();
+		}
 		const pin = board?.pins.querySelector(`[data-id="${CSS.escape(id)}"]`);
 		const target = pin ?? board?.frame;
 		if (!target) return;
@@ -696,11 +879,12 @@
 	els.modeCollect.addEventListener("change", () => setMode("collect"));
 	els.filterOpen.addEventListener("click", () => { state.filter = "open"; renderList(); });
 	els.filterResolved.addEventListener("click", () => { state.filter = "resolved"; renderList(); });
-	els.panelToggle.addEventListener("click", () => {
-		const show = els.panel.hidden;
+	function setPanel(show) {
 		els.panel.hidden = !show;
 		els.panelToggle.setAttribute("aria-pressed", String(show));
-	});
+	}
+
+	els.panelToggle.addEventListener("click", () => setPanel(els.panel.hidden));
 
 	function readRects(data) {
 		if (!Array.isArray(data.rects) || data.rects.length > LIMITS.pins) return null;
@@ -721,7 +905,10 @@
 		els.world.classList.toggle("gd-commenting", enabled);
 		state.boards.forEach(sendMode);
 		setStatus(enabled ? "Comment mode: click an element in an artboard" : "", false);
-		if (!enabled) closePopover();
+		if (!enabled) {
+			setHoverBoard(null);
+			closePopover();
+		}
 	}
 
 	els.comment.addEventListener("click", () => setCommenting(!state.commenting));
@@ -769,7 +956,7 @@
 		state.pick = null;
 		els.popover.hidden = true;
 		board?.frame.contentWindow?.postMessage({ type: "gd:clear" }, "*");
-		if (els.popover.contains(document.activeElement) || document.activeElement === document.body) els.comment.focus();
+		if (els.popover.contains(document.activeElement) || document.activeElement === document.body) (state.focus ? state.focus.frame : els.comment).focus();
 	}
 
 	els.cancel.addEventListener("click", closePopover);
@@ -780,7 +967,12 @@
 		}
 	});
 	document.addEventListener("keydown", (event) => {
-		if (event.key === "Escape" && state.commenting && els.popover.hidden && event.target === document.body) setCommenting(false);
+		if (event.defaultPrevented || event.key !== "Escape") return;
+		if (event.shiftKey) {
+			if (!state.focus) return;
+			event.preventDefault();
+			exitFocus();
+		} else if (state.commenting && els.popover.hidden && event.target === document.body) setCommenting(false);
 	});
 
 	els.form.addEventListener("submit", async (event) => {
@@ -831,7 +1023,7 @@
 		const data = event.data;
 		if (data.type === "gd:pick") {
 			// The system board never takes comments, even if its page posts a pick.
-			if (!state.commenting || board.system) return;
+			if (!state.commenting || board.system || (state.focus && board !== state.focus)) return;
 			const pick = readPick(data);
 			if (pick) openPopover(board, pick);
 		} else if (data.type === "gd:wheel") {
@@ -851,10 +1043,16 @@
 		} else if (data.type === "gd:escape") {
 			if (!els.popover.hidden) closePopover();
 			else if (state.commenting) setCommenting(false);
+		} else if (data.type === "gd:exit-focus") {
+			// Only the focused artboard may end its own focus mode.
+			if (board === state.focus) exitFocus();
 		}
 	});
 
 	window.addEventListener("resize", closePopover);
+	// The viewport also changes size when the comments panel opens or closes.
+	if (typeof ResizeObserver === "function") new ResizeObserver(() => centerFocus()).observe(els.viewport);
+	else window.addEventListener("resize", () => centerFocus());
 
 	setMode(state.mode);
 	start();
