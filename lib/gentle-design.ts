@@ -9,7 +9,7 @@ import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.t
 
 export const DESIGN_SKILL_NAME = "gentle-design";
 
-/** Subcommands; sync and implement belong to the design-system and handoff phases. */
+/** Subcommands; implement belongs to the handoff phase. */
 export const DESIGN_SUBCOMMANDS = ["open", "stop", "sync", "implement"] as const;
 export type DesignSubcommand = (typeof DESIGN_SUBCOMMANDS)[number];
 
@@ -39,7 +39,11 @@ export function listDesigns(cwd: string): DesignSummary[] {
 }
 
 export const DESIGN_HELP =
-	"Design HTML artboards with any model: /gentle:design <brief> starts a design run; no arguments open the latest design on the local canvas. Subcommands: open [slug], stop, sync, implement <slug>/<artboard>.";
+	"Design HTML artboards with any model: /gentle:design <brief> starts a design run; no arguments open the latest design on the local canvas. Subcommands: open [slug], stop, sync (write design/system.md and design/system.html from the project's design sources; the canvas shows that system board first), implement <slug>/<artboard>.";
+
+/** What /gentle:design sync asks the skill to do; it rides designRunMessage like a brief. */
+export const DESIGN_SYNC_REQUEST =
+	'sync the project design system: follow "Design system sync" to read the project\'s design sources and write design/system.md and design/system.html.';
 
 export function designUsage(designs: readonly DesignSummary[]): string {
 	const lines = ["Usage: /gentle:design <brief>", "Describe the goal, layout, content, and audience. Directions are written to design/<slug>/."];

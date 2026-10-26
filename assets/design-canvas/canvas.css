@@ -181,6 +181,11 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 
 .gd-commenting .gd-artboard-frame { outline: 2px dashed var(--gd-accent); outline-offset: 4px; }
 
+/* The system board never takes comments: no comment outline, and a note while Comment mode is on. */
+.gd-commenting .gd-system-board .gd-artboard-frame { outline: none; opacity: 0.6; }
+.gd-system-note { visibility: hidden; margin: 0; color: var(--gd-muted); font-style: italic; cursor: help; }
+.gd-commenting .gd-system-note { visibility: visible; }
+
 .gd-frame-box { position: relative; }
 
 /* Pins live in the transformed world, so they follow pan and zoom; the inverse scale keeps their size. */

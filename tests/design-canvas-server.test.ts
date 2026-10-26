@@ -582,6 +582,83 @@ test("events stream a change when comments.json is written", async (t) => {
 	await events.waitFor(/event: change\ndata: \{"slug":"alpha","file":"comments\.json"\}\n\n/);
 });
 
+const SYSTEM_HTML = "<!doctype html><html><body><h1>Tokens</h1></body></html>";
+
+test("GET api/system reports whether design/system.html exists, at 1440 wide", async (t) => {
+	const { port, base, root } = await start(t);
+	const missing = await rawRequest(port, `${base}api/system`);
+	assert.equal(missing.status, 200);
+	const absent = JSON.parse(missing.body);
+	assert.equal(absent.exists, false);
+	assert.equal(absent.file, "system.html");
+	assert.equal(absent.width, 1440);
+	assert.ok(Number.isInteger(absent.height) && absent.height >= 600, "a sensible default height");
+	assert.equal((await rawRequest(port, `${base}system.html`)).status, 404);
+	writeFileSync(join(root, "system.html"), SYSTEM_HTML);
+	const present = JSON.parse((await rawRequest(port, `${base}api/system`)).body);
+	assert.deepEqual(present, { ...absent, exists: true });
+});
+
+test("the system board is served sandboxed with the inspector injected", async (t) => {
+	const { port, base, root } = await start(t);
+	writeFileSync(join(root, "system.html"), SYSTEM_HTML);
+	const board = await rawRequest(port, `${base}system.html?v=1`);
+	assert.equal(board.status, 200);
+	assert.match(String(board.headers["content-type"]), /^text\/html/);
+	assert.match(String(board.headers["content-security-policy"]), /^sandbox allow-scripts;/);
+	assert.match(String(board.headers["content-security-policy"]), /connect-src 'none'/);
+	assert.equal(board.headers["cross-origin-resource-policy"], undefined);
+	assert.equal(board.body, `<!doctype html><html><body><h1>Tokens</h1><script src="${base}assets/inspector.js"></script></body></html>`);
+	// Only that one file: system.md and other root names are not routes.
+	writeFileSync(join(root, "system.md"), "# Tokens");
+	for (const path of ["system.md", "system.htm", "system.html/x", "api/system/x", "files/system.html"]) {
+		assert.equal((await rawRequest(port, `${base}${path}`)).status, 404, path);
+	}
+});
+
+test("a symlinked system.html escaping the design root is 404, and a directory is not a board", async (t) => {
+	const { port, base, root } = await start(t);
+	const outside = scratch(t, "gentle-design-system-outside-");
+	writeFileSync(join(outside, "system.html"), "<p>secret</p>");
+	symlinkSync(join(outside, "system.html"), join(root, "system.html"));
+	assert.equal((await rawRequest(port, `${base}system.html`)).status, 404);
+	assert.equal(JSON.parse((await rawRequest(port, `${base}api/system`)).body).exists, false);
+	const dirRoot = scratch(t, "gentle-design-system-dir-");
+	mkdirSync(join(dirRoot, "system.html"));
+	const other = await startDesignCanvasServer({ designRoot: dirRoot, onComment: () => {}, randomToken: () => TOKEN });
+	t.after(() => other.close());
+	assert.equal((await rawRequest(other.port, `/${TOKEN}/system.html`)).status, 404);
+	assert.equal(JSON.parse((await rawRequest(other.port, `/${TOKEN}/api/system`)).body).exists, false);
+});
+
+test("the system routes keep the Host, token, Origin and method rules", async (t) => {
+	const { port, base, root } = await start(t);
+	writeFileSync(join(root, "system.html"), SYSTEM_HTML);
+	for (const path of ["system.html", "api/system"]) {
+		assert.equal((await rawRequest(port, `${base}${path}`, { host: `evil.example:${port}` })).status, 421, path);
+		assert.equal((await rawRequest(port, `/wrong-token-0123456789/${path}`)).status, 404, path);
+		assert.equal((await rawRequest(port, `${base}${path}`, { headers: { Origin: "http://evil.example" } })).status, 403, path);
+		assert.equal((await rawRequest(port, `${base}${path}`, { headers: { Origin: `http://localhost:${port}` } })).status, 200, path);
+		assert.equal((await rawRequest(port, `${base}${path}`, { method: "POST", headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" }, body: "{}" })).status, 405, path);
+	}
+	// Like an artboard, the sandboxed system board may load with Origin null; its metadata may not.
+	assert.equal((await rawRequest(port, `${base}system.html`, { headers: { Origin: "null" } })).status, 200);
+	assert.equal((await rawRequest(port, `${base}api/system`, { headers: { Origin: "null" } })).status, 403);
+});
+
+test("events stream a change when system.html or system.md is written", async (t) => {
+	const { port, root } = await start(t);
+	const events = openEvents(port);
+	t.after(() => events.req.destroy());
+	await events.ready;
+	await events.waitFor(/: connected\n\n/);
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	writeFileSync(join(root, "system.html"), SYSTEM_HTML);
+	await events.waitFor(/event: change\ndata: \{"slug":null,"file":"system\.html"\}\n\n/);
+	writeFileSync(join(root, "system.md"), "# Tokens");
+	await events.waitFor(/event: change\ndata: \{"slug":null,"file":"system\.md"\}\n\n/);
+});
+
 test("close() is idempotent, ends event streams and frees the port", async (t) => {
 	const { root } = fixture(t);
 	const server = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, randomToken: () => TOKEN });

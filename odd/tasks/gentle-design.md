@@ -39,6 +39,11 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
   - The agent marks a comment `resolved` when it has applied it.
   - The canvas has two send modes: "Send now" (the S5 behavior) and "Collect", where comments are saved without being sent and a "Send all" button sends them as one batch.
   - The S8 handoff includes the open comments.
+- **S10 Link to the ODD feature.** User: "esto del design estaria bueno que quedara ligado al documento de ODD de su feature, si es algo que es chico que quede suelto pero si es algo que surge desde un ODD hacer el link". Acceptance (assumptions marked):
+  - A design that comes from a tracked ODD feature records it in `design.json` as an optional `feature` field: the repository-relative path of the feature document, `odd/tasks/<feature>.md`. A design from small, untracked work has no `feature` field and stays standalone.
+  - Assumption: the link goes both ways. The skill appends a Log entry to that feature document naming `design/<slug>/` and its artboards, and the canvas shows the linked feature document.
+  - Assumption: when an artboard with a `feature` link is handed off (S8), the message says to track the implementation in that feature document instead of sizing it from scratch.
+  - The server validates `feature` (a relative `.md` path under `odd/tasks/`); an invalid value is ignored and reported, never served.
 
 ## Tasks
 
@@ -46,9 +51,9 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 |----|-------|-------|--------|-------------------|
 | T1 | S1, S2, S3 (`<brief>` and no-args usage) | delegated: context backstop (L4) | done (risk medium: writer self-verification + parent spot check) | `32550812b`; RED 9/9 → GREEN 9/9; parent re-run of focused suites 102/102, `node scripts/check-types.mjs` 0 diagnostics |
 | T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | done (risk high: independent verifier, no blockers) | part A + B by one writer (parallel to T1 for part A); RED→GREEN 57/57; two security mutations (realpath containment, POST Origin) caught by tests; parent re-run 94/94, types 0 diagnostics; real-browser proof (ego-browser) 2a-2d, 2f PASS, 2e partial (ego-lite skips `<select>` on Tab, reproduced without app code); defect D1 fixed in `0e6862116` (RED→GREEN 20/20) |
-| T3 | S7, S3 (`sync`) | delegated: context backstop | pending | |
+| T3 | S7, S3 (`sync`) | delegated: context backstop | done (risk medium: writer self-verification + parent spot check; new server route goes to the feature-end verifier) | commit `feat(design): sync the project design system into a system board`; RED 9 new → GREEN; parent re-run 113/113, types 0; real-browser proof all PASS |
 | T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | done (risk high: independent verifier, no blockers); commit `e8cd68c2b` | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
-| T4 | S8, S3 (`implement`) | delegated: context backstop | pending | |
+| T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | pending | |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
 Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 (`feat(design): persist canvas comments with pins and batch send`). PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
@@ -76,3 +81,5 @@ Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = T2 `23bc81271` + D1 `0e68
   - (8) the symlinked-design listing differs between the server and the command → fix: one shared listing.
   The parent removed the verifier scratch.
 - **L12** (2026-10-26) Advisories 1, 2, 4 and 8 fixed test-first in `fix(design): close PR2 verifier advisories`, with RED→GREEN for each; advisory 3 is documented. Parent re-run 104/104, types 0. The fix touches the POST Origin set (item 2), so the feature-end independent verifier covers it together with T3 and T4.
+- **L13** (2026-10-26) User: "una cosa mas, chiquita, esto del design estaria bueno que quedara ligado al documento de ODD de su feature, si es algo que es chico que quede suelto pero si es algo que surge desde un ODD hacer el link". Added as S10 and assigned to T4.
+- **L14** (2026-10-26) T3 done. Parent decisions: the system board keeps a fixed 1200 px height and scrolls inside its iframe. `open` must also work when only `design/system.html` exists (folded into T4).

@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
+import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
@@ -9,8 +9,9 @@ import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, createDesign
 // exist) shows them on a loopback canvas whose comments come back to the
 // session and persist in design/<slug>/comments.json; stop and session
 // shutdown close it. The gentle_design_comments tool lets any model list and
-// resolve those comments. sync and implement are reserved for the
-// design-system and handoff phases.
+// resolve those comments. sync runs the skill's design-system mode, which
+// writes design/system.md and design/system.html; implement is reserved for
+// the handoff phase.
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
@@ -48,6 +49,14 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 		ctx.ui.notify(notice.message, notice.level);
 	};
 
+	// sendUserMessage expands /skill:<name> only when Pi loaded that skill;
+	// an unknown skill command would reach the model verbatim.
+	const runSkill = (request: string, ctx: ExtensionContext) => {
+		const loaded = pi.getCommands().some((command) => command.name === `skill:${DESIGN_SKILL_NAME}`);
+		const content = designRunMessage(request, { loaded, path: skillPath });
+		pi.sendUserMessage(content, ctx.isIdle() ? { expandPromptTemplates: true } : { expandPromptTemplates: true, deliverAs: "followUp" });
+	};
+
 	const handle = async (args: string, ctx: ExtensionContext) => {
 		latest = ctx;
 		const parsed = parseDesignArgs(args);
@@ -62,14 +71,11 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 				ctx.ui.notify((await canvas.stop()) ? "Design canvas stopped." : "No design canvas is running.", "info");
 				return;
 			}
+			if (parsed.name === "sync") return runSkill(DESIGN_SYNC_REQUEST, ctx);
 			ctx.ui.notify(`/gentle:design ${parsed.name} is not available yet.`, "warning");
 			return;
 		}
-		// sendUserMessage expands /skill:<name> only when Pi loaded that skill;
-		// an unknown skill command would reach the model verbatim.
-		const loaded = pi.getCommands().some((command) => command.name === `skill:${DESIGN_SKILL_NAME}`);
-		const content = designRunMessage(parsed.brief, { loaded, path: skillPath });
-		pi.sendUserMessage(content, ctx.isIdle() ? { expandPromptTemplates: true } : { expandPromptTemplates: true, deliverAs: "followUp" });
+		runSkill(parsed.brief, ctx);
 	};
 
 	pi.registerCommand(DESIGN_COMMAND_NAME, { description: DESIGN_HELP, handler: handle });

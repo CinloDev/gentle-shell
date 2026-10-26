@@ -45,6 +45,11 @@ const LIMITS = Object.freeze({
 	artboardSide: 20000,
 	sseClients: 16,
 });
+/** design/system.html, written by /gentle:design sync, is shown as the first board of every design. */
+const SYSTEM_FILE = "system.html";
+/** Root files whose changes reach the canvas as `{ slug: null, file }`. */
+const SYSTEM_FILES: ReadonlySet<string> = new Set([SYSTEM_FILE, "system.md"]);
+const SYSTEM_BOARD = Object.freeze({ width: 1440, height: 1200 });
 const DEBOUNCE_MS = 150;
 const HEARTBEAT_MS = 15_000;
 const BASE_HEADERS = Object.freeze({
@@ -408,6 +413,20 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		}
 	}
 
+	/** Real path of design/system.html when it is a file inside the real design root, else undefined. */
+	async function resolveSystem(): Promise<string | undefined> {
+		const root = await rootReal();
+		if (!root) return undefined;
+		try {
+			const target = await realpath(join(root, SYSTEM_FILE));
+			if (!within(root, target) || target === root) return undefined;
+			return (await stat(target)).isFile() ? target : undefined;
+		} catch (error) {
+			if (isMissing(error)) return undefined;
+			throw error;
+		}
+	}
+
 	async function readManifest(slug: string): Promise<DesignManifest> {
 		const path = await resolveInside(slug, ["design.json"]);
 		if (!path) throw new HttpError(404, "not-found");
@@ -447,6 +466,17 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		if (!type) throw new HttpError(404, "not-found");
 		const target = await resolveInside(slug, segments);
 		if (!target || FILE_TYPES[extname(target).toLowerCase()] !== type) throw new HttpError(404, "not-found");
+		return serveResolved(req, res, target, type);
+	}
+
+	async function serveSystem(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const target = await resolveSystem();
+		if (!target || extname(target).toLowerCase() !== ".html") throw new HttpError(404, "not-found");
+		return serveResolved(req, res, target, FILE_TYPES[".html"]);
+	}
+
+	/** Serves a real path already contained by the caller, as an artboard resource. */
+	async function serveResolved(req: IncomingMessage, res: ServerResponse, target: string, type: string): Promise<void> {
 		// Read the already-resolved real path so a swapped link cannot redirect the read.
 		const handle = await open(target, "r").catch((error: unknown) => { if (isMissing(error)) throw new HttpError(404, "not-found"); throw error; });
 		let content: Buffer;
@@ -551,11 +581,15 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	function queueChange(filename: string): void {
 		if (closing) return;
 		const parts = filename.split(/[\\/]/);
+		if (parts.length === 1 && SYSTEM_FILES.has(parts[0])) return debounceChange(parts[0], null, parts[0]);
 		const [slug, ...rest] = parts;
 		if (!SLUG.test(slug) || rest.length === 0 || rest.some((part) => part === "" || part.startsWith("."))) return;
 		if (!FILE_TYPES[extname(rest[rest.length - 1]).toLowerCase()]) return;
 		const file = rest.join("/");
-		const key = `${slug}/${file}`;
+		debounceChange(`${slug}/${file}`, slug, file);
+	}
+
+	function debounceChange(key: string, slug: string | null, file: string): void {
 		clearTimeout(pending.get(key));
 		pending.set(key, setTimeout(() => {
 			pending.delete(key);
@@ -621,7 +655,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		// Browsers send Origin on cross-origin reads; only this server's pages may read it.
 		// Sandboxed artboards fetch their own subresources with `Origin: null`.
 		const requestOrigin = req.headers.origin;
-		const artboardSubresource = rest[0] === "files" || (rest.length === 2 && rest[0] === "assets" && rest[1] === "inspector.js");
+		const artboardSubresource = rest[0] === "files" || (rest.length === 1 && rest[0] === SYSTEM_FILE) || (rest.length === 2 && rest[0] === "assets" && rest[1] === "inspector.js");
 		const trusted = requestOrigin === undefined || ownOrigins.has(requestOrigin) || (requestOrigin === "null" && artboardSubresource);
 		if (!trusted) return reply(res, 403, { error: "forbidden" });
 		return get!(req, res);
@@ -653,6 +687,10 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		}
 		if (head === "assets" && tail.length === 1) return (_req, res) => serveAsset(res, safeSegment(tail[0]));
 		if (head === "events" && tail.length === 0) return openEvents;
+		if (head === SYSTEM_FILE && tail.length === 0) return serveSystem;
+		if (head === "api" && tail.length === 1 && tail[0] === "system") {
+			return async (_req, res) => reply(res, 200, { exists: (await resolveSystem()) !== undefined, file: SYSTEM_FILE, ...SYSTEM_BOARD });
+		}
 		if (head === "api" && tail[0] === "designs") {
 			if (tail.length === 1) return async (_req, res) => reply(res, 200, { designs: listDesignEntries(designRoot) });
 			if (tail.length === 2) {

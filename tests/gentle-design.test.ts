@@ -14,7 +14,7 @@ import { __testing } from "../extensions/skill-registry.ts";
 // /gentle:design wiring: a brief starts one design run through the
 // gentle-design skill; open/no arguments show the canvas for a design in the
 // session cwd; stop and session shutdown close it; canvas comments reach the
-// session; sync and implement send nothing yet.
+// session; sync runs the skill's design-system mode; implement sends nothing yet.
 
 const SKILL_PATH = fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
 
@@ -422,15 +422,58 @@ test("a symlinked design inside design/ is listed by the command and the server;
 	assert.deepEqual(JSON.parse(listed).designs.map((design: { slug: string }) => design.slug).sort(), available);
 });
 
-test("sync and implement stay reserved and send nothing", async () => {
-	for (const subcommand of ["sync", "implement", "implement login/01-split.html"]) {
+test("implement stays reserved and sends nothing", async () => {
+	for (const subcommand of ["implement", "implement login/01-split.html"]) {
 		const { pi, sent, command } = fakePi();
 		gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
 		const { ctx, notices } = fakeContext(scratchCwd());
 		await command().handler(subcommand, ctx);
 		assert.equal(sent.length, 0, subcommand);
 		assert.equal(notices.length, 1, subcommand);
-		assert.match(notices[0].message, new RegExp(`/gentle:design ${subcommand.split(" ")[0]} is not available yet`));
+		assert.match(notices[0].message, /\/gentle:design implement is not available yet/);
+	}
+});
+
+test("sync sends exactly one message that runs the gentle-design skill in sync mode", async () => {
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(scratchCwd());
+	await command().handler("sync", ctx);
+	assert.equal(sent.length, 1);
+	const content = String(sent[0].content);
+	assert.ok(content.startsWith("/skill:gentle-design sync "), content);
+	for (const part of ["design/system.md", "design/system.html"]) assert.ok(content.includes(part), `names ${part}`);
+	assert.deepEqual(sent[0].options, { expandPromptTemplates: true });
+	assert.deepEqual(notices, []);
+});
+
+test("sync is queued as a follow-up while the agent is busy", async () => {
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await command().handler("sync", fakeContext(scratchCwd(), false).ctx);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(sent[0].options, { expandPromptTemplates: true, deliverAs: "followUp" });
+});
+
+test("without the skill loaded, sync points the model at the bundled skill file", async () => {
+	const { pi, sent, command } = fakePi(false);
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await command().handler("sync", fakeContext(scratchCwd()).ctx);
+	assert.equal(sent.length, 1);
+	const content = String(sent[0].content);
+	assert.ok(!content.startsWith("/"), "a plain message, not a slash command");
+	assert.ok(content.includes(SKILL_PATH), "names the skill file by absolute path");
+	assert.ok(content.includes("Design system sync"), "names the skill section to follow");
+	assert.ok(content.includes("design/system.md"));
+});
+
+test("the skill's Design system sync section names both files and the self-check rule", () => {
+	const source = readFileSync(SKILL_PATH, "utf8");
+	const start = source.indexOf("## Design system sync");
+	assert.ok(start !== -1, "SKILL.md has a Design system sync section");
+	const section = source.slice(start, source.indexOf("\n## ", start + 1));
+	for (const part of ["design/system.md", "design/system.html", "1440", "Self-check", "never edit"]) {
+		assert.ok(section.includes(part), `the section mentions ${part}`);
 	}
 });
 

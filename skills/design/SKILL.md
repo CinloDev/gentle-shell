@@ -1,6 +1,6 @@
 ---
 name: gentle-design
-description: "Trigger: /gentle:design, design a screen, mockup, artboards, UI directions, try a different approach. Write self-contained HTML design directions under design/<slug>/."
+description: "Trigger: /gentle:design, design a screen, mockup, artboards, UI directions, try a different approach, design system sync. Write self-contained HTML design directions under design/<slug>/."
 license: Apache-2.0
 metadata:
   author: gentleman-programming
@@ -16,7 +16,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 - Every artboard is one self-contained HTML file: inline CSS, JS, and SVG; system font stacks only. Never reference external URLs, CDNs, remote fonts, images, or scripts.
 - Use realistic content for the audience; no lorem ipsum or placeholder names.
 - Accessible markup: semantic elements and landmarks, WCAG AA contrast, visible focus styles, `prefers-reduced-motion` respected for any motion.
-- When `design/system.md` exists, read it first and use only its tokens and component rules.
+- When `design/system.md` exists, read it first and use only its tokens and component rules; run the Self-check from "Design system sync" before finishing any artboard.
 - Ask at most one clarifying question, and only when the brief lacks the goal or the content.
 - Iterating edits only the targeted artboard. Never rewrite the others.
 
@@ -30,6 +30,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 | User wants to tune values (spacing, color, type scale) | Add sliders or controls in the artboard plus a "Copy as prompt" button that copies the chosen values as a prompt |
 | `design/<slug>/` already exists for a new brief | Pick a new slug; never overwrite another design |
 | A message carries design comments, or the user asks to apply them | Follow "Canvas comments" below |
+| `/gentle:design sync`, or the user asks to capture the project's design system | Follow "Design system sync" below |
 
 ## Execution Steps
 
@@ -51,6 +52,14 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 ```
 
 6. Set `width`/`height` to the artboard's intended viewport in CSS pixels; keep the manifest in sync with the files on every change.
+
+## Design system sync
+
+1. Read only, and never edit project source. Sources: CSS custom properties (`:root`, `@theme`, `[data-theme]`), the Tailwind config or v4 `@theme`, component library folders, existing token files, and the fonts they declare.
+2. Write `design/system.md`: colors (token name, value, usage), typography, spacing, radius, shadows, and component rules. Each entry names its source `path`. Record only values found in the sources.
+3. Write `design/system.html`: one self-contained artboard, 1440 px wide, that renders those tokens (swatches, type scale, spacing, radius, shadows) and the core components, under the same no-external-URL rules. The canvas shows it as the first board of every design.
+4. When no design sources exist, say so and propose a minimal starter system for the user to accept; never present invented values as project tokens.
+5. Self-check, for every artboard you finish while `design/system.md` exists: list the colors and font families the artboard uses, compare them with the system tokens, and fix every deviation before you report.
 
 ## Canvas comments
 
@@ -75,7 +84,7 @@ Never delete or reorder entries, and keep the file valid JSON: the canvas refuse
 
 ## Output Contract
 
-Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas.
+Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas. For a sync, return the source paths read, the token counts per group, and whether the system is a proposed starter.
 
 ## References
 

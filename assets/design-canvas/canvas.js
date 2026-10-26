@@ -1,5 +1,7 @@
 // Gentle Design canvas: artboards side by side with pan, zoom, live reload,
 // and comments persisted in design/<slug>/comments.json (pins, list, send modes).
+// design/system.html, when present, is the first board of every design; it is
+// kept out of state.boards so comments never apply to it.
 // Artboards run in iframes sandboxed with scripts only, so each one has an opaque
 // origin; messages are trusted only by matching event.source to a known artboard.
 (() => {
@@ -12,6 +14,8 @@
 	const FIT_PADDING = 48;
 	const LIMITS = { selector: 500, excerpt: 300, comment: 2000, pins: 500 };
 	const MODE_KEY = "gentle-design:send-mode";
+	const SYSTEM_LABEL = { title: "Design system", tradeoff: "Project tokens (design/system.md)" };
+	const SYSTEM_NOTE = "Comments apply to design artboards only. To change the system, update the project's design sources and run /gentle:design sync.";
 
 	const $ = (id) => document.getElementById(id);
 	const els = {
@@ -56,6 +60,8 @@
 		slug: typeof config.slug === "string" ? config.slug : null,
 		manifest: null,
 		boards: [],
+		system: null,
+		systemBoard: null,
 		zoom: 1,
 		x: FIT_PADDING,
 		y: FIT_PADDING,
@@ -232,12 +238,16 @@
 	}
 
 	function sendMode(board) {
-		board.frame.contentWindow?.postMessage({ type: "gd:mode", enabled: state.commenting }, "*");
+		board.frame.contentWindow?.postMessage({ type: "gd:mode", enabled: state.commenting && !board.system }, "*");
 	}
 
-	function createBoard(slug, artboard) {
+	function boardUrl(board) {
+		return board.system ? `${base}system.html` : fileUrl(board.slug, board.artboard.file);
+	}
+
+	function createBoard(slug, artboard, system = false) {
 		const wrapper = document.createElement("section");
-		wrapper.className = "gd-artboard";
+		wrapper.className = system ? "gd-artboard gd-system-board" : "gd-artboard";
 		wrapper.setAttribute("aria-label", artboard.title);
 		const label = document.createElement("div");
 		label.className = "gd-artboard-label";
@@ -251,6 +261,14 @@
 			tradeoff.textContent = artboard.tradeoff;
 			label.append(tradeoff);
 		}
+		if (system) {
+			label.title = SYSTEM_NOTE;
+			const note = document.createElement("p");
+			note.className = "gd-system-note";
+			note.title = SYSTEM_NOTE;
+			note.textContent = "Comments off on this board";
+			label.append(note);
+		}
 		const frame = document.createElement("iframe");
 		frame.className = "gd-artboard-frame";
 		frame.setAttribute("sandbox", "allow-scripts");
@@ -263,13 +281,13 @@
 		const pins = document.createElement("div");
 		pins.className = "gd-pins";
 		// rects: null until the artboard reports where each commented element is.
-		const board = { slug, artboard, frame, wrapper, pins, rects: null };
+		const board = { slug, artboard, frame, wrapper, pins, rects: null, system };
 		frame.addEventListener("load", () => {
 			board.rects = null;
 			sendMode(board);
-			sendPins(board);
+			if (!system) sendPins(board);
 		});
-		frame.src = fileUrl(slug, artboard.file);
+		frame.src = boardUrl(board);
 		box.append(frame, pins);
 		wrapper.append(label, box);
 		return board;
@@ -290,21 +308,51 @@
 		els.title.textContent = manifest.title;
 		document.title = `${manifest.title} · Gentle Design`;
 		history.replaceState(null, "", `${base}d/${encodeURIComponent(slug)}/`);
-		if (manifest.artboards.length === 0) {
+		if (manifest.artboards.length === 0 && !state.systemBoard) {
 			showEmpty("This design has no artboards yet.");
 			return;
 		}
 		els.empty.hidden = true;
 		state.boards = manifest.artboards.map((artboard) => createBoard(slug, artboard));
-		els.world.replaceChildren(...state.boards.map((board) => board.wrapper));
-		setStatus("", false);
+		placeBoards();
+		setStatus(state.boards.length === 0 ? "This design has no artboards yet." : "", false);
 		if (!keepView) requestAnimationFrame(fit);
 		await loadComments();
 	}
 
 	function reloadBoard(board) {
 		board.rects = null;
-		board.frame.src = `${fileUrl(board.slug, board.artboard.file)}?v=${Date.now()}`;
+		board.frame.src = `${boardUrl(board)}?v=${Date.now()}`;
+	}
+
+	/** The system board first, then the design's artboards. */
+	function placeBoards() {
+		const boards = state.systemBoard ? [state.systemBoard, ...state.boards] : state.boards;
+		els.world.replaceChildren(...boards.map((board) => board.wrapper));
+	}
+
+	/** Reads api/system and creates or drops the system board; true when it appeared or went away. */
+	async function refreshSystem() {
+		let info = null;
+		try { info = await getJson("api/system"); } catch { info = null; }
+		const exists = Boolean(info && info.exists === true && isFiniteNumber(info.width) && isFiniteNumber(info.height));
+		state.system = exists ? info : null;
+		if (exists === Boolean(state.systemBoard)) return false;
+		state.systemBoard = exists ? createBoard(null, { file: String(info.file), ...SYSTEM_LABEL, width: info.width, height: info.height }, true) : null;
+		return true;
+	}
+
+	async function onSystemChange() {
+		if (!(await refreshSystem())) {
+			if (state.systemBoard) reloadBoard(state.systemBoard);
+			return;
+		}
+		if (!state.manifest || state.manifest.slug !== state.slug) return;
+		if (state.boards.length === 0 && !state.systemBoard) showEmpty("This design has no artboards yet.");
+		else {
+			els.empty.hidden = true;
+			placeBoards();
+		}
 	}
 
 	els.design.addEventListener("change", () => {
@@ -314,6 +362,7 @@
 
 	async function start() {
 		applyView();
+		await refreshSystem();
 		try {
 			await refreshDesigns();
 		} catch (error) {
@@ -338,7 +387,12 @@
 		source.addEventListener("change", (event) => {
 			let change;
 			try { change = JSON.parse(event.data); } catch { return; }
-			if (!change || typeof change.slug !== "string" || typeof change.file !== "string") return;
+			if (!change || typeof change.file !== "string") return;
+			if (change.slug === null) {
+				if (change.file === "system.html") onSystemChange().catch(() => {});
+				return;
+			}
+			if (typeof change.slug !== "string") return;
 			if (change.file === "design.json") {
 				refreshDesigns().then(() => {
 					if (change.slug === state.slug) return loadManifest(state.slug, true);
@@ -685,11 +739,13 @@
 	});
 
 	window.addEventListener("message", (event) => {
-		const board = state.boards.find((candidate) => candidate.frame.contentWindow === event.source);
+		const system = state.systemBoard && state.systemBoard.frame.contentWindow === event.source ? state.systemBoard : null;
+		const board = system ?? state.boards.find((candidate) => candidate.frame.contentWindow === event.source);
 		if (!board || !event.data || typeof event.data !== "object") return;
 		const data = event.data;
 		if (data.type === "gd:pick") {
-			if (!state.commenting) return;
+			// The system board never takes comments, even if its page posts a pick.
+			if (!state.commenting || board.system) return;
 			const pick = readPick(data);
 			if (pick) openPopover(board, pick);
 		} else if (data.type === "gd:wheel") {
@@ -698,6 +754,7 @@
 			const scale = frameRect.width / board.artboard.width || 1;
 			handleWheel(data.deltaX, data.deltaY, data.deltaMode, data.zoom === true, data.shift === true, frameRect.left + data.x * scale, frameRect.top + data.y * scale);
 		} else if (data.type === "gd:pin-rects") {
+			if (board.system) return;
 			const rects = readRects(data);
 			if (!rects) return;
 			const detachedBefore = detachedKey();
