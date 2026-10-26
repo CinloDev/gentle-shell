@@ -4,6 +4,7 @@ import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DESIGN_COMMENTS_FILE, DESIGN_COMMENT_LIMITS, DesignCommentsError, createDesignCommentStore, isDesignCommentId, type StoredDesignComment } from "./design-comments.ts";
 
 // Loopback canvas host for gentle-design (S4-S6). Every route lives under a
 // per-server random token, the Host header must name this server, POSTs need
@@ -36,9 +37,7 @@ const FILE_TYPES: Readonly<Record<string, string>> = Object.freeze({
 });
 const LIMITS = Object.freeze({
 	bodyBytes: 16 * 1024,
-	comment: 2000,
-	selector: 500,
-	excerpt: 300,
+	...DESIGN_COMMENT_LIMITS,
 	manifestBytes: 256 * 1024,
 	fileBytes: 32 * 1024 * 1024,
 	artboards: 64,
@@ -67,12 +66,16 @@ const CANVAS_CSP = [
 	"frame-ancestors 'none'",
 ].join("; ");
 
-export type DesignComment = { slug: string; file: string; selector: string; excerpt: string; comment: string };
+/** A comment as delivered to the session; `id` names it in design/<slug>/comments.json. */
+export type DesignComment = { id: string; slug: string; file: string; selector: string; excerpt: string; comment: string };
 
 export type DesignCanvasServerOptions = {
 	/** Absolute `<session cwd>/design` directory. */
 	designRoot: string;
+	/** "Send now": one comment, already saved; a throw leaves it saved and unsent. */
 	onComment: (comment: DesignComment) => void | Promise<void>;
+	/** "Send all": every open unsent comment of one design, as one batch. */
+	onComments?: (batch: DesignComment[]) => void | Promise<void>;
 	initialSlug?: string;
 	randomToken?: () => string;
 };
@@ -85,11 +88,32 @@ export type DesignManifest = { slug: string; title: string; brief: string; artbo
 class HttpError extends Error {
 	readonly status: number;
 	readonly reason: string;
-	constructor(status: number, reason: string) {
+	readonly body: Record<string, unknown> | undefined;
+	constructor(status: number, reason: string, body?: Record<string, unknown>) {
 		super(reason);
 		this.status = status;
 		this.reason = reason;
+		this.body = body;
 	}
+}
+
+/** Store failures as HTTP: a broken comments.json is 422 and is never overwritten. */
+function storeFailure(error: unknown): never {
+	if (!(error instanceof DesignCommentsError)) throw error;
+	if (error.code === "not-found") throw new HttpError(404, "not-found");
+	if (error.code === "invalid-file") throw new HttpError(422, "invalid-comments", { error: "invalid-comments", reason: error.message });
+	if (error.code === "limit") throw new HttpError(409, "too-many-comments", { error: "too-many-comments", reason: error.message });
+	if (error.code === "invalid-input") throw new HttpError(400, "invalid-comment", { error: "invalid-comment", reason: error.message });
+	throw new HttpError(500, "internal");
+}
+
+function resolveInstruction(slug: string, ids: readonly string[]): string {
+	const list = ids.map((id) => JSON.stringify(id)).join(", ");
+	return `mark it resolved with the gentle_design_comments tool (action "resolve", slug "${slug}", ids [${list}]), or set its status to "resolved" in design/${slug}/${DESIGN_COMMENTS_FILE}.`;
+}
+
+function excerptLine(excerpt: string): string {
+	return `Excerpt: ${excerpt ? JSON.stringify(excerpt) : "(none)"}`;
 }
 
 /** Session message for one canvas comment; paths are relative to the session cwd. */
@@ -100,14 +124,38 @@ export function formatDesignComment(comment: DesignComment): string {
 		"",
 		`Design: ${comment.slug}`,
 		`Artboard: ${artboard}`,
+		`Comment id: ${comment.id}`,
 		`Element: ${comment.selector}`,
-		`Excerpt: ${comment.excerpt ? JSON.stringify(comment.excerpt) : "(none)"}`,
+		excerptLine(comment.excerpt),
 		"",
 		"Comment:",
 		comment.comment,
 		"",
 		`Edit only the artboard ${artboard}, following the gentle-design skill.`,
+		`When it is applied, ${resolveInstruction(comment.slug, [comment.id])}`,
 	].join("\n");
+}
+
+/** One session message for a batch of comments from one design. */
+export function formatDesignCommentBatch(batch: readonly DesignComment[]): string {
+	const slug = batch[0]?.slug ?? "";
+	const lines = [`Design comments for design/${slug} (${batch.length})`, ""];
+	batch.forEach((comment, index) => {
+		lines.push(
+			`${index + 1}. Comment id: ${comment.id}`,
+			`   Artboard: design/${comment.slug}/${comment.file}`,
+			`   Element: ${comment.selector}`,
+			`   ${excerptLine(comment.excerpt)}`,
+			"   Comment:",
+			...comment.comment.split("\n").map((line) => `   ${line}`),
+			"",
+		);
+	});
+	lines.push(
+		"Apply each comment following the gentle-design skill, editing only the artboard it names.",
+		`When a comment is applied, ${resolveInstruction(slug, batch.map((comment) => comment.id))}`,
+	);
+	return lines.join("\n");
 }
 
 function sameToken(expected: string, candidate: string): boolean {
@@ -227,6 +275,9 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	const token = (options.randomToken ?? (() => randomBytes(24).toString("base64url")))();
 	if (!TOKEN_SHAPE.test(token)) throw new Error("token must be 16-128 base64url characters");
 	const designRoot = options.designRoot;
+	const store = createDesignCommentStore(designRoot);
+	// One send-all at a time per design, so two clicks never deliver a batch twice.
+	const sending = new Map<string, Promise<unknown>>();
 	const base = `/${token}/`;
 	const template = await readFile(join(ASSET_DIR, "index.html"), "utf8");
 
@@ -242,7 +293,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		handle(req, res).catch((error: unknown) => {
 			if (res.headersSent) return void res.destroy();
 			if (error instanceof HttpError) {
-				const body = error.status === 422 ? { error: "invalid-manifest", reason: error.reason } : { error: error.reason };
+				const body = error.body ?? (error.status === 422 ? { error: "invalid-manifest", reason: error.reason } : { error: error.reason });
 				return reply(res, error.status, body, error.status === 413 ? { Connection: "close" } : {});
 			}
 			reply(res, 500, { error: "internal" });
@@ -376,10 +427,9 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		raw(res, body, { "Content-Type": type, "Content-Security-Policy": artboardCsp(String(req.headers.host)) });
 	}
 
-	async function receiveComment(req: IncomingMessage, res: ServerResponse): Promise<void> {
-		if (req.headers.origin !== origin) throw new HttpError(403, "forbidden");
-		if (mediaType(req) !== "application/json") throw new HttpError(415, "unsupported-media-type");
+	async function readJsonObject(req: IncomingMessage, allowEmpty = false): Promise<Record<string, unknown>> {
 		const raw = await readBody(req);
+		if (allowEmpty && raw.trim() === "") return {};
 		let value: unknown;
 		try {
 			value = JSON.parse(raw);
@@ -387,7 +437,18 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 			throw new HttpError(400, "invalid-json");
 		}
 		if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpError(400, "invalid-body");
-		const body = value as Record<string, unknown>;
+		return value as Record<string, unknown>;
+	}
+
+	/** The stored comment as a session comment of design `slug`. */
+	function toDesignComment(slug: string, stored: StoredDesignComment): DesignComment {
+		return { id: stored.id, slug, file: stored.file, selector: stored.selector, excerpt: stored.excerpt, comment: stored.comment };
+	}
+
+	async function receiveComment(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readJsonObject(req);
+		const mode = body.mode ?? "send";
+		if (mode !== "send" && mode !== "collect") throw new HttpError(400, "invalid-mode");
 		if (typeof body.slug !== "string" || !SLUG.test(body.slug)) throw new HttpError(400, "invalid-slug");
 		const segments = relativeSegments(body.file);
 		if (!segments || extname(segments[segments.length - 1]).toLowerCase() !== ".html") throw new HttpError(400, "invalid-file");
@@ -402,12 +463,46 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		const target = await resolveInside(body.slug, segments);
 		const info = target ? await stat(target).catch(() => undefined) : undefined;
 		if (!target || !info?.isFile() || extname(target).toLowerCase() !== ".html") throw new HttpError(400, "invalid-file");
+		const slug = body.slug;
+		const stored = await store.add(slug, { file: segments.join("/"), selector, excerpt, comment }).catch(storeFailure);
+		if (mode === "collect") return reply(res, 201, { ok: true, id: stored.id, sent: false });
 		try {
-			await options.onComment({ slug: body.slug, file: segments.join("/"), selector, excerpt, comment });
+			await options.onComment(toDesignComment(slug, stored));
 		} catch {
-			throw new HttpError(500, "delivery-failed");
+			throw new HttpError(500, "delivery-failed", { error: "delivery-failed", id: stored.id, saved: true, sent: false });
 		}
-		reply(res, 202, { ok: true });
+		await store.markSent(slug, [stored.id]).catch(storeFailure);
+		reply(res, 202, { ok: true, id: stored.id, sent: true });
+	}
+
+	async function sendAll(req: IncomingMessage, res: ServerResponse, slug: string): Promise<void> {
+		await readJsonObject(req, true);
+		const previous = sending.get(slug) ?? Promise.resolve();
+		const run = previous.then(async () => {
+			const unsent = (await store.listOpen(slug).catch(storeFailure)).filter((comment) => comment.sentAt === null);
+			if (unsent.length === 0) return reply(res, 200, { ok: true, sent: 0, ids: [] });
+			if (!options.onComments) throw new HttpError(501, "batch-delivery-unavailable");
+			const ids = unsent.map((comment) => comment.id);
+			try {
+				await options.onComments(unsent.map((comment) => toDesignComment(slug, comment)));
+			} catch {
+				throw new HttpError(500, "delivery-failed", { error: "delivery-failed", ids, saved: true, sent: false });
+			}
+			await store.markSent(slug, ids).catch(storeFailure);
+			reply(res, 202, { ok: true, sent: ids.length, ids });
+		});
+		const settled = run.then(() => undefined, () => undefined);
+		sending.set(slug, settled);
+		void settled.then(() => { if (sending.get(slug) === settled) sending.delete(slug); });
+		return run;
+	}
+
+	async function changeStatus(req: IncomingMessage, res: ServerResponse, slug: string, id: string): Promise<void> {
+		const body = await readJsonObject(req);
+		if (body.status !== "open" && body.status !== "resolved") throw new HttpError(400, "invalid-status");
+		const { updated } = await store.setStatus(slug, [id], body.status).catch(storeFailure);
+		if (updated.length === 0) throw new HttpError(404, "not-found");
+		reply(res, 200, { ok: true, comment: updated[0] });
 	}
 
 	function broadcast(chunk: string): void {
@@ -473,25 +568,41 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		if (parts.length < 3 || !sameToken(token, parts[1])) return reply(res, 404, { error: "not-found" });
 		const rest = parts.slice(2);
 		const method = req.method ?? "GET";
-		const isComment = rest.length === 2 && rest[0] === "api" && rest[1] === "comments";
-		if (method !== (isComment ? "POST" : "GET")) {
-			// Unknown paths stay 404 whatever the method; only known routes answer 405.
-			if (isComment || route(rest) !== undefined) return reply(res, 405, { error: "method-not-allowed" }, { Allow: isComment ? "POST" : "GET" });
-			return reply(res, 404, { error: "not-found" });
+		const post = postRoute(rest);
+		const get = post ? undefined : route(rest);
+		// Unknown paths stay 404 whatever the method; only known routes answer 405.
+		if (!post && !get) return reply(res, 404, { error: "not-found" });
+		if (method !== (post ? "POST" : "GET")) return reply(res, 405, { error: "method-not-allowed" }, { Allow: post ? "POST" : "GET" });
+		if (post) {
+			// Every write needs this server's exact Origin and a JSON body, so no other page can forge one.
+			if (req.headers.origin !== origin) return reply(res, 403, { error: "forbidden" });
+			if (mediaType(req) !== "application/json") return reply(res, 415, { error: "unsupported-media-type" });
+			return post(req, res);
 		}
-		if (isComment) return receiveComment(req, res);
 		// Browsers send Origin on cross-origin reads; only this server's pages may read it.
 		// Sandboxed artboards fetch their own subresources with `Origin: null`.
 		const requestOrigin = req.headers.origin;
 		const artboardSubresource = rest[0] === "files" || (rest.length === 2 && rest[0] === "assets" && rest[1] === "inspector.js");
 		const trusted = requestOrigin === undefined || requestOrigin === origin || requestOrigin === `http://localhost:${port}` || (requestOrigin === "null" && artboardSubresource);
 		if (!trusted) return reply(res, 403, { error: "forbidden" });
-		const found = route(rest);
-		if (!found) return reply(res, 404, { error: "not-found" });
-		return found(req, res);
+		return get!(req, res);
 	}
 
 	type Handler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+
+	/** POST route table over raw segments after the token. */
+	function postRoute(rest: string[]): Handler | undefined {
+		if (rest.length === 2 && rest[0] === "api" && rest[1] === "comments") return receiveComment;
+		if (rest.length < 5 || rest[0] !== "api" || rest[1] !== "designs" || rest[3] !== "comments") return undefined;
+		const slug = safeSegment(rest[2]);
+		if (!slug || !SLUG.test(slug)) return undefined;
+		if (rest.length === 5 && rest[4] === "send-all") return (req, res) => sendAll(req, res, slug);
+		if (rest.length === 6 && rest[5] === "status") {
+			const id = safeSegment(rest[4]);
+			return id && isDesignCommentId(id) ? (req, res) => changeStatus(req, res, slug, id) : undefined;
+		}
+		return undefined;
+	}
 
 	/** GET route table over raw (still encoded) segments after the token. */
 	function route(rest: string[]): Handler | undefined {
@@ -508,6 +619,10 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 			if (tail.length === 2) {
 				const slug = safeSegment(tail[1]);
 				return slug && SLUG.test(slug) ? async (_req, res) => reply(res, 200, await readManifest(slug)) : undefined;
+			}
+			if (tail.length === 3 && tail[2] === "comments") {
+				const slug = safeSegment(tail[1]);
+				return slug && SLUG.test(slug) ? async (_req, res) => reply(res, 200, await store.read(slug).catch(storeFailure)) : undefined;
 			}
 		}
 		if (head === "files" && tail.length >= 2) {

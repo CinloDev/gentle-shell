@@ -1,16 +1,25 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { formatDesignComment } from "../lib/design-canvas-server.ts";
-import { DESIGN_HELP, DESIGN_SKILL_NAME, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, type DesignCanvasDeps } from "../lib/gentle-design.ts";
+import { Type } from "typebox";
+import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
 // whatever model the session uses. open (and no arguments, when designs
 // exist) shows them on a loopback canvas whose comments come back to the
-// session; stop and session shutdown close it. sync and implement are
-// reserved for the design-system and handoff phases.
+// session and persist in design/<slug>/comments.json; stop and session
+// shutdown close it. The gentle_design_comments tool lets any model list and
+// resolve those comments. sync and implement are reserved for the
+// design-system and handoff phases.
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
+
+const DesignCommentsParams = Type.Object({
+	action: Type.Union([Type.Literal("list"), Type.Literal("resolve")], { description: "list: open comments; resolve: mark comments resolved after applying them" }),
+	slug: Type.Optional(Type.String({ description: "Design slug (directory under design/); required for resolve" })),
+	file: Type.Optional(Type.String({ description: "Artboard file within the design, such as 01-calm.html (list only)" })),
+	ids: Type.Optional(Type.Array(Type.String(), { maxItems: 500, description: "Comment ids to resolve" })),
+});
 
 export interface GentleDesignDeps extends DesignCanvasDeps {
 	/** Absolute path of the bundled skill, named in the message when Pi has not loaded it. */
@@ -30,8 +39,8 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	const skillPath = deps.skillPath ?? fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
 	// Canvas comments arrive between commands; the last command's context answers whether the agent is busy.
 	let latest: ExtensionContext | undefined;
-	const canvas = createDesignCanvas((comment) => {
-		pi.sendUserMessage(formatDesignComment(comment), isIdle(latest) ? undefined : { deliverAs: "followUp" });
+	const canvas = createDesignCanvas((message) => {
+		pi.sendUserMessage(message, isIdle(latest) ? undefined : { deliverAs: "followUp" });
 	}, deps);
 
 	const open = async (ctx: ExtensionContext, slug?: string) => {
@@ -64,6 +73,17 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	};
 
 	pi.registerCommand(DESIGN_COMMAND_NAME, { description: DESIGN_HELP, handler: handle });
+	pi.registerTool({
+		name: DESIGN_COMMENTS_TOOL_NAME,
+		label: "Design comments",
+		description: "List the open canvas comments stored in design/<slug>/comments.json, or mark comments resolved once you have applied them.",
+		promptSnippet: "List open gentle-design canvas comments and resolve them after applying them.",
+		parameters: DesignCommentsParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await runDesignCommentsTool(ctx.cwd, params as DesignCommentsToolParams);
+			return { content: [{ type: "text" as const, text: result.text }], details: result.details };
+		},
+	});
 	pi.on("session_shutdown", async () => {
 		latest = undefined;
 		await canvas.stop();

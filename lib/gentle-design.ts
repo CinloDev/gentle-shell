@@ -1,11 +1,12 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DESIGN_SLUG, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "./design-canvas-server.ts";
+import { DESIGN_SLUG, formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
+import { createDesignCommentStore, DesignCommentsError, type StoredDesignComment } from "./design-comments.ts";
 import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.ts";
 
 // Gentle Design helpers: argument parsing, the designs already written under
-// design/<slug>/design.json, the usage text, and the per-session canvas that
-// open/stop drive. The command stays a thin wrapper over these.
+// design/<slug>/design.json, the usage text, the per-session canvas that
+// open/stop drive, and the comments tool. The extension stays a thin wrapper.
 
 export const DESIGN_SKILL_NAME = "gentle-design";
 
@@ -104,8 +105,8 @@ function canvasUrl(server: DesignCanvasServer, slug: string): string {
 	return new URL(`/${server.token}/d/${slug}/`, server.url).href;
 }
 
-/** One canvas server per session; comments go to `deliver`, whose failure the server reports as HTTP 500. */
-export function createDesignCanvas(deliver: (comment: DesignComment) => void | Promise<void>, deps: DesignCanvasDeps = {}): DesignCanvas {
+/** One canvas server per session; comment messages go to `deliver`, whose failure the server reports as HTTP 500. */
+export function createDesignCanvas(deliver: (message: string) => void | Promise<void>, deps: DesignCanvasDeps = {}): DesignCanvas {
 	const startServer = deps.startServer ?? startDesignCanvasServer;
 	const openBrowser = deps.openBrowser ?? ((url: string) => openInBrowser(url));
 	let running: { root: string; server: Promise<DesignCanvasServer> } | undefined;
@@ -123,7 +124,11 @@ export function createDesignCanvas(deliver: (comment: DesignComment) => void | P
 		// A new session cwd means a different design root, so the old server goes.
 		if (running && running.root !== root) await stop();
 		if (!running) {
-			const server = startServer({ designRoot: root, onComment: deliver });
+			const server = startServer({
+				designRoot: root,
+				onComment: (comment) => deliver(formatDesignComment(comment)),
+				onComments: (batch) => deliver(formatDesignCommentBatch(batch)),
+			});
 			running = { root, server };
 			server.catch(() => { if (running?.server === server) running = undefined; });
 		}
@@ -151,4 +156,54 @@ export function createDesignCanvas(deliver: (comment: DesignComment) => void | P
 	}
 
 	return { open, stop };
+}
+
+export const DESIGN_COMMENTS_TOOL_NAME = "gentle_design_comments";
+
+export type DesignCommentsToolParams = { action: "list" | "resolve"; slug?: string; file?: string; ids?: string[] };
+export type DesignCommentsToolResult = { text: string; details: { comments: Array<StoredDesignComment & { slug: string }> } | { slug: string; resolved: string[]; unknown: string[] } };
+
+function describeComment(slug: string, comment: StoredDesignComment): string[] {
+	return [
+		`- [${comment.id}] design/${slug}/${comment.file}`,
+		`  Element: ${comment.selector}`,
+		`  Excerpt: ${comment.excerpt ? JSON.stringify(comment.excerpt) : "(none)"}`,
+		`  Comment: ${comment.comment.split("\n").join("\n           ")}`,
+	];
+}
+
+/** list: open comments (all designs, or one design and artboard); resolve: mark ids of one design resolved. */
+export async function runDesignCommentsTool(cwd: string, params: DesignCommentsToolParams): Promise<DesignCommentsToolResult> {
+	const store = createDesignCommentStore(join(cwd, "design"));
+	const failure = (slug: string, error: unknown) => error instanceof DesignCommentsError && error.code === "invalid-file"
+		? new Error(`design/${slug}/comments.json cannot be read: ${error.message}. Fix the file by hand; it is never overwritten.`)
+		: error;
+	if (params.action === "resolve") {
+		if (typeof params.slug !== "string" || !params.slug) throw new Error("resolve needs the design slug.");
+		const ids = params.ids ?? [];
+		if (ids.length === 0) throw new Error("resolve needs at least one comment id in ids.");
+		const { updated, unknown } = await store.setStatus(params.slug, ids, "resolved").catch((error: unknown) => { throw failure(params.slug!, error); });
+		const resolved = updated.map((comment) => comment.id);
+		const lines = [`Resolved ${resolved.length} comment${resolved.length === 1 ? "" : "s"} in design/${params.slug}${resolved.length ? `: ${resolved.join(", ")}` : ""}.`];
+		if (unknown.length) lines.push(`Unknown ids: ${unknown.join(", ")}.`);
+		return { text: lines.join("\n"), details: { slug: params.slug, resolved, unknown } };
+	}
+	const slugs = params.slug ? [params.slug] : listDesigns(cwd).map((design) => design.slug);
+	const found: Array<StoredDesignComment & { slug: string }> = [];
+	const problems: string[] = [];
+	for (const slug of slugs) {
+		try {
+			for (const comment of await store.listOpen(slug, params.file)) found.push({ slug, ...comment });
+		} catch (error) {
+			// One design's broken file must not hide the others, unless it was asked for by name.
+			if (params.slug) throw failure(slug, error);
+			problems.push(`design/${slug}/comments.json: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	const scope = params.slug ? `design/${params.slug}${params.file ? `/${params.file}` : ""}` : "design/";
+	const lines = found.length === 0
+		? [`No open comments in ${scope}.`]
+		: [`Open design comments in ${scope} (${found.length}):`, ...found.flatMap((comment) => describeComment(comment.slug, comment)), "", `After applying a comment, resolve it with ${DESIGN_COMMENTS_TOOL_NAME} (action "resolve", slug, ids).`];
+	if (problems.length) lines.push("", "Unreadable comment files:", ...problems.map((problem) => `- ${problem}`));
+	return { text: lines.join("\n"), details: { comments: found } };
 }

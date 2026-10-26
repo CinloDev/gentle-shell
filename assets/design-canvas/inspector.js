@@ -1,6 +1,7 @@
 // Gentle Design artboard inspector, injected by the canvas server into every
 // artboard. In comment mode it highlights the hovered element and reports the
 // clicked one to the canvas; otherwise it only forwards canvas zoom and pan.
+// It also reports where each commented element is, so the canvas can pin it.
 (() => {
 	"use strict";
 
@@ -8,7 +9,10 @@
 	const MAX_SELECTOR = 500;
 	const MAX_EXCERPT = 300;
 	const MARK = "data-gd-inspector";
+	const MAX_PINS = 500;
 	let enabled = false;
+	let pins = [];
+	let reportQueued = false;
 	let hovered = null;
 	let selected = null;
 
@@ -54,9 +58,13 @@
 		place(selectedBox, selected);
 	}
 
+	function ensureBoxes() {
+		if (!hoverBox.isConnected) document.documentElement.append(hoverBox, selectedBox);
+	}
+
 	function setEnabled(next) {
 		enabled = next;
-		if (enabled && !hoverBox.isConnected) document.documentElement.append(hoverBox, selectedBox);
+		if (enabled) ensureBoxes();
 		document.documentElement.style.cursor = enabled ? "crosshair" : "";
 		if (!enabled) {
 			hovered = null;
@@ -114,9 +122,58 @@
 		window.parent.postMessage(message, "*");
 	}
 
+	function find(selector) {
+		try {
+			return document.querySelector(selector);
+		} catch {
+			return null;
+		}
+	}
+
+	/** Where each pinned comment's element is now; null when its selector no longer matches. */
+	function reportPins() {
+		reportQueued = false;
+		post({
+			type: "gd:pin-rects",
+			rects: pins.map((pin) => {
+				const element = find(pin.selector);
+				if (!element) return { id: pin.id, rect: null };
+				const rect = element.getBoundingClientRect();
+				return { id: pin.id, rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
+			}),
+		});
+	}
+
+	function queueReport() {
+		if (reportQueued || pins.length === 0) return;
+		reportQueued = true;
+		requestAnimationFrame(reportPins);
+	}
+
+	function setPins(value) {
+		if (!Array.isArray(value)) return;
+		pins = value.slice(0, MAX_PINS).filter((pin) => pin && typeof pin.id === "string" && pin.id.length <= 32 && typeof pin.selector === "string" && pin.selector.length <= MAX_SELECTOR)
+			.map((pin) => ({ id: pin.id, selector: pin.selector }));
+		// An empty list still answers, so the canvas learns there is nothing to pin.
+		reportQueued = true;
+		requestAnimationFrame(reportPins);
+	}
+
+	function highlight(id) {
+		const pin = pins.find((candidate) => candidate.id === id);
+		const element = pin ? find(pin.selector) : null;
+		if (!element) return;
+		ensureBoxes();
+		selected = element;
+		element.scrollIntoView({ block: "nearest", inline: "nearest" });
+		refresh();
+	}
+
 	window.addEventListener("message", (event) => {
 		if (event.source !== window.parent || !event.data || typeof event.data !== "object") return;
 		if (event.data.type === "gd:mode") setEnabled(event.data.enabled === true);
+		else if (event.data.type === "gd:pins") setPins(event.data.pins);
+		else if (event.data.type === "gd:highlight") highlight(event.data.id);
 		else if (event.data.type === "gd:clear") {
 			selected = null;
 			refresh();
@@ -187,6 +244,11 @@
 		post({ type: "gd:wheel", deltaX: event.deltaX, deltaY: event.deltaY, deltaMode: event.deltaMode, zoom, shift: event.shiftKey, x: event.clientX, y: event.clientY });
 	}, { passive: false, capture: true });
 
-	window.addEventListener("scroll", refresh, true);
-	window.addEventListener("resize", refresh);
+	window.addEventListener("scroll", () => { refresh(); queueReport(); }, true);
+	window.addEventListener("resize", () => { refresh(); queueReport(); });
+	window.addEventListener("load", queueReport);
+	// Layout changes (late images, artboard scripts) move pinned elements; the inspector's own boxes do not count.
+	new MutationObserver((records) => {
+		if (records.some((record) => !(record.target instanceof Element && record.target.hasAttribute(MARK)))) queueReport();
+	}).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
 })();

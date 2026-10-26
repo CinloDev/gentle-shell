@@ -1,4 +1,5 @@
-// Gentle Design canvas: artboards side by side with pan, zoom, live reload and comments.
+// Gentle Design canvas: artboards side by side with pan, zoom, live reload,
+// and comments persisted in design/<slug>/comments.json (pins, list, send modes).
 // Artboards run in iframes sandboxed with scripts only, so each one has an opaque
 // origin; messages are trusted only by matching event.source to a known artboard.
 (() => {
@@ -9,7 +10,8 @@
 	const MIN_ZOOM = 0.05;
 	const MAX_ZOOM = 4;
 	const FIT_PADDING = 48;
-	const LIMITS = { selector: 500, excerpt: 300, comment: 2000 };
+	const LIMITS = { selector: 500, excerpt: 300, comment: 2000, pins: 500 };
+	const MODE_KEY = "gentle-design:send-mode";
 
 	const $ = (id) => document.getElementById(id);
 	const els = {
@@ -31,7 +33,24 @@
 		message: $("gd-popover-message"),
 		cancel: $("gd-popover-cancel"),
 		send: $("gd-popover-send"),
+		modeSend: $("gd-mode-send"),
+		modeCollect: $("gd-mode-collect"),
+		sendAll: $("gd-send-all"),
+		panelToggle: $("gd-panel-toggle"),
+		panel: $("gd-panel"),
+		filterOpen: $("gd-filter-open"),
+		filterResolved: $("gd-filter-resolved"),
+		panelEmpty: $("gd-panel-empty"),
+		list: $("gd-comment-list"),
 	};
+
+	function storedMode() {
+		try {
+			return localStorage.getItem(MODE_KEY) === "collect" ? "collect" : "send";
+		} catch {
+			return "send";
+		}
+	}
 
 	const state = {
 		slug: typeof config.slug === "string" ? config.slug : null,
@@ -43,6 +62,10 @@
 		commenting: false,
 		pick: null,
 		closeTimer: 0,
+		comments: [],
+		filter: "open",
+		mode: storedMode(),
+		activeId: null,
 	};
 
 	function setStatus(text, isError) {
@@ -73,6 +96,7 @@
 
 	function applyView() {
 		els.world.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.zoom})`;
+		els.world.style.setProperty("--gd-inv-zoom", String(1 / state.zoom));
 		els.zoomLevel.textContent = `${Math.round(state.zoom * 100)}%`;
 	}
 
@@ -234,10 +258,20 @@
 		frame.title = `${artboard.title} artboard`;
 		frame.style.width = `${artboard.width}px`;
 		frame.style.height = `${artboard.height}px`;
-		const board = { slug, artboard, frame, wrapper };
-		frame.addEventListener("load", () => sendMode(board));
+		const box = document.createElement("div");
+		box.className = "gd-frame-box";
+		const pins = document.createElement("div");
+		pins.className = "gd-pins";
+		// rects: null until the artboard reports where each commented element is.
+		const board = { slug, artboard, frame, wrapper, pins, rects: null };
+		frame.addEventListener("load", () => {
+			board.rects = null;
+			sendMode(board);
+			sendPins(board);
+		});
 		frame.src = fileUrl(slug, artboard.file);
-		wrapper.append(label, frame);
+		box.append(frame, pins);
+		wrapper.append(label, box);
 		return board;
 	}
 
@@ -265,9 +299,11 @@
 		els.world.replaceChildren(...state.boards.map((board) => board.wrapper));
 		setStatus("", false);
 		if (!keepView) requestAnimationFrame(fit);
+		await loadComments();
 	}
 
 	function reloadBoard(board) {
+		board.rects = null;
 		board.frame.src = `${fileUrl(board.slug, board.artboard.file)}?v=${Date.now()}`;
 	}
 
@@ -312,6 +348,10 @@
 				return;
 			}
 			if (change.slug !== state.slug) return;
+			if (change.file === "comments.json") {
+				loadComments();
+				return;
+			}
 			const matching = state.boards.filter((board) => board.artboard.file === change.file);
 			// A shared asset (CSS, image, font) can affect every artboard of the design.
 			const targets = matching.length > 0 ? matching : change.file.endsWith(".html") ? [] : state.boards;
@@ -320,6 +360,220 @@
 	}
 
 	// ---- comments ----------------------------------------------------------
+
+	function commentsForBoard(board) {
+		return state.comments.filter((comment) => comment.file === board.artboard.file);
+	}
+
+	function sendPins(board) {
+		const pins = commentsForBoard(board).slice(0, LIMITS.pins).map((comment) => ({ id: comment.id, selector: comment.selector }));
+		board.frame.contentWindow?.postMessage({ type: "gd:pins", pins }, "*");
+	}
+
+	/** Detached: the artboard is gone, or it reported that the selector matches nothing. */
+	function isDetached(comment) {
+		const board = state.boards.find((candidate) => candidate.artboard.file === comment.file);
+		if (!board) return true;
+		return Boolean(board.rects && board.rects.has(comment.id) && board.rects.get(comment.id) === null);
+	}
+
+	function detachedKey() {
+		return state.comments.filter(isDetached).map((comment) => comment.id).join(",");
+	}
+
+	function commentNumber(comment) {
+		return state.comments.indexOf(comment) + 1;
+	}
+
+	function renderPins(board) {
+		const pins = [];
+		for (const comment of commentsForBoard(board)) {
+			const rect = board.rects?.get(comment.id);
+			if (!rect) continue;
+			if (rect.x + rect.width < 0 || rect.y + rect.height < 0 || rect.x > board.artboard.width || rect.y > board.artboard.height) continue;
+			const pin = document.createElement("button");
+			pin.type = "button";
+			pin.className = "gd-pin";
+			pin.dataset.id = comment.id;
+			pin.dataset.status = comment.status;
+			pin.classList.toggle("gd-pin-active", comment.id === state.activeId);
+			pin.textContent = String(commentNumber(comment));
+			pin.setAttribute("aria-label", `Comment ${commentNumber(comment)} (${comment.status}): ${comment.comment}`);
+			pin.style.left = `${Math.max(0, rect.x)}px`;
+			pin.style.top = `${Math.max(0, rect.y)}px`;
+			pin.addEventListener("click", (event) => {
+				event.stopPropagation();
+				selectComment(comment.id, { scroll: false, focusList: true });
+			});
+			pins.push(pin);
+		}
+		const focused = board.pins.contains(document.activeElement) ? document.activeElement.dataset.id : null;
+		board.pins.replaceChildren(...pins);
+		if (focused) pins.find((pin) => pin.dataset.id === focused)?.focus();
+	}
+
+	function renderList() {
+		const open = state.comments.filter((comment) => comment.status === "open");
+		const resolved = state.comments.filter((comment) => comment.status === "resolved");
+		els.filterOpen.textContent = `Open (${open.length})`;
+		els.filterResolved.textContent = `Resolved (${resolved.length})`;
+		els.filterOpen.setAttribute("aria-pressed", String(state.filter === "open"));
+		els.filterResolved.setAttribute("aria-pressed", String(state.filter === "resolved"));
+		const unsent = open.filter((comment) => comment.sentAt === null).length;
+		els.sendAll.textContent = `Send all (${unsent})`;
+		els.sendAll.disabled = unsent === 0;
+		const shown = state.filter === "open" ? open : resolved;
+		els.panelEmpty.hidden = shown.length > 0;
+		els.panelEmpty.textContent = state.comments.length === 0
+			? "No comments yet. Turn on Comment mode and click an element."
+			: state.filter === "open" ? "No open comments." : "No resolved comments.";
+		els.list.replaceChildren(...shown.map((comment) => {
+			const item = document.createElement("li");
+			item.className = "gd-comment-item";
+			item.dataset.id = comment.id;
+			item.classList.toggle("gd-active", comment.id === state.activeId);
+			const show = document.createElement("button");
+			show.type = "button";
+			show.className = "gd-comment-show";
+			show.setAttribute("aria-label", `Show comment ${commentNumber(comment)} on ${comment.file}`);
+			const meta = document.createElement("span");
+			meta.className = "gd-comment-meta";
+			const number = document.createElement("span");
+			number.className = "gd-comment-number";
+			number.textContent = `#${commentNumber(comment)}`;
+			const file = document.createElement("span");
+			file.textContent = comment.file;
+			meta.append(number, file);
+			const badge = (text, kind) => {
+				const element = document.createElement("span");
+				element.className = `gd-badge gd-badge-${kind}`;
+				element.textContent = text;
+				meta.append(element);
+			};
+			badge(comment.sentAt ? "Sent" : "Not sent", comment.sentAt ? "sent" : "unsent");
+			if (isDetached(comment)) badge("Detached", "detached");
+			const text = document.createElement("span");
+			text.className = "gd-comment-text";
+			text.style.display = "block";
+			text.textContent = comment.comment;
+			show.append(meta, text);
+			show.addEventListener("click", () => selectComment(comment.id, { scroll: true, focusList: false }));
+			const actions = document.createElement("div");
+			actions.className = "gd-comment-actions";
+			const toggle = document.createElement("button");
+			toggle.type = "button";
+			const next = comment.status === "open" ? "resolved" : "open";
+			toggle.textContent = next === "resolved" ? "Resolve" : "Reopen";
+			toggle.setAttribute("aria-label", `${toggle.textContent} comment ${commentNumber(comment)}`);
+			toggle.addEventListener("click", () => setCommentStatus(comment.id, next));
+			actions.append(toggle);
+			item.append(show, actions);
+			return item;
+		}));
+	}
+
+	function renderComments() {
+		renderList();
+		state.boards.forEach(renderPins);
+	}
+
+	async function loadComments() {
+		const slug = state.slug;
+		if (!slug) return;
+		let comments = [];
+		try {
+			comments = (await getJson(`api/designs/${encodeURIComponent(slug)}/comments`)).comments;
+		} catch (error) {
+			setStatus(`comments.json for ${slug} cannot be read: ${error.message}`, true);
+		}
+		if (slug !== state.slug || !Array.isArray(comments)) return;
+		state.comments = comments;
+		if (state.activeId && !comments.some((comment) => comment.id === state.activeId)) state.activeId = null;
+		state.boards.forEach(sendPins);
+		renderComments();
+	}
+
+	function selectComment(id, options) {
+		state.activeId = id;
+		renderComments();
+		const comment = state.comments.find((candidate) => candidate.id === id);
+		if (!comment) return;
+		if (comment.status !== state.filter && options.focusList) {
+			state.filter = comment.status;
+			renderList();
+		}
+		const board = state.boards.find((candidate) => candidate.artboard.file === comment.file);
+		board?.frame.contentWindow?.postMessage({ type: "gd:highlight", id }, "*");
+		if (options.focusList) els.list.querySelector(`[data-id="${CSS.escape(id)}"] .gd-comment-show`)?.focus();
+		if (!options.scroll) return;
+		const pin = board?.pins.querySelector(`[data-id="${CSS.escape(id)}"]`);
+		const target = pin ?? board?.frame;
+		if (!target) return;
+		const viewport = els.viewport.getBoundingClientRect();
+		const rect = target.getBoundingClientRect();
+		panBy(viewport.left + viewport.width / 2 - (rect.left + rect.width / 2), viewport.top + viewport.height / 2 - (rect.top + rect.height / 2));
+	}
+
+	async function postJson(path, body) {
+		const response = await fetch(base + path, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			cache: "no-store",
+			body: JSON.stringify(body),
+		});
+		let reply = null;
+		try { reply = await response.json(); } catch { reply = null; }
+		return { status: response.status, ok: response.ok, body: reply || {} };
+	}
+
+	async function setCommentStatus(id, status) {
+		const slug = state.slug;
+		const reply = await postJson(`api/designs/${encodeURIComponent(slug)}/comments/${encodeURIComponent(id)}/status`, { status }).catch((error) => ({ ok: false, body: { error: error.message } }));
+		if (!reply.ok) setStatus(`Comment not updated: ${reply.body.reason || reply.body.error || "error"}`, true);
+		else setStatus(status === "resolved" ? "Comment resolved" : "Comment reopened", false);
+		await loadComments();
+	}
+
+	els.sendAll.addEventListener("click", async () => {
+		const slug = state.slug;
+		if (!slug) return;
+		els.sendAll.disabled = true;
+		const reply = await postJson(`api/designs/${encodeURIComponent(slug)}/comments/send-all`, {}).catch((error) => ({ ok: false, body: { error: error.message } }));
+		if (!reply.ok) setStatus(`Comments not sent: ${reply.body.reason || reply.body.error || "error"}`, true);
+		else setStatus(reply.body.sent ? `Sent ${reply.body.sent} comment${reply.body.sent === 1 ? "" : "s"} to the session` : "No unsent comments", false);
+		await loadComments();
+	});
+
+	function setMode(mode) {
+		state.mode = mode === "collect" ? "collect" : "send";
+		els.modeSend.checked = state.mode === "send";
+		els.modeCollect.checked = state.mode === "collect";
+		els.send.textContent = state.mode === "collect" ? "Save" : "Send";
+		try { localStorage.setItem(MODE_KEY, state.mode); } catch { /* storage may be unavailable */ }
+	}
+
+	els.modeSend.addEventListener("change", () => setMode("send"));
+	els.modeCollect.addEventListener("change", () => setMode("collect"));
+	els.filterOpen.addEventListener("click", () => { state.filter = "open"; renderList(); });
+	els.filterResolved.addEventListener("click", () => { state.filter = "resolved"; renderList(); });
+	els.panelToggle.addEventListener("click", () => {
+		const show = els.panel.hidden;
+		els.panel.hidden = !show;
+		els.panelToggle.setAttribute("aria-pressed", String(show));
+	});
+
+	function readRects(data) {
+		if (!Array.isArray(data.rects) || data.rects.length > LIMITS.pins) return null;
+		const rects = new Map();
+		for (const entry of data.rects) {
+			if (!entry || typeof entry.id !== "string" || entry.id.length > 32) return null;
+			const rect = entry.rect;
+			if (rect === null) rects.set(entry.id, null);
+			else if (rect && ["x", "y", "width", "height"].every((key) => isFiniteNumber(rect[key]))) rects.set(entry.id, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+			else return null;
+		}
+		return rects;
+	}
 
 	function setCommenting(enabled) {
 		state.commenting = enabled;
@@ -407,18 +661,21 @@
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				cache: "no-store",
-				body: JSON.stringify({ slug: pick.board.slug, file: pick.board.artboard.file, selector: pick.selector, excerpt: pick.excerpt, comment }),
+				body: JSON.stringify({ slug: pick.board.slug, file: pick.board.artboard.file, selector: pick.selector, excerpt: pick.excerpt, comment, mode: state.mode }),
 			});
-			if (response.status !== 202) {
-				let reason = `HTTP ${response.status}`;
-				try { reason = (await response.json()).error || reason; } catch { /* keep the status */ }
-				throw new Error(reason);
-			}
+			let reply = {};
+			try { reply = await response.json(); } catch { /* keep the status */ }
+			// Delivery can fail after the comment was saved; it then waits for "Send all".
+			const savedOnly = response.status === 500 && reply.saved === true;
+			if (response.status !== 202 && response.status !== 201 && !savedOnly) throw new Error(reply.reason || reply.error || `HTTP ${response.status}`);
+			loadComments();
 			if (state.pick !== pick) return;
 			els.text.value = "";
-			els.message.textContent = "Sent to the session";
-			setStatus("Sent to the session", false);
-			state.closeTimer = setTimeout(closePopover, 1200);
+			const done = savedOnly ? "Saved, but not sent to the session" : response.status === 201 ? "Saved; use Send all to send it" : "Sent to the session";
+			els.message.textContent = done;
+			els.message.classList.toggle("gd-error", savedOnly);
+			setStatus(done, savedOnly);
+			state.closeTimer = setTimeout(closePopover, savedOnly ? 2500 : 1200);
 		} catch (error) {
 			if (state.pick !== pick) return;
 			els.send.disabled = false;
@@ -440,6 +697,14 @@
 			const frameRect = board.frame.getBoundingClientRect();
 			const scale = frameRect.width / board.artboard.width || 1;
 			handleWheel(data.deltaX, data.deltaY, data.deltaMode, data.zoom === true, data.shift === true, frameRect.left + data.x * scale, frameRect.top + data.y * scale);
+		} else if (data.type === "gd:pin-rects") {
+			const rects = readRects(data);
+			if (!rects) return;
+			const detachedBefore = detachedKey();
+			board.rects = rects;
+			renderPins(board);
+			// Re-render the list only when a badge changes, so keyboard focus in it survives.
+			if (detachedKey() !== detachedBefore) renderList();
 		} else if (data.type === "gd:escape") {
 			if (!els.popover.hidden) closePopover();
 			else if (state.commenting) setCommenting(false);
@@ -448,6 +713,7 @@
 
 	window.addEventListener("resize", closePopover);
 
+	setMode(state.mode);
 	start();
 	connectEvents();
 })();

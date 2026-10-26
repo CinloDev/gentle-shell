@@ -18,6 +18,7 @@ test("the package check requires the voice command, its modules and the worker s
 const designCanvas = [
 	"lib/design-canvas-server.ts",
 	"lib/design-open-browser.ts",
+	"lib/design-comments.ts",
 	"assets/design-canvas/index.html",
 	"assets/design-canvas/canvas.js",
 	"assets/design-canvas/canvas.css",

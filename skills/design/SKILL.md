@@ -29,6 +29,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 | "Save and try a different approach" | Add a new artboard with the next `NN`; keep previous ones; append it to the manifest |
 | User wants to tune values (spacing, color, type scale) | Add sliders or controls in the artboard plus a "Copy as prompt" button that copies the chosen values as a prompt |
 | `design/<slug>/` already exists for a new brief | Pick a new slug; never overwrite another design |
+| A message carries design comments, or the user asks to apply them | Follow "Canvas comments" below |
 
 ## Execution Steps
 
@@ -51,9 +52,30 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 
 6. Set `width`/`height` to the artboard's intended viewport in CSS pixels; keep the manifest in sync with the files on every change.
 
+## Canvas comments
+
+Comments from the canvas are stored in `design/<slug>/comments.json`; the session also receives them as messages that name each comment id.
+
+1. Read the open comments with the `gentle_design_comments` tool (`action: "list"`, optional `slug` and `file`). Without the tool, read `design/<slug>/comments.json` and use the entries whose `status` is `"open"`.
+2. Apply each comment by editing only the artboard in its `file`; use `selector` and `excerpt` to find the element.
+3. Mark each applied comment resolved with the tool (`action: "resolve"`, `slug`, `ids`). Without the tool, set its `status` to `"resolved"` and `resolvedAt` to the current ISO time, keeping every other entry and field as is. Leave comments you did not apply open, and say why.
+
+The file format, for agents that only have file access:
+
+```json
+{
+  "version": 1,
+  "comments": [
+    { "id": "k3x9p2ab", "file": "02-bold.html", "selector": "body > header > h1", "excerpt": "Ship faster", "comment": "Make the headline shorter.", "createdAt": "2026-10-26T10:00:00.000Z", "status": "open", "sentAt": null, "resolvedAt": null }
+  ]
+}
+```
+
+Never delete or reorder entries, and keep the file valid JSON: the canvas refuses to overwrite a file it cannot parse.
+
 ## Output Contract
 
-Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas.
+Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas.
 
 ## References
 

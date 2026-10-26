@@ -66,6 +66,7 @@ export const requiredPaths = [
   // The design canvas server reads its page and scripts from assets/ by path.
   "lib/design-canvas-server.ts",
   "lib/design-open-browser.ts",
+  "lib/design-comments.ts",
   "assets/design-canvas/index.html",
   "assets/design-canvas/canvas.js",
   "assets/design-canvas/canvas.css",

@@ -32,19 +32,26 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
   - renders artboards in iframes sandboxed without `allow-same-origin`;
   - stops on `/gentle:design stop` and on session shutdown.
 - **S7 Design system sync.** `/gentle:design sync` has the agent read the project's design sources: CSS custom properties, the Tailwind theme, the component library and existing tokens. It writes `design/system.md` (tokens and component rules) and `design/system.html` (tokens rendered as an artboard). Later designs use these files. The canvas shows the system board first when it exists. Before finishing an artboard, the skill checks its colors and fonts against the system tokens and fixes any deviation.
-- **S8 Handoff to code.** An "Implement this" action per artboard on the canvas, and `/gentle:design implement <slug>/<artboard>`, send a message to implement that artboard in the project's real stack under ODD. The message uses the artboard as the visual spec and `design/system.md` as the token source. The handoff never commits on its own.
+- **S8 Handoff to code.** An "Implement this" action per artboard on the canvas, and `/gentle:design implement <slug>/<artboard>`, send a message to implement that artboard in the project's real stack under ODD. The message uses the artboard as the visual spec, `design/system.md` as the token source, and lists the artboard's open comments from `comments.json` (S9). The handoff never commits on its own.
+- **S9 Persistent comments.** From the proposal the user accepted in L8 (option 1):
+  - Every comment sent from the canvas is also saved in `design/<slug>/comments.json`, with artboard, selector, excerpt, text, date and status (`open` or `resolved`), so any agent or session can read it.
+  - The canvas shows a pin on each commented element, plus a list of open and resolved comments.
+  - The agent marks a comment `resolved` when it has applied it.
+  - The canvas has two send modes: "Send now" (the S5 behavior) and "Collect", where comments are saved without being sent and a "Send all" button sends them as one batch.
+  - The S8 handoff includes the open comments.
 
 ## Tasks
 
 | ID | Specs | Route | Status | Commit / evidence |
 |----|-------|-------|--------|-------------------|
 | T1 | S1, S2, S3 (`<brief>` and no-args usage) | delegated: context backstop (L4) | done (risk medium: writer self-verification + parent spot check) | `32550812b`; RED 9/9 → GREEN 9/9; parent re-run of focused suites 102/102, `node scripts/check-types.mjs` 0 diagnostics |
-| T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | implemented; independent check pending | part A + B by one writer (parallel to T1 for part A); RED→GREEN 57/57; two security mutations (realpath containment, POST Origin) caught by tests; parent re-run 94/94, types 0 diagnostics |
+| T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | implemented; independent check pending | part A + B by one writer (parallel to T1 for part A); RED→GREEN 57/57; two security mutations (realpath containment, POST Origin) caught by tests; parent re-run 94/94, types 0 diagnostics; real-browser proof (ego-browser) 2a-2d, 2f PASS, 2e partial (ego-lite skips `<select>` on Tab, reproduced without app code); defect D1 fixed in `0e6862116` (RED→GREEN 20/20) |
 | T3 | S7, S3 (`sync`) | delegated: context backstop | pending | |
+| T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | implemented; native review pending (with T2 + D1) | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
 | T4 | S8, S3 (`implement`) | delegated: context backstop | pending | |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
-Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = the T2 commit (`feat(design): add local design canvas with comments`).
+Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 (`feat(design): persist canvas comments with pins and batch send`). PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
 
 ## Log
 
@@ -53,3 +60,7 @@ Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = the T2 commit (`feat(desi
 - **L3** (2026-10-26) User: "1" (build the canvas ourselves).
 - **L4** (2026-10-26) The runtime context backstop fired before the first write, so every task runs in a bounded writer with a short handoff. Pi API facts: `pi.sendUserMessage(content, { deliverAs: "steer" | "followUp" })`; skills are invocable as `/skill:<name>`; extensions register with `pi.registerCommand`; package files are listed in `scripts/verify-package-files.mjs`.
 - **L5** (2026-10-26) T1 landed in `32550812b`. `sendUserMessage` expands `/skill:<name>` only with `expandPromptTemplates: true` and only when the skill is loaded (`pi.getCommands()` lists `skill:gentle-design`); otherwise the command points the model at the bundled SKILL.md path. The palette entry goes in Session. The parent made the test scratch dirs clean themselves.
+- **L6** (2026-10-26) T2 is in `23bc81271`. Native assess says `reviewDue: true` (high: process boundary in `lib/design-open-browser.ts`). The real-browser proof found D1: Chromium sends `Origin: null` for subresources of sandboxed artboards, so the server's 403 meant `inspector.js` never ran. Fixed in `0e6862116`: GET accepts `Origin: null` only for `files/` and `assets/inspector.js`, and every POST still needs the exact own Origin. The native review START waits for the user's answer about comment persistence (S9 proposal).
+- **L7** (2026-10-26) User: "pero como se usan los comentarios ? quien los lee ? son para dar input al agente par que este haga las mejoras luego de los mismos ? se puede exportar en un archivo que luego lo puede usar otro agente ? etc"
+- **L8** (2026-10-26) User: "lo agregamos dale, el 1". This accepts the S9 proposal: comments.json with states, pins, a Collect mode with "Send all", and open comments in the handoff. S8 was rewritten to add the open comments. T5 was added before the T2 native review, so one review covers T2 + D1 + T5 (base `32550812b`).
+- **L9** (2026-10-26) T5 is done. Under the session's delivery permission the parent decided: the send mode stays in localStorage (it lasts while that server runs, as documented), and the agent resolves comments through the `gentle_design_comments` tool. Hand edits of comments.json are last-rename-wins, but they never corrupt the file.

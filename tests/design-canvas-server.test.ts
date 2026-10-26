@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { TestContext } from "node:test";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { formatDesignComment, startDesignCanvasServer, type DesignComment } from "../lib/design-canvas-server.ts";
+import { formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignComment } from "../lib/design-canvas-server.ts";
 
 const TOKEN = "test-token-0123456789abcdef";
 const ASSET_DIR = fileURLToPath(new URL("../assets/design-canvas/", import.meta.url));
@@ -77,9 +77,16 @@ function fixture(t: TestContext) {
 async function start(t: TestContext, extra: { initialSlug?: string } = {}) {
 	const { root } = fixture(t);
 	const comments: DesignComment[] = [];
-	const server = await startDesignCanvasServer({ designRoot: root, onComment: (comment) => { comments.push(comment); }, randomToken: () => TOKEN, ...extra });
+	const batches: DesignComment[][] = [];
+	const server = await startDesignCanvasServer({
+		designRoot: root,
+		onComment: (comment) => { comments.push(comment); },
+		onComments: (batch) => { batches.push(batch); },
+		randomToken: () => TOKEN,
+		...extra,
+	});
 	t.after(() => server.close());
-	return { server, root, comments, port: server.port, base: `/${TOKEN}/` };
+	return { server, root, comments, batches, port: server.port, base: `/${TOKEN}/` };
 }
 
 test("start returns a loopback URL with a random base64url token by default", async (t) => {
@@ -309,7 +316,10 @@ test("a valid comment is accepted with 202 and delivered trimmed and bounded", a
 	}, { "Content-Type": "application/json; charset=utf-8" });
 	assert.equal(reply.status, 202);
 	assert.equal(comments.length, 1);
-	assert.deepEqual(comments[0], {
+	const { id, ...delivered } = comments[0];
+	assert.match(id, /^[a-z0-9]{6,12}$/);
+	assert.deepEqual(JSON.parse(reply.body), { ok: true, id, sent: true });
+	assert.deepEqual(delivered, {
 		slug: "alpha",
 		file: "sub/inner.html",
 		selector: "body > main:nth-of-type(2) > h1",
@@ -320,12 +330,143 @@ test("a valid comment is accepted with 202 and delivered trimmed and bounded", a
 	assert.equal(comments[1].excerpt, "");
 });
 
-test("a failing onComment yields 500 without crashing the server", async (t) => {
+type Stored = { id: string; file: string; selector: string; excerpt: string; comment: string; status: string; sentAt: string | null; resolvedAt: string | null };
+
+function storedComments(root: string, slug = "alpha"): Stored[] {
+	return JSON.parse(readFileSync(join(root, slug, "comments.json"), "utf8")).comments;
+}
+
+test("a failing onComment yields 500, keeps the comment saved and unsent, and the server survives", async (t) => {
 	const { root } = fixture(t);
 	const server = await startDesignCanvasServer({ designRoot: root, onComment: () => { throw new Error("boom"); }, randomToken: () => TOKEN });
 	t.after(() => server.close());
-	assert.equal((await postComment(server.port, VALID)).status, 500);
+	const reply = await postComment(server.port, VALID);
+	assert.equal(reply.status, 500);
+	const [saved] = storedComments(root);
+	assert.deepEqual(JSON.parse(reply.body), { error: "delivery-failed", id: saved.id, saved: true, sent: false });
+	assert.equal(saved.sentAt, null);
+	assert.equal(saved.status, "open");
 	assert.equal((await rawRequest(server.port, `/${TOKEN}/api/designs`)).status, 200);
+});
+
+test("send mode saves the comment, delivers it with its id, then marks it sent", async (t) => {
+	const { port, root, comments } = await start(t);
+	const reply = await postComment(port, { ...VALID, mode: "send" });
+	assert.equal(reply.status, 202);
+	const [saved] = storedComments(root);
+	assert.deepEqual(comments, [{ ...VALID, id: saved.id }]);
+	assert.notEqual(saved.sentAt, null);
+	assert.deepEqual({ file: saved.file, selector: saved.selector, excerpt: saved.excerpt, comment: saved.comment, status: saved.status }, { file: VALID.file, selector: VALID.selector, excerpt: VALID.excerpt, comment: VALID.comment, status: "open" });
+	assert.equal((await postComment(port, { ...VALID, mode: "later" })).status, 400);
+});
+
+test("collect mode saves without delivering, and the comments route lists it", async (t) => {
+	const { port, root, comments, batches, base } = await start(t);
+	const reply = await postComment(port, { ...VALID, mode: "collect" });
+	assert.equal(reply.status, 201);
+	const [saved] = storedComments(root);
+	assert.deepEqual(JSON.parse(reply.body), { ok: true, id: saved.id, sent: false });
+	assert.equal(saved.sentAt, null);
+	assert.deepEqual(comments, []);
+	assert.deepEqual(batches, []);
+	const listed = await rawRequest(port, `${base}api/designs/alpha/comments`);
+	assert.equal(listed.status, 200);
+	assert.deepEqual(JSON.parse(listed.body), { version: 1, comments: [saved] });
+	assert.deepEqual(JSON.parse((await rawRequest(port, `${base}api/designs/beta/comments`)).body), { version: 1, comments: [] });
+	assert.equal((await rawRequest(port, `${base}api/designs/missing/comments`)).status, 404);
+	assert.equal((await rawRequest(port, `${base}api/designs/Alpha/comments`)).status, 404);
+	writeFileSync(join(root, "beta", "comments.json"), "{ broken");
+	const broken = await rawRequest(port, `${base}api/designs/beta/comments`);
+	assert.equal(broken.status, 422);
+	assert.equal(JSON.parse(broken.body).error, "invalid-comments");
+});
+
+function postJson(port: number, path: string, body: unknown, headers: Record<string, string> = {}) {
+	return rawRequest(port, `/${TOKEN}/${path}`, {
+		method: "POST",
+		headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json", ...headers },
+		body: JSON.stringify(body),
+	});
+}
+
+test("send-all delivers one batch with every open unsent comment and marks them sent", async (t) => {
+	const { port, root, comments, batches } = await start(t);
+	await postComment(port, { ...VALID, comment: "first", mode: "collect" });
+	await postComment(port, { ...VALID, file: "02-bare.html", comment: "second", mode: "collect" });
+	await postComment(port, { ...VALID, comment: "already sent", mode: "send" });
+	await postComment(port, { ...VALID, comment: "resolved one", mode: "collect" });
+	const resolvedId = storedComments(root)[3].id;
+	assert.equal((await postJson(port, `api/designs/alpha/comments/${resolvedId}/status`, { status: "resolved" })).status, 200);
+	const reply = await postJson(port, "api/designs/alpha/comments/send-all", {});
+	assert.equal(reply.status, 202);
+	assert.equal(batches.length, 1);
+	assert.deepEqual(batches[0].map((comment) => comment.comment), ["first", "second"]);
+	assert.deepEqual(batches[0].map((comment) => comment.slug), ["alpha", "alpha"]);
+	const stored = storedComments(root);
+	assert.deepEqual(JSON.parse(reply.body), { ok: true, sent: 2, ids: [stored[0].id, stored[1].id] });
+	assert.ok(stored.slice(0, 3).every((comment) => comment.sentAt !== null));
+	assert.equal(stored[3].sentAt, null, "a resolved comment is not sent");
+	assert.equal(comments.length, 1, "send-all never uses the single-comment callback");
+	const again = await postJson(port, "api/designs/alpha/comments/send-all", {});
+	assert.equal(again.status, 200);
+	assert.deepEqual(JSON.parse(again.body), { ok: true, sent: 0, ids: [] });
+	assert.equal(batches.length, 1, "nothing to send means no delivery");
+});
+
+test("a failing batch delivery leaves the comments unsent", async (t) => {
+	const { root } = fixture(t);
+	const server = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, onComments: () => { throw new Error("boom"); }, randomToken: () => TOKEN });
+	t.after(() => server.close());
+	await postComment(server.port, { ...VALID, mode: "collect" });
+	const reply = await postJson(server.port, "api/designs/alpha/comments/send-all", {});
+	assert.equal(reply.status, 500);
+	assert.equal(JSON.parse(reply.body).error, "delivery-failed");
+	assert.equal(storedComments(root)[0].sentAt, null);
+});
+
+test("the status route resolves and reopens one comment", async (t) => {
+	const { port, root } = await start(t);
+	await postComment(port, { ...VALID, mode: "collect" });
+	const [saved] = storedComments(root);
+	const resolved = await postJson(port, `api/designs/alpha/comments/${saved.id}/status`, { status: "resolved" });
+	assert.equal(resolved.status, 200);
+	assert.equal(JSON.parse(resolved.body).comment.status, "resolved");
+	assert.equal(storedComments(root)[0].status, "resolved");
+	assert.notEqual(storedComments(root)[0].resolvedAt, null);
+	assert.equal((await postJson(port, `api/designs/alpha/comments/${saved.id}/status`, { status: "open" })).status, 200);
+	assert.equal(storedComments(root)[0].status, "open");
+	assert.equal((await postJson(port, `api/designs/alpha/comments/${saved.id}/status`, { status: "done" })).status, 400);
+	assert.equal((await postJson(port, "api/designs/alpha/comments/zzzzzz/status", { status: "resolved" })).status, 404);
+	assert.equal((await postJson(port, "api/designs/alpha/comments/bad%2Fid/status", { status: "resolved" })).status, 404);
+});
+
+test("the new comment routes keep the Host, token, Origin, content-type and method rules", async (t) => {
+	const { port, root, batches } = await start(t);
+	await postComment(port, { ...VALID, mode: "collect" });
+	const [saved] = storedComments(root);
+	const posts = ["api/designs/alpha/comments/send-all", `api/designs/alpha/comments/${saved.id}/status`];
+	const body = JSON.stringify({ status: "resolved" });
+	for (const path of posts) {
+		const own = { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" };
+		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body })).status, 403, `${path} without Origin`);
+		for (const origin of ["http://evil.example", "null", `http://localhost:${port}`]) {
+			assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { ...own, Origin: origin }, body })).status, 403, `${path} ${origin}`);
+		}
+		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { ...own, "Content-Type": "text/plain" }, body })).status, 415, path);
+		assert.equal((await rawRequest(port, `/wrong-token-0123456789/${path}`, { method: "POST", headers: own, body })).status, 404, path);
+		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: own, body, host: `evil.example:${port}` })).status, 421, path);
+		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: own, body: JSON.stringify({ pad: "x".repeat(17 * 1024) }) })).status, 413, path);
+		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`)).status, 405, `${path} GET`);
+	}
+	const list = `/${TOKEN}/api/designs/alpha/comments`;
+	assert.equal((await rawRequest(port, list, { headers: { Origin: "http://evil.example" } })).status, 403);
+	assert.equal((await rawRequest(port, list, { headers: { Origin: "null" } })).status, 403);
+	assert.equal((await rawRequest(port, list, { host: `evil.example:${port}` })).status, 421);
+	assert.equal((await rawRequest(port, `/wrong-token-0123456789/api/designs/alpha/comments`)).status, 404);
+	assert.equal((await rawRequest(port, list, { method: "POST", headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" }, body: "{}" })).status, 405);
+	assert.equal(storedComments(root)[0].status, "open");
+	assert.equal(storedComments(root)[0].sentAt, null);
+	assert.deepEqual(batches, []);
 });
 
 function openEvents(port: number) {
@@ -369,6 +510,17 @@ test("events stream a debounced change after an artboard write", async (t) => {
 	assert.deepEqual(JSON.parse(match[1]), { slug: "alpha", file: "01-hero.html" });
 });
 
+test("events stream a change when comments.json is written", async (t) => {
+	const { port } = await start(t);
+	const events = openEvents(port);
+	t.after(() => events.req.destroy());
+	await events.ready;
+	await events.waitFor(/: connected\n\n/);
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.equal((await postComment(port, { ...VALID, mode: "collect" })).status, 201);
+	await events.waitFor(/event: change\ndata: \{"slug":"alpha","file":"comments\.json"\}\n\n/);
+});
+
 test("close() is idempotent, ends event streams and frees the port", async (t) => {
 	const { root } = fixture(t);
 	const server = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, randomToken: () => TOKEN });
@@ -389,12 +541,13 @@ test("a missing design root lists nothing and still serves the canvas", async (t
 	assert.equal((await rawRequest(server.port, `/${TOKEN}/files/alpha/01.html`)).status, 404);
 });
 
-test("formatDesignComment builds the exact session message", () => {
-	assert.equal(formatDesignComment({ slug: "landing", file: "02-bold.html", selector: "body > header > h1", excerpt: "Ship faster", comment: "Make the headline shorter." }), [
+test("formatDesignComment builds the exact session message with the comment id", () => {
+	assert.equal(formatDesignComment({ id: "k3x9p2", slug: "landing", file: "02-bold.html", selector: "body > header > h1", excerpt: "Ship faster", comment: "Make the headline shorter." }), [
 		"Design comment for design/landing/02-bold.html",
 		"",
 		"Design: landing",
 		"Artboard: design/landing/02-bold.html",
+		"Comment id: k3x9p2",
 		"Element: body > header > h1",
 		"Excerpt: \"Ship faster\"",
 		"",
@@ -402,8 +555,37 @@ test("formatDesignComment builds the exact session message", () => {
 		"Make the headline shorter.",
 		"",
 		"Edit only the artboard design/landing/02-bold.html, following the gentle-design skill.",
+		"When it is applied, mark it resolved with the gentle_design_comments tool (action \"resolve\", slug \"landing\", ids [\"k3x9p2\"]), or set its status to \"resolved\" in design/landing/comments.json.",
 	].join("\n"));
-	assert.match(formatDesignComment({ ...VALID, excerpt: "" }), /\nExcerpt: \(none\)\n/);
+	assert.match(formatDesignComment({ ...VALID, id: "a1", excerpt: "" }), /\nExcerpt: \(none\)\n/);
+});
+
+test("formatDesignCommentBatch builds one exact message listing every comment", () => {
+	const batch: DesignComment[] = [
+		{ id: "aaa111", slug: "landing", file: "01-calm.html", selector: "#cta", excerpt: "Start", comment: "Make it green." },
+		{ id: "bbb222", slug: "landing", file: "02-bold.html", selector: "body > h1", excerpt: "", comment: "Shorter.\nAnd bolder." },
+	];
+	assert.equal(formatDesignCommentBatch(batch), [
+		"Design comments for design/landing (2)",
+		"",
+		"1. Comment id: aaa111",
+		"   Artboard: design/landing/01-calm.html",
+		"   Element: #cta",
+		"   Excerpt: \"Start\"",
+		"   Comment:",
+		"   Make it green.",
+		"",
+		"2. Comment id: bbb222",
+		"   Artboard: design/landing/02-bold.html",
+		"   Element: body > h1",
+		"   Excerpt: (none)",
+		"   Comment:",
+		"   Shorter.",
+		"   And bolder.",
+		"",
+		"Apply each comment following the gentle-design skill, editing only the artboard it names.",
+		"When a comment is applied, mark it resolved with the gentle_design_comments tool (action \"resolve\", slug \"landing\", ids [\"aaa111\", \"bbb222\"]), or set its status to \"resolved\" in design/landing/comments.json.",
+	].join("\n"));
 });
 
 test("canvas assets sandbox artboards without allow-same-origin and reference no remote URL", () => {

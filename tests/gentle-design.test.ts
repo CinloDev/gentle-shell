@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import gentleDesign, { DESIGN_COMMAND_NAME } from "../extensions/gentle-design.ts";
-import { formatDesignComment, type DesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "../lib/design-canvas-server.ts";
+import { formatDesignComment, formatDesignCommentBatch, type DesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "../lib/design-canvas-server.ts";
 import type { OpenInBrowserResult } from "../lib/design-open-browser.ts";
 import { __testing } from "../extensions/skill-registry.ts";
 
@@ -20,13 +20,17 @@ const SKILL_PATH = fileURLToPath(new URL("../skills/design/SKILL.md", import.met
 
 type Registration = { description: string; handler(args: string, ctx: ExtensionContext): Promise<void> };
 type Sent = { content: unknown; options: unknown };
+type ToolResult = { content: Array<{ type: string; text: string }>; details?: unknown };
+type Tool = { name: string; description: string; execute(id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown): Promise<ToolResult> };
 
 function fakePi(skillLoaded = true) {
 	const commands = new Map<string, Registration>();
+	const tools = new Map<string, Tool>();
 	const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
 	const sent: Sent[] = [];
 	const pi = {
 		registerCommand: (name: string, registration: Registration) => commands.set(name, registration),
+		registerTool: (tool: Tool) => tools.set(tool.name, tool),
 		getCommands: () => (skillLoaded ? [{ name: "skill:gentle-design", source: "skill" }] : []),
 		sendUserMessage: (content: unknown, options?: unknown) => sent.push({ content, options }),
 		on: (event: string, handler: (...args: unknown[]) => unknown) => {
@@ -37,7 +41,7 @@ function fakePi(skillLoaded = true) {
 	const emit = async (event: string, payload: unknown) => {
 		for (const handler of handlers.get(event) ?? []) await handler(payload, {});
 	};
-	return { pi, sent, emit, command: () => commands.get(DESIGN_COMMAND_NAME)! };
+	return { pi, sent, emit, command: () => commands.get(DESIGN_COMMAND_NAME)!, tool: (name: string) => tools.get(name) };
 }
 
 function fakeContext(cwd: string, idle = true) {
@@ -274,13 +278,17 @@ test("a canvas comment reaches the session, as a follow-up while the agent is bu
 	gentleDesign(pi, canvas);
 	const { ctx, state } = fakeContext(cwd);
 	await command().handler("open login", ctx);
-	const comment: DesignComment = { slug: "login", file: "01-a.html", selector: "body > h1", excerpt: "A", comment: "Bigger" };
+	const comment: DesignComment = { id: "abc123", slug: "login", file: "01-a.html", selector: "body > h1", excerpt: "A", comment: "Bigger" };
 	await canvas.starts[0].onComment(comment);
 	assert.deepEqual(sent.at(-1), { content: formatDesignComment(comment), options: undefined });
 	state.idle = false;
 	await canvas.starts[0].onComment(comment);
 	assert.deepEqual(sent.at(-1), { content: formatDesignComment(comment), options: { deliverAs: "followUp" } });
 	assert.equal(sent.length, 2);
+	const batch = [comment, { ...comment, id: "def456", comment: "Smaller" }];
+	await canvas.starts[0].onComments!(batch);
+	assert.deepEqual(sent.at(-1), { content: formatDesignCommentBatch(batch), options: { deliverAs: "followUp" } });
+	assert.equal(sent.length, 3, "a batch is one message");
 });
 
 test("integration: a comment POSTed to the real canvas server sends one session message", async (t) => {
@@ -305,7 +313,76 @@ test("integration: a comment POSTed to the real canvas server sends one session 
 		req.end(body);
 	});
 	assert.equal(status, 202);
-	assert.deepEqual(sent, [{ content: formatDesignComment({ slug: "login", file: "01-a.html", selector: "body > h1", excerpt: "A", comment: "Make it red" }), options: undefined }]);
+	const stored = JSON.parse(readFileSync(join(cwd, "design", "login", "comments.json"), "utf8")).comments;
+	assert.equal(stored.length, 1);
+	assert.notEqual(stored[0].sentAt, null);
+	assert.deepEqual(sent, [{ content: formatDesignComment({ id: stored[0].id, slug: "login", file: "01-a.html", selector: "body > h1", excerpt: "A", comment: "Make it red" }), options: undefined }]);
+});
+
+function toolText(result: ToolResult): string {
+	return result.content.map((part) => part.text).join("\n");
+}
+
+function seedComments(cwd: string, slug: string, comments: Array<{ id: string; file?: string; status?: string; comment?: string }>) {
+	const entries = comments.map((entry) => ({
+		id: entry.id,
+		file: entry.file ?? "01-a.html",
+		selector: "body > h1",
+		excerpt: "A",
+		comment: entry.comment ?? `comment ${entry.id}`,
+		createdAt: "2026-10-26T10:00:00.000Z",
+		status: entry.status ?? "open",
+		sentAt: null,
+		resolvedAt: entry.status === "resolved" ? "2026-10-26T11:00:00.000Z" : null,
+	}));
+	writeFileSync(join(cwd, "design", slug, "comments.json"), JSON.stringify({ version: 1, comments: entries }));
+}
+
+test("the gentle_design_comments tool lists open comments, by design and artboard", async () => {
+	const cwd = scratchCwd();
+	// Designs are listed most recent first.
+	writeDesign(cwd, "login", "Login screen", 2000);
+	writeDesign(cwd, "pricing", "Pricing", 1000);
+	seedComments(cwd, "login", [{ id: "aaa111", comment: "Bigger title" }, { id: "bbb222", status: "resolved" }, { id: "ccc333", file: "02-b.html" }]);
+	seedComments(cwd, "pricing", [{ id: "ddd444", comment: "Cheaper" }]);
+	const { pi, tool } = fakePi();
+	gentleDesign(pi);
+	const comments = tool("gentle_design_comments");
+	assert.ok(comments, "the tool is registered");
+	assert.match(comments.description, /comments\.json/);
+	const ctx = fakeContext(cwd).ctx;
+	const all = await comments.execute("1", { action: "list" }, undefined, undefined, ctx);
+	const text = toolText(all);
+	for (const id of ["aaa111", "ccc333", "ddd444"]) assert.ok(text.includes(id), id);
+	assert.ok(!text.includes("bbb222"), "resolved comments are not listed");
+	assert.ok(text.includes("design/login/01-a.html") && text.includes("Bigger title"));
+	assert.deepEqual((all.details as { comments: Array<{ id: string }> }).comments.map((entry) => entry.id), ["aaa111", "ccc333", "ddd444"]);
+	const one = await comments.execute("2", { action: "list", slug: "login", file: "02-b.html" }, undefined, undefined, ctx);
+	assert.deepEqual((one.details as { comments: Array<{ id: string }> }).comments.map((entry) => entry.id), ["ccc333"]);
+	const none = await comments.execute("3", { action: "list", slug: "pricing", file: "09-z.html" }, undefined, undefined, ctx);
+	assert.match(toolText(none), /No open comments/);
+});
+
+test("the gentle_design_comments tool resolves comments by id and writes comments.json", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "login", "Login screen");
+	seedComments(cwd, "login", [{ id: "aaa111" }, { id: "bbb222" }]);
+	const { pi, tool } = fakePi();
+	gentleDesign(pi);
+	const ctx = fakeContext(cwd).ctx;
+	const result = await tool("gentle_design_comments")!.execute("1", { action: "resolve", slug: "login", ids: ["aaa111", "zzz999"] }, undefined, undefined, ctx);
+	assert.match(toolText(result), /Resolved 1 comment/);
+	assert.match(toolText(result), /zzz999/);
+	const stored = JSON.parse(readFileSync(join(cwd, "design", "login", "comments.json"), "utf8")).comments;
+	assert.equal(stored[0].status, "resolved");
+	assert.notEqual(stored[0].resolvedAt, null);
+	assert.equal(stored[1].status, "open");
+	await assert.rejects(tool("gentle_design_comments")!.execute("2", { action: "resolve", slug: "login", ids: [] }, undefined, undefined, ctx), /ids/);
+	await assert.rejects(tool("gentle_design_comments")!.execute("3", { action: "resolve", ids: ["aaa111"] }, undefined, undefined, ctx), /slug/);
+	await assert.rejects(tool("gentle_design_comments")!.execute("4", { action: "resolve", slug: "missing", ids: ["aaa111"] }, undefined, undefined, ctx), /missing/);
+	writeFileSync(join(cwd, "design", "login", "comments.json"), "{ broken");
+	await assert.rejects(tool("gentle_design_comments")!.execute("5", { action: "list", slug: "login" }, undefined, undefined, ctx), /comments\.json/);
+	assert.equal(readFileSync(join(cwd, "design", "login", "comments.json"), "utf8"), "{ broken");
 });
 
 test("sync and implement stay reserved and send nothing", async () => {
