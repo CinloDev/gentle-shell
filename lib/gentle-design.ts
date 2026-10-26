@@ -176,11 +176,16 @@ export interface DesignCanvasDeps {
 	openBrowser?: (url: string) => Promise<OpenInBrowserResult>;
 }
 
+/** `url` is set once the canvas shows something; `opened` says whether the browser opened it. */
+export type DesignOpenNotice = DesignNotice & { url?: string; opened?: boolean };
+
 export interface DesignCanvas {
 	/** Shows `slug`, or the most recent design, on the session's canvas server, starting it when needed. */
-	open(cwd: string, slug?: string): Promise<DesignNotice>;
+	open(cwd: string, slug?: string): Promise<DesignOpenNotice>;
 	/** Closes the running server; false when none was running. */
 	stop(): Promise<boolean>;
+	/** The URL the running canvas last showed; undefined when none is running. */
+	url(): string | undefined;
 }
 
 /** The canvas of `slug`, or the root canvas (system board only) when slug is null. */
@@ -192,7 +197,7 @@ function canvasUrl(server: DesignCanvasServer, slug: string | null): string {
 export function createDesignCanvas(deliver: (message: string) => void | Promise<void>, deps: DesignCanvasDeps = {}): DesignCanvas {
 	const startServer = deps.startServer ?? startDesignCanvasServer;
 	const openBrowser = deps.openBrowser ?? ((url: string) => openInBrowser(url));
-	let running: { root: string; server: Promise<DesignCanvasServer> } | undefined;
+	let running: { root: string; server: Promise<DesignCanvasServer>; url?: string } | undefined;
 
 	async function stop(): Promise<boolean> {
 		const current = running;
@@ -225,7 +230,7 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		return running.server;
 	}
 
-	async function open(cwd: string, requested?: string): Promise<DesignNotice> {
+	async function open(cwd: string, requested?: string): Promise<DesignOpenNotice> {
 		const designs = listDesigns(cwd);
 		// With only design/system.html, the canvas opens on the system board alone (L14).
 		const systemOnly = designs.length === 0 && requested === undefined && hasSystemBoard(cwd);
@@ -243,13 +248,14 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 			return { message: `The design canvas could not start: ${error instanceof Error ? error.message : String(error)}`, level: "error" };
 		}
 		const url = canvasUrl(server, slug);
+		if (running) running.url = url;
 		const result = await openBrowser(url);
-		if (result.opened) return { message: `Design canvas: ${url}`, level: "info" };
+		if (result.opened) return { message: `Design canvas: ${url}`, level: "info", url, opened: true };
 		const reason = result.error ? ` (${result.error})` : "";
-		return { message: `Design canvas: ${url}\nThe browser could not be opened${reason}. Open the URL manually.`, level: "warning" };
+		return { message: `Design canvas: ${url}\nThe browser could not be opened${reason}. Open the URL manually.`, level: "warning", url, opened: false };
 	}
 
-	return { open, stop };
+	return { open, stop, url: () => running?.url };
 }
 
 export const DESIGN_COMMENTS_TOOL_NAME = "gentle_design_comments";
@@ -300,4 +306,62 @@ export async function runDesignCommentsTool(cwd: string, params: DesignCommentsT
 		: [`Open design comments in ${scope} (${found.length}):`, ...found.flatMap((comment) => describeComment(comment.slug, comment)), "", `After applying a comment, resolve it with ${DESIGN_COMMENTS_TOOL_NAME} (action "resolve", slug, ids).`];
 	if (problems.length) lines.push("", "Unreadable comment files:", ...problems.map((problem) => `- ${problem}`));
 	return { text: lines.join("\n"), details: { comments: found } };
+}
+
+export const DESIGN_TOOL_NAME = "gentle_design";
+
+/** Appended to the system prompt while the gentle-design skill is available (S11). */
+export const DESIGN_PROMPT_HINT = [
+	`Gentle Design: any request for a UI design, mockup, screen, landing page or visual directions uses the ${DESIGN_SKILL_NAME} skill by default; read the skill first when it is not loaded.`,
+	`After writing or changing a design, open or refresh it on the canvas with the ${DESIGN_TOOL_NAME} tool (action "open" with the slug), unless the user said not to.`,
+	"Designs stay under design/<slug>/.",
+].join("\n");
+
+export type DesignToolParams = { action: "list" | "open" | "stop" | "implement"; slug?: string; target?: string };
+export type DesignToolDetails =
+	| { designs: Array<{ slug: string; title: string; artboards: Array<{ file: string; title: string }>; error?: string }>; systemBoard: boolean; canvas: { running: boolean; url?: string } }
+	| { url: string; opened: boolean }
+	| { stopped: boolean }
+	| { target: string; warnings: string[] };
+/** `texts` become the tool's content parts; a refusal throws, so Pi flags the result as an error. */
+export type DesignToolResult = { texts: string[]; details: DesignToolDetails };
+
+function listDesignTool(cwd: string, canvas: DesignCanvas): DesignToolResult {
+	const designRoot = join(cwd, "design");
+	const designs = listDesigns(cwd).map(({ slug, title }) => {
+		try {
+			const artboards = readDesignManifest(designRoot, slug).artboards.map(({ file, title }) => ({ file, title }));
+			return { slug, title, artboards };
+		} catch (error) {
+			return { slug, title, artboards: [], error: error instanceof Error ? error.message : String(error) };
+		}
+	});
+	const systemBoard = hasSystemBoard(cwd);
+	const url = canvas.url();
+	const lines = designs.length === 0 ? ["No designs in design/ yet."] : [`Designs in design/ (${designs.length}):`];
+	for (const design of designs) {
+		lines.push(`- ${design.slug}: ${design.title}${design.error ? ` (design.json cannot be read: ${design.error})` : ""}`);
+		for (const artboard of design.artboards) lines.push(`  - ${artboard.file}: ${artboard.title}`);
+	}
+	lines.push(systemBoard ? "System board: design/system.html (shown first on the canvas)." : "No system board (design/system.html).");
+	lines.push(url ? `Canvas: running at ${url}` : "Canvas: not running.");
+	return { texts: [lines.join("\n")], details: { designs, systemBoard, canvas: url ? { running: true, url } : { running: false } } };
+}
+
+/** The gentle_design tool: the /gentle:design actions on the session's canvas, without sending a user message. */
+export async function runDesignTool(cwd: string, params: DesignToolParams, canvas: DesignCanvas): Promise<DesignToolResult> {
+	if (params.action === "list") return listDesignTool(cwd, canvas);
+	if (params.action === "stop") {
+		const stopped = await canvas.stop();
+		return { texts: [stopped ? "Design canvas stopped." : "No design canvas is running."], details: { stopped } };
+	}
+	if (params.action === "open") {
+		const notice = await canvas.open(cwd, params.slug || undefined);
+		if (notice.url === undefined) throw new Error(notice.message);
+		return { texts: [notice.message], details: { url: notice.url, opened: notice.opened === true } };
+	}
+	const target = params.target ?? "";
+	const plan = await planDesignImplement(cwd, target);
+	if (plan.kind === "refuse") throw new Error(plan.notice.message);
+	return { texts: [plan.message, ...plan.warnings.map((warning) => `Warning: ${warning}`)], details: { target: target.trim(), warnings: plan.warnings } };
 }

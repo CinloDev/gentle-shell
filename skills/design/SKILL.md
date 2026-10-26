@@ -1,6 +1,6 @@
 ---
 name: gentle-design
-description: "Trigger: /gentle:design, design a screen, mockup, artboards, UI directions, try a different approach, design system sync. Write self-contained HTML design directions under design/<slug>/."
+description: "Trigger: design a screen or page, mockup, landing page, UI directions, artboards, try a different approach, design system sync. Write self-contained HTML design directions under design/<slug>/."
 license: Apache-2.0
 metadata:
   author: gentleman-programming
@@ -9,7 +9,9 @@ metadata:
 
 ## Activation Contract
 
-Use this skill when the user asks for a visual design, mockup, or UI directions, or iterates on artboards under `design/`. Do not use it to implement production code in the project's stack.
+Use this skill by default whenever the user asks, in plain words, for a UI design, mockup, screen, landing page, or visual directions, or iterates on artboards under `design/`. Do not use it to implement production code in the project's stack.
+
+The `/gentle:design` commands are optional shortcuts: every action also works from a plain request, through this skill and the `gentle_design` tool (`list`, `open`, `stop`, `implement`).
 
 ## Hard Rules
 
@@ -31,6 +33,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 | `design/<slug>/` already exists for a new brief | Pick a new slug; never overwrite another design |
 | A message carries design comments, or the user asks to apply them | Follow "Canvas comments" below |
 | `/gentle:design sync`, or the user asks to capture the project's design system | Follow "Design system sync" below |
+| The user asks to show, stop, or list designs, or to implement an artboard | Call the `gentle_design` tool (`open`, `stop`, `list`, or `implement` with `<slug>/<artboard>`); follow the handoff text `implement` returns |
 
 ## Execution Steps
 
@@ -54,6 +57,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 
 6. Set `width`/`height` to the artboard's intended viewport in CSS pixels; keep the manifest in sync with the files on every change. Fields: `title`, `brief`, optional `feature`, and `artboards[]` with `file`, `title`, `tradeoff`, `width`, `height`.
 7. ODD link: when the design comes from a tracked ODD feature (an existing `odd/tasks/<feature>.md` for the current work), set `feature` to that path and append one entry to that document's `## Log` naming `design/<slug>/` and its artboards. For small untracked work, omit `feature` and leave the design standalone; never create a feature document just to link it.
+8. After writing or changing artboards, call the `gentle_design` tool with `action: "open"` and the slug, unless the user said not to; it reuses a running canvas. Report the URL it returns.
 
 ## Design system sync
 
@@ -86,7 +90,7 @@ Never delete or reorder entries, and keep the file valid JSON: the canvas refuse
 
 ## Output Contract
 
-Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas. For a sync, return the source paths read, the token counts per group, and whether the system is a proposed starter.
+Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Give the canvas URL from step 8, or mention that `/gentle:design open <slug>` shows the canvas when you did not open it. For a sync, return the source paths read, the token counts per group, and whether the system is a proposed starter.
 
 ## References
 

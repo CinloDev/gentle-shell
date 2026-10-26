@@ -44,6 +44,23 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
   - Assumption: the link goes both ways. The skill appends a Log entry to that feature document naming `design/<slug>/` and its artboards, and the canvas shows the linked feature document.
   - Assumption: when an artboard with a `feature` link is handed off (S8), the message says to track the implementation in that feature document instead of sizing it from scratch.
   - The server validates `feature` (a relative `.md` path under `odd/tasks/`); an invalid value is ignored and reported, never served.
+- **S11 Natural language by default.** User (L18): "los /gentle:design deberian de poder usarse con lenguaje naturla ahora me obliga tener que ejeuctaros a mano, y cuando se pide un diseño deberia ser por defecto". Acceptance (assumptions marked):
+  - Every `/gentle:design` action is reachable by asking in natural language, without typing the command. A `gentle_design` tool gives the model the actions:
+    - `list` (the designs);
+    - `open` (optional slug; returns the canvas URL);
+    - `stop`;
+    - `implement` (`<slug>/<artboard>`; returns the same handoff text as the command, which the model then follows).
+    - Brief and `sync` are covered by the skill itself.
+  - Any request for a UI design, mockup, screen or directions uses the gentle-design flow by default, without naming the skill or the command. This holds for every provider: a short system-prompt hint plus the skill trigger.
+  - Assumption: after writing or changing a design, the model opens the canvas on it with the tool by default, or reuses the open one. This does not apply when the user says not to.
+- **S12 Canvas focus mode.** User (L18): "dentro del canvas, estaria bueno tener que hacer click en un elemento para que este caputre el mouse, sino el scroll anda raro porque a veces lo hace dentro y otra veces fuera, la forma correcta seria: capturar el mouse, poner en zoom 100% ese canvas como qeu estas utlizando ese diseño realmente para tener el look and feel más próximo a prod, y tener que hacer click en un lugar espcial o combinacion de teclas para salir y volver al modo navegacion". Acceptance (assumptions marked):
+  - Navigation mode is the default. In it, the wheel, trackpad and drag ALWAYS pan or zoom the canvas, wherever the pointer is, including over an artboard. No artboard receives the scroll or clicks.
+  - Clicking an artboard (outside comment mode) enters focus mode on it:
+    - the canvas zooms to exactly 100% and centers that artboard;
+    - the artboard captures the mouse and keyboard and behaves like the real page: its own scroll, hovers, clicks, inputs;
+    - the rest of the canvas is dimmed and does not pan.
+  - Exit back to navigation mode through a visible special control (a "Back to canvas" button) or a key combination. Assumption: `Shift+Esc`, which also works while focus is inside the artboard. Plain `Esc` stays with the design. On exit, the previous zoom and position return.
+  - Comment mode keeps working: in comment mode a click picks an element instead of entering focus mode.
 
 ## Tasks
 
@@ -53,6 +70,8 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 | T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | done (risk high: independent verifier, no blockers) | part A + B by one writer (parallel to T1 for part A); RED→GREEN 57/57; two security mutations (realpath containment, POST Origin) caught by tests; parent re-run 94/94, types 0 diagnostics; real-browser proof (ego-browser) 2a-2d, 2f PASS, 2e partial (ego-lite skips `<select>` on Tab, reproduced without app code); defect D1 fixed in `0e6862116` (RED→GREEN 20/20) |
 | T3 | S7, S3 (`sync`) | delegated: context backstop | done (risk medium: writer self-verification + parent spot check; new server route goes to the feature-end verifier) | commit `feat(design): sync the project design system into a system board`; RED 9 new → GREEN; parent re-run 113/113, types 0; real-browser proof all PASS |
 | T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | done (risk high: independent verifier, no blockers); commit `e8cd68c2b` | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
+| T6 | S11 | delegated: Writer trigger (a) parallel with T7, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): drive the design flow from natural language`; RED 11/12 → GREEN 46/46; mutation on the child guard caught; focused 149/149, types 0 |
+| T7 | S12 | delegated: Writer trigger (a) parallel with T6, disjoint surfaces; docs paragraph reported to the parent | pending | |
 | T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | done (risk high: feature-end independent verifier PASS after one correction) | commit `feat(design): hand artboards off to code and link designs to ODD features`; RED 11 new → GREEN; parent re-run 123/123, types 0; real-browser proof all PASS |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
@@ -95,3 +114,8 @@ Slice boundaries: PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + `81f22
   - A3 (a nonexistent feature document is not checked) is accepted.
   - RED 3 → GREEN; focused suites 143/143; types 0.
   The recheck is limited to B1: the new test asserts `open foo` and `open` give identical notices.
+- **L18** (2026-10-26) User: "varias cosas: 1- los /gentle:design deberian de poder usarse con lenguaje naturla ahora me obliga tener que ejeuctaros a mano, y cuando se pide un diseño deberia ser por defecto 2- dentro del canvas, estaria bueno tener que hacer click en un elemento para que este caputre el mouse, sino el scroll anda raro porque a veces lo hace dentro y otra veces fuera, la forma correcta seria: capturar el mouse, poner en zoom 100% ese canvas como qeu estas utlizando ese diseño realmente para tener el look and feel más próximo a prod, y tener que hacer click en un lugar espcial o combinacion de teclas para salir y volver al modo navegacion". Added S11 → T6 and S12 → T7, launched in parallel with disjoint edit surfaces; the parent owns docs/gentle-shell.md and README.md.
+- **L19** (2026-10-26) T6 done. The hint is injected with `appendSystemPromptOnce` in `before_agent_start` (the gentle-todo pattern) and skipped when `GENTLE_PI_AGENTS_CHILD=1`. The parent decided:
+  - not to also skip in-process named agents: `isNamedAgentStartEvent` is private to extensions/gentle-ai.ts, and the delegated children are already excluded by the env marker;
+  - not to re-add `/gentle:design` to the skill description.
+  The writer briefly copied extensions/gentle-design.ts to /tmp for a mutation check, restored it, and removed the copy (reported).

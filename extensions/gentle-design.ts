@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, createDesignCanvas, designRunMessage, designUsage, hasSystemBoard, listDesigns, parseDesignArgs, planDesignImplement, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
+import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
+import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_PROMPT_HINT, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, DESIGN_TOOL_NAME, createDesignCanvas, designRunMessage, designUsage, hasSystemBoard, listDesigns, parseDesignArgs, planDesignImplement, runDesignCommentsTool, runDesignTool, type DesignCanvasDeps, type DesignCommentsToolParams, type DesignToolParams } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
@@ -12,6 +13,8 @@ import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_
 // resolve those comments. sync runs the skill's design-system mode, which
 // writes design/system.md and design/system.html; implement (and the canvas
 // Implement button) hands one artboard off to the project's real stack.
+// The gentle_design tool gives the model list/open/stop/implement on the same
+// canvas, and a system-prompt hint makes the skill the default design flow.
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
@@ -22,9 +25,17 @@ const DesignCommentsParams = Type.Object({
 	ids: Type.Optional(Type.Array(Type.String(), { maxItems: 500, description: "Comment ids to resolve" })),
 });
 
+const DesignParams = Type.Object({
+	action: Type.Union([Type.Literal("list"), Type.Literal("open"), Type.Literal("stop"), Type.Literal("implement")], { description: "list: designs, artboards and canvas state; open: show a design on the canvas; stop: close the canvas; implement: get the handoff for one artboard" }),
+	slug: Type.Optional(Type.String({ description: "Design slug for open (directory under design/); defaults to the most recent design" })),
+	target: Type.Optional(Type.String({ description: "Artboard for implement, as <slug>/<artboard>, such as login/01-split.html" })),
+});
+
 export interface GentleDesignDeps extends DesignCanvasDeps {
 	/** Absolute path of the bundled skill, named in the message when Pi has not loaded it. */
 	skillPath?: string;
+	/** Process environment; a delegated child session (GENTLE_PI_AGENTS_CHILD=1) gets no prompt hint. */
+	env?: NodeJS.ProcessEnv;
 }
 
 /** A stale or replaced context counts as busy, so a comment is queued rather than interrupting. */
@@ -50,11 +61,12 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 		ctx.ui.notify(notice.message, notice.level);
 	};
 
+	const skillLoaded = () => pi.getCommands().some((command) => command.name === `skill:${DESIGN_SKILL_NAME}`);
+
 	// sendUserMessage expands /skill:<name> only when Pi loaded that skill;
 	// an unknown skill command would reach the model verbatim.
 	const runSkill = (request: string, ctx: ExtensionContext) => {
-		const loaded = pi.getCommands().some((command) => command.name === `skill:${DESIGN_SKILL_NAME}`);
-		const content = designRunMessage(request, { loaded, path: skillPath });
+		const content = designRunMessage(request, { loaded: skillLoaded(), path: skillPath });
 		pi.sendUserMessage(content, ctx.isIdle() ? { expandPromptTemplates: true } : { expandPromptTemplates: true, deliverAs: "followUp" });
 	};
 
@@ -98,6 +110,29 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 			const result = await runDesignCommentsTool(ctx.cwd, params as DesignCommentsToolParams);
 			return { content: [{ type: "text" as const, text: result.text }], details: result.details };
 		},
+	});
+	pi.registerTool({
+		name: DESIGN_TOOL_NAME,
+		label: "Gentle Design",
+		description: "Drive the gentle-design canvas: list the designs under design/ (artboards, system board, whether the canvas runs and its URL); open a design on the local canvas (optional slug, default the most recent) or refresh it after writing or changing artboards, returning the URL; stop the canvas; implement one artboard (target <slug>/<artboard>), which returns the handoff instructions to follow. Write briefs and run the design-system sync by following the gentle-design skill, not this tool.",
+		promptSnippet: "List gentle-design designs, open or stop their canvas, and get an artboard's implementation handoff.",
+		parameters: DesignParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Comments from a canvas the tool opened are queued while this run is busy.
+			latest = ctx;
+			const result = await runDesignTool(ctx.cwd, params as DesignToolParams, canvas);
+			return { content: result.texts.map((text) => ({ type: "text" as const, text })), details: result.details };
+		},
+	});
+	// gentle-shell#1485: appendSystemPrompt reaches every provider. Delegated
+	// children only run their task, so they never get the default design flow.
+	const env = deps.env ?? process.env;
+	pi.on("before_agent_start", (event) => {
+		if (env.GENTLE_PI_AGENTS_CHILD === "1") return undefined;
+		const options = event.systemPromptOptions;
+		const available = options?.skills?.some((skill) => skill.name === DESIGN_SKILL_NAME) || skillLoaded();
+		if (available) appendSystemPromptOnce(options, DESIGN_PROMPT_HINT);
+		return undefined;
 	});
 	pi.on("session_shutdown", async () => {
 		latest = undefined;

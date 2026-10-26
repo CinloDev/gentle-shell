@@ -660,3 +660,215 @@ test("skills/design/SKILL.md is named gentle-design and documents the manifest f
 		assert.ok(source.includes(field), `SKILL.md mentions ${field}`);
 	}
 });
+
+// S11: the gentle_design tool reaches every /gentle:design action without the
+// command, and a system-prompt hint makes the gentle-design flow the default.
+
+function designTool(fake: ReturnType<typeof fakePi>) {
+	const tool = fake.tool("gentle_design");
+	assert.ok(tool, "the gentle_design tool is registered");
+	return (params: unknown, ctx: ExtensionContext) => tool.execute("call", params, undefined, undefined, ctx);
+}
+
+test("the gentle_design tool description says when to use it and leaves briefs and sync to the skill", () => {
+	const fake = fakePi();
+	gentleDesign(fake.pi);
+	const description = fake.tool("gentle_design")!.description;
+	for (const part of ["list", "open", "stop", "implement", "canvas", "<slug>/<artboard>", "gentle-design skill", "sync"]) assert.ok(description.includes(part), `the description names ${part}`);
+});
+
+test("gentle_design list names each design with its artboards, the system board and the canvas state", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	writeDesign(cwd, "pricing", "Pricing", 1000);
+	utimesSync(join(cwd, "design", "login", "design.json"), 2000, 2000);
+	writeFileSync(join(cwd, "design", "system.html"), "<h1>Tokens</h1>");
+	const fake = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(fake.pi, canvas);
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	const result = await run({ action: "list" }, ctx);
+	assert.equal(toolText(result), [
+		"Designs in design/ (2):",
+		"- login: Login screen",
+		"  - 01-split.html: Split layout",
+		"  - 02-card.html: Centered card",
+		"- pricing: Pricing",
+		"  - 01-a.html: A",
+		"System board: design/system.html (shown first on the canvas).",
+		"Canvas: not running.",
+	].join("\n"));
+	assert.deepEqual(result.details, {
+		designs: [
+			{ slug: "login", title: "Login screen", artboards: [{ file: "01-split.html", title: "Split layout" }, { file: "02-card.html", title: "Centered card" }] },
+			{ slug: "pricing", title: "Pricing", artboards: [{ file: "01-a.html", title: "A" }] },
+		],
+		systemBoard: true,
+		canvas: { running: false },
+	});
+	assert.equal(canvas.starts.length, 0, "list starts nothing");
+	await run({ action: "open", slug: "pricing" }, ctx);
+	const running = await run({ action: "list" }, ctx);
+	assert.ok(toolText(running).endsWith("Canvas: running at http://127.0.0.1:4100/tok/d/pricing/"), toolText(running));
+	assert.deepEqual((running.details as { canvas: unknown }).canvas, { running: true, url: "http://127.0.0.1:4100/tok/d/pricing/" });
+	await run({ action: "stop" }, ctx);
+	assert.deepEqual(((await run({ action: "list" }, ctx)).details as { canvas: unknown }).canvas, { running: false });
+});
+
+test("gentle_design list with no designs, and with only the system board", async () => {
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const run = designTool(fake);
+	const cwd = scratchCwd();
+	const empty = await run({ action: "list" }, fakeContext(cwd).ctx);
+	assert.equal(toolText(empty), "No designs in design/ yet.\nNo system board (design/system.html).\nCanvas: not running.");
+	assert.deepEqual(empty.details, { designs: [], systemBoard: false, canvas: { running: false } });
+	mkdirSync(join(cwd, "design"), { recursive: true });
+	writeFileSync(join(cwd, "design", "system.html"), "<h1>Tokens</h1>");
+	const system = await run({ action: "list" }, fakeContext(cwd).ctx);
+	assert.equal(toolText(system), "No designs in design/ yet.\nSystem board: design/system.html (shown first on the canvas).\nCanvas: not running.");
+	assert.deepEqual(system.details, { designs: [], systemBoard: true, canvas: { running: false } });
+});
+
+test("gentle_design open starts the canvas once, returns its URL, and /gentle:design open reuses that server", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "pricing-page", "Pricing page", 2000);
+	writeDesign(cwd, "login", "Login screen", 1000);
+	const fake = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(fake.pi, canvas);
+	const run = designTool(fake);
+	const { ctx, notices } = fakeContext(cwd);
+	const opened = await run({ action: "open", slug: "login" }, ctx);
+	assert.equal(toolText(opened), "Design canvas: http://127.0.0.1:4100/tok/d/login/");
+	assert.deepEqual(opened.details, { url: "http://127.0.0.1:4100/tok/d/login/", opened: true });
+	assert.equal(canvas.starts.length, 1);
+	const latest = await run({ action: "open" }, ctx);
+	assert.deepEqual(latest.details, { url: "http://127.0.0.1:4100/tok/d/pricing-page/", opened: true }, "no slug opens the most recent design");
+	await fake.command().handler("open login", ctx);
+	assert.equal(canvas.starts.length, 1, "the command reuses the tool's server");
+	assert.deepEqual(notices, [{ message: toolText(opened), level: "info" }], "the command shows the same notice text");
+	await fake.command().handler("stop", ctx);
+	assert.equal(canvas.closes(), 1);
+	assert.equal(fake.sent.length, 0);
+});
+
+test("gentle_design open reports the manual URL when the browser cannot open", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "login", "Login screen");
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas({ opened: false, error: "spawn xdg-open ENOENT" }));
+	const result = await designTool(fake)({ action: "open", slug: "login" }, fakeContext(cwd).ctx);
+	assert.equal(toolText(result), "Design canvas: http://127.0.0.1:4100/tok/d/login/\nThe browser could not be opened (spawn xdg-open ENOENT). Open the URL manually.");
+	assert.deepEqual(result.details, { url: "http://127.0.0.1:4100/tok/d/login/", opened: false });
+});
+
+test("gentle_design open of an unknown slug fails naming the valid slugs and starts nothing", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "pricing-page", "Pricing page", 2000);
+	writeDesign(cwd, "login", "Login screen", 1000);
+	const fake = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(fake.pi, canvas);
+	await assert.rejects(designTool(fake)({ action: "open", slug: "missing" }, fakeContext(cwd).ctx), { message: 'No design "missing" in design/. Available: pricing-page, login.' });
+	await assert.rejects(designTool(fake)({ action: "open" }, fakeContext(scratchCwd()).ctx), /No designs in design\/ yet/);
+	assert.equal(canvas.starts.length, 0);
+});
+
+test("gentle_design stop closes the canvas, and reports when none is running", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "login", "Login screen");
+	const fake = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(fake.pi, canvas);
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	assert.equal(toolText(await run({ action: "stop" }, ctx)), "No design canvas is running.");
+	await fake.command().handler("open login", ctx);
+	const stopped = await run({ action: "stop" }, ctx);
+	assert.equal(toolText(stopped), "Design canvas stopped.");
+	assert.deepEqual(stopped.details, { stopped: true });
+	assert.equal(canvas.closes(), 1);
+	assert.deepEqual((await run({ action: "stop" }, ctx)).details, { stopped: false });
+});
+
+test("gentle_design implement returns the command's handoff text and sends no message", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "odd/tasks/login-page.md");
+	writeFileSync(join(cwd, "design", "system.md"), "# Tokens");
+	seedComments(cwd, "login", [{ id: "open01", file: "01-split.html" }]);
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx } = fakeContext(cwd);
+	const result = await designTool(fake)({ action: "implement", target: "login/01-split.html" }, ctx);
+	assert.equal(fake.sent.length, 0, "the tool sends no user message");
+	assert.equal(result.content.length, 1);
+	await fake.command().handler("implement login/01-split.html", ctx);
+	assert.equal(fake.sent.length, 1);
+	assert.equal(result.content[0].text, fake.sent[0].content, "byte-identical to the command's message");
+	assert.deepEqual(result.details, { target: "login/01-split.html", warnings: [] });
+});
+
+test("gentle_design implement fails on an unknown target and reports an invalid feature link", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "../outside.md");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	for (const target of ["login/99-none.html", "login", ""]) {
+		await assert.rejects(run({ action: "implement", target }, ctx), /Available: login\/01-split\.html, login\/02-card\.html/, target);
+	}
+	await assert.rejects(run({ action: "implement" }, ctx), /<slug>\/<artboard>/);
+	const result = await run({ action: "implement", target: "login/02-card.html" }, ctx);
+	const warning = "design/login/design.json: feature must be a relative odd/tasks/<name>.md path; it was ignored";
+	assert.ok(result.content[0].text.includes("size it under the project's ODD rules as usual"));
+	assert.equal(result.content[1].text, `Warning: ${warning}`);
+	assert.deepEqual(result.details, { target: "login/02-card.html", warnings: [warning] });
+	assert.equal(fake.sent.length, 0);
+});
+
+const DESIGN_HINT = [
+	"Gentle Design: any request for a UI design, mockup, screen, landing page or visual directions uses the gentle-design skill by default; read the skill first when it is not loaded.",
+	'After writing or changing a design, open or refresh it on the canvas with the gentle_design tool (action "open" with the slug), unless the user said not to.',
+	"Designs stay under design/<slug>/.",
+].join("\n");
+
+async function promptAfterStart(fake: ReturnType<typeof fakePi>, skills: Array<{ name: string }> = []) {
+	const options = { appendSystemPrompt: "", skills };
+	await fake.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "a login screen", systemPrompt: "", systemPromptOptions: options });
+	return options.appendSystemPrompt;
+}
+
+test("the design hint is appended to the system prompt while the gentle-design skill is available", async () => {
+	const loaded = fakePi(true);
+	gentleDesign(loaded.pi, { env: {} });
+	assert.equal(await promptAfterStart(loaded), DESIGN_HINT);
+	const listed = fakePi(false);
+	gentleDesign(listed.pi, { env: {} });
+	assert.equal(await promptAfterStart(listed, [{ name: "gentle-design" }]), DESIGN_HINT, "a skill in the prompt's skill list counts as available");
+	const options = { appendSystemPrompt: "Other block", skills: [] };
+	await loaded.emit("before_agent_start", { type: "before_agent_start", systemPromptOptions: options });
+	await loaded.emit("before_agent_start", { type: "before_agent_start", systemPromptOptions: options });
+	assert.equal(options.appendSystemPrompt, `Other block\n\n${DESIGN_HINT}`, "appended once");
+});
+
+test("the design hint is absent without the skill and in child sessions", async () => {
+	const missing = fakePi(false);
+	gentleDesign(missing.pi, { env: {} });
+	assert.equal(await promptAfterStart(missing, [{ name: "gentle-ai" }]), "");
+	const child = fakePi(true);
+	gentleDesign(child.pi, { env: { GENTLE_PI_AGENTS_CHILD: "1" } });
+	assert.equal(await promptAfterStart(child, [{ name: "gentle-design" }]), "");
+});
+
+test("the skill triggers on natural-language design requests and opens the canvas after writing", () => {
+	const source = readFileSync(SKILL_PATH, "utf8");
+	const description = __testing.parseFrontmatter(source).description ?? "";
+	for (const trigger of ["design", "mockup", "landing page", "UI directions"]) assert.ok(description.includes(trigger), `the description triggers on ${trigger}`);
+	assert.ok(description.length <= 250, `description stays short (${description.length})`);
+	const steps = source.slice(source.indexOf("## Execution Steps"), source.indexOf("\n## ", source.indexOf("## Execution Steps") + 1));
+	assert.match(steps, /`gentle_design`[^\n]*"open"[^\n]*slug[^\n]*unless the user/);
+	assert.match(source, /`\/gentle:design`[^\n]*optional shortcuts/);
+});
