@@ -96,9 +96,9 @@ export function isArtboardPath(value: unknown): value is string {
  * uses, dropping a surrogate pair whole rather than splitting it.
  */
 export function truncateUtf16(value: string, max: number): string {
-	if (value.length <= max) return value;
-	const end = /[\uD800-\uDBFF]/.test(value[max - 1] ?? "") ? max - 1 : max;
-	return value.slice(0, end);
+	const cut = value.length > max ? value.slice(0, max) : value;
+	// A trailing high surrogate is half a pair, whether this cut or the canvas's split it.
+	return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
 }
 
 export function isDesignCommentId(value: unknown): value is string {

@@ -23,15 +23,22 @@ export const DESIGN_SOURCE_LIMITS = { maxDepth: 6, maxFiles: 5000, maxBytes: 256
 
 const SKIPPED_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage"]);
 const TAILWIND_CONFIG = /^tailwind\.config\.(?:js|cjs|mjs|ts)$/;
-const TOKEN_FILE = /token.*\.(?:json|js|ts|css)$/i;
+// "tokens" as a whole word of the base name (tokens.json, design-tokens.ts,
+// theme.tokens.css), never auth or tokenizer files (token.ts, refreshToken.ts)
+// and never tests.
+const TOKEN_FILE = /^(?:.*[.\-_])?tokens(?:[.\-_].*)?\.(?:json|js|ts|css)$/i;
+const TEST_FILE = /\.(?:test|spec)\.[^.]+$/i;
 const STYLESHEET = /\.(?:css|scss|pcss)$/;
 const THEME_FILE = /^theme\.(?:js|ts)$/;
 const CUSTOM_PROPERTY_IN_THEME_BLOCK = /(?::root|\[data-theme[^\]]*\])[^{};]*\{[^}]*--[\w-]+\s*:/;
 
+// One read buffer for the whole synchronous walk; readHead copies out of it.
+const HEAD = Buffer.allocUnsafe(DESIGN_SOURCE_LIMITS.maxBytes);
+
 function readHead(path: string): string {
 	const fd = openSync(path, "r");
 	try {
-		const buffer = Buffer.alloc(DESIGN_SOURCE_LIMITS.maxBytes);
+		const buffer = HEAD;
 		let length = 0;
 		while (length < buffer.length) {
 			const read = readSync(fd, buffer, length, buffer.length - length, length);
@@ -45,7 +52,7 @@ function readHead(path: string): string {
 }
 
 function isDesignSource(name: string, path: string): boolean {
-	if (TAILWIND_CONFIG.test(name) || TOKEN_FILE.test(name)) return true;
+	if (TAILWIND_CONFIG.test(name) || (TOKEN_FILE.test(name) && !TEST_FILE.test(name))) return true;
 	if (STYLESHEET.test(name)) {
 		const css = readHead(path).replace(/\/\*[\s\S]*?\*\//g, "");
 		return css.includes("@theme") || CUSTOM_PROPERTY_IN_THEME_BLOCK.test(css);

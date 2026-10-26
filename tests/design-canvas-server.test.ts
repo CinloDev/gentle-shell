@@ -470,6 +470,16 @@ test("a send-now comment in flight is not delivered again by a parallel send-all
 	assert.notEqual(storedComments(root)[0].sentAt, null);
 });
 
+// The canvas slices excerpts to 300 UTF-16 units, which can split a pair at the boundary.
+test("an excerpt ending in a lone high surrogate within the limit is stored well formed", async (t) => {
+	const { port, root } = await start(t);
+	const reply = await postComment(port, { ...VALID, excerpt: `${"a".repeat(299)}\uD83D` });
+	assert.equal(reply.status, 202);
+	const [saved] = storedComments(root);
+	assert.equal(saved.excerpt, "a".repeat(299));
+	assert.ok(saved.excerpt.isWellFormed(), "no lone surrogate");
+});
+
 // Advisory 2: the server truncates the excerpt in the store's unit (UTF-16) without splitting a pair.
 test("an excerpt of astral characters is truncated to the store limit without a lone surrogate", async (t) => {
 	const { port, root, comments } = await start(t);

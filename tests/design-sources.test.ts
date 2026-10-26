@@ -49,6 +49,14 @@ test("each design source kind is detected, sorted, and plain files are not", (t)
 	]);
 });
 
+test("token files count only when named as design tokens, never auth or tokenizer files", (t) => {
+	const cwd = scratch(t);
+	write(cwd, "src/theme.tokens.css", ".a { margin: 0; }");
+	write(cwd, "src/tokens_v2.js", "export {};");
+	for (const path of ["src/auth/token.ts", "src/auth/refreshToken.ts", "src/csrf-token.js", "src/tokenizer.ts", "src/jwt-token.test.ts", "src/tokens.test.ts", "src/design-tokens.spec.js"]) write(cwd, path, "export {};");
+	assert.deepEqual(detectDesignSources(cwd), ["src/theme.tokens.css", "src/tokens_v2.js"]);
+});
+
 test("a project without design sources, or a missing cwd, has none", (t) => {
 	const cwd = scratch(t);
 	write(cwd, "src/index.ts", "export {};");
