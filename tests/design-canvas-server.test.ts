@@ -275,7 +275,8 @@ test("comment POSTs need the exact own Origin and a JSON content type", async (t
 	assert.equal(noOrigin.status, 403);
 	assert.equal((await postComment(port, VALID, { Origin: "http://evil.example" })).status, 403);
 	assert.equal((await postComment(port, VALID, { Origin: "null" })).status, 403);
-	assert.equal((await postComment(port, VALID, { Origin: `http://localhost:${port}` })).status, 403);
+	assert.equal((await postComment(port, VALID, { Origin: `http://localhost:${port + 1}` })).status, 403);
+	assert.equal((await postComment(port, VALID, { Origin: `http://localhost.evil.test:${port}` })).status, 403);
 	assert.equal((await postComment(port, VALID, { "Content-Type": "text/plain" })).status, 415);
 	assert.equal((await postComment(port, VALID, { "Content-Type": "application/x-www-form-urlencoded" })).status, 415);
 	assert.equal((await rawRequest(port, `/${TOKEN}/api/comments`)).status, 405);
@@ -424,6 +425,66 @@ test("a failing batch delivery leaves the comments unsent", async (t) => {
 	assert.equal(storedComments(root)[0].sentAt, null);
 });
 
+// Advisory 4: a canvas opened through localhost posts with its own localhost origin.
+test("POSTs accept the server's own localhost origin and no look-alike", async (t) => {
+	const { port, root, comments } = await start(t);
+	const localhost = { Origin: `http://localhost:${port}`, "Content-Type": "application/json" };
+	const ok = await rawRequest(port, `/${TOKEN}/api/comments`, { method: "POST", headers: localhost, host: `localhost:${port}`, body: JSON.stringify(VALID) });
+	assert.equal(ok.status, 202);
+	assert.equal(comments.length, 1);
+	const [saved] = storedComments(root);
+	const status = await rawRequest(port, `/${TOKEN}/api/designs/alpha/comments/${saved.id}/status`, { method: "POST", headers: localhost, host: `localhost:${port}`, body: JSON.stringify({ status: "resolved" }) });
+	assert.equal(status.status, 200);
+	for (const origin of [`http://localhost:${port + 1}`, `http://localhost.evil.test:${port}`, "null", `http://localhost`]) {
+		const refused = await rawRequest(port, `/${TOKEN}/api/comments`, { method: "POST", headers: { ...localhost, Origin: origin }, host: `localhost:${port}`, body: JSON.stringify(VALID) });
+		assert.equal(refused.status, 403, origin);
+	}
+	assert.equal(comments.length, 1);
+});
+
+// Advisory 1: a send-now comment still in flight must not ride along in a parallel send-all.
+test("a send-now comment in flight is not delivered again by a parallel send-all", async (t) => {
+	const { root } = fixture(t);
+	const singles: DesignComment[] = [];
+	const batches: DesignComment[][] = [];
+	const server = await startDesignCanvasServer({
+		designRoot: root,
+		onComment: async (comment) => { singles.push(comment); await new Promise((resolve) => setTimeout(resolve, 200)); },
+		onComments: (batch) => { batches.push(batch); },
+		randomToken: () => TOKEN,
+	});
+	t.after(() => server.close());
+	const sendNow = postComment(server.port, { ...VALID, mode: "send" });
+	// Wait until the comment is saved and its delivery has started.
+	while (singles.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+	const sendAll = postJson(server.port, "api/designs/alpha/comments/send-all", {});
+	const [now, all] = await Promise.all([sendNow, sendAll]);
+	assert.equal(now.status, 202);
+	assert.equal(all.status, 200);
+	assert.deepEqual(JSON.parse(all.body), { ok: true, sent: 0, ids: [] });
+	const id = singles[0].id;
+	const deliveries = singles.filter((comment) => comment.id === id).length + batches.flat().filter((comment) => comment.id === id).length;
+	assert.equal(deliveries, 1);
+	assert.notEqual(storedComments(root)[0].sentAt, null);
+});
+
+// Advisory 2: the server truncates the excerpt in the store's unit (UTF-16) without splitting a pair.
+test("an excerpt of astral characters is truncated to the store limit without a lone surrogate", async (t) => {
+	const { port, root, comments } = await start(t);
+	const reply = await postComment(port, { ...VALID, excerpt: "😀".repeat(200) });
+	assert.equal(reply.status, 202);
+	const [saved] = storedComments(root);
+	assert.ok(saved.excerpt.length <= 300, `stored ${saved.excerpt.length} UTF-16 units`);
+	assert.equal(saved.excerpt, "😀".repeat(150));
+	assert.ok(saved.excerpt.isWellFormed(), "no lone surrogate");
+	assert.equal(comments[0].excerpt, saved.excerpt);
+	const odd = await postComment(port, { ...VALID, excerpt: `a${"😀".repeat(200)}` });
+	assert.equal(odd.status, 202);
+	const second = storedComments(root)[1].excerpt;
+	assert.equal(second, `a${"😀".repeat(149)}`, "a pair that would straddle the limit is dropped whole");
+	assert.ok(second.isWellFormed());
+});
+
 test("the status route resolves and reopens one comment", async (t) => {
 	const { port, root } = await start(t);
 	await postComment(port, { ...VALID, mode: "collect" });
@@ -449,7 +510,7 @@ test("the new comment routes keep the Host, token, Origin, content-type and meth
 	for (const path of posts) {
 		const own = { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" };
 		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body })).status, 403, `${path} without Origin`);
-		for (const origin of ["http://evil.example", "null", `http://localhost:${port}`]) {
+		for (const origin of ["http://evil.example", "null", `http://localhost:${port + 1}`, `http://localhost.evil.test:${port}`, `https://127.0.0.1:${port}`]) {
 			assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { ...own, Origin: origin }, body })).status, 403, `${path} ${origin}`);
 		}
 		assert.equal((await rawRequest(port, `/${TOKEN}/${path}`, { method: "POST", headers: { ...own, "Content-Type": "text/plain" }, body })).status, 415, path);

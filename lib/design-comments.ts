@@ -91,6 +91,16 @@ export function isArtboardPath(value: unknown): value is string {
 	return extname(parts[parts.length - 1]).toLowerCase() === ".html";
 }
 
+/**
+ * `value` cut to at most `max` UTF-16 code units, the unit every comment limit
+ * uses, dropping a surrogate pair whole rather than splitting it.
+ */
+export function truncateUtf16(value: string, max: number): string {
+	if (value.length <= max) return value;
+	const end = /[\uD800-\uDBFF]/.test(value[max - 1] ?? "") ? max - 1 : max;
+	return value.slice(0, end);
+}
+
 export function isDesignCommentId(value: unknown): value is string {
 	return typeof value === "string" && ID.test(value);
 }

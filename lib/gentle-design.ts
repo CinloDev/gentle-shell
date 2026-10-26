@@ -1,6 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DESIGN_SLUG, formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
+import { formatDesignComment, listDesignEntries, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
 import { createDesignCommentStore, DesignCommentsError, type StoredDesignComment } from "./design-comments.ts";
 import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.ts";
 
@@ -34,39 +33,9 @@ export interface DesignSummary {
 	mtime: number;
 }
 
-/**
- * Designs under <cwd>/design/*, most recent design.json first: a kebab-case
- * directory counts when it has a design.json; an unreadable title falls back to the slug.
- */
+/** Designs under <cwd>/design, through the listing the canvas server uses (same containment rule). */
 export function listDesigns(cwd: string): DesignSummary[] {
-	let entries;
-	try {
-		entries = readdirSync(join(cwd, "design"), { withFileTypes: true });
-	} catch {
-		return [];
-	}
-	const designs: DesignSummary[] = [];
-	for (const entry of entries) {
-		if (!entry.isDirectory() || !DESIGN_SLUG.test(entry.name)) continue;
-		const path = join(cwd, "design", entry.name, "design.json");
-		let manifest: string;
-		let mtime: number;
-		try {
-			mtime = statSync(path).mtimeMs;
-			manifest = readFileSync(path, "utf8");
-		} catch {
-			continue;
-		}
-		let title = entry.name;
-		try {
-			const parsed = JSON.parse(manifest) as { title?: unknown };
-			if (typeof parsed.title === "string" && parsed.title.trim()) title = parsed.title.trim();
-		} catch {
-			// Keep the slug as the title.
-		}
-		designs.push({ slug: entry.name, title, mtime });
-	}
-	return designs.sort((a, b) => b.mtime - a.mtime || a.slug.localeCompare(b.slug));
+	return listDesignEntries(join(cwd, "design")).map(({ slug, title, mtime }) => ({ slug, title, mtime }));
 }
 
 export const DESIGN_HELP =

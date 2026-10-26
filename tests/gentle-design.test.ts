@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import gentleDesign, { DESIGN_COMMAND_NAME } from "../extensions/gentle-design.ts";
-import { formatDesignComment, formatDesignCommentBatch, type DesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "../lib/design-canvas-server.ts";
+import { formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "../lib/design-canvas-server.ts";
 import type { OpenInBrowserResult } from "../lib/design-open-browser.ts";
 import { __testing } from "../extensions/skill-registry.ts";
 
@@ -383,6 +383,43 @@ test("the gentle_design_comments tool resolves comments by id and writes comment
 	writeFileSync(join(cwd, "design", "login", "comments.json"), "{ broken");
 	await assert.rejects(tool("gentle_design_comments")!.execute("5", { action: "list", slug: "login" }, undefined, undefined, ctx), /comments\.json/);
 	assert.equal(readFileSync(join(cwd, "design", "login", "comments.json"), "utf8"), "{ broken");
+});
+
+// Advisory 8: the command and the canvas server list designs with one containment rule.
+test("a symlinked design inside design/ is listed by the command and the server; one escaping it by neither", async (t) => {
+	const cwd = scratchCwd();
+	const outside = scratchCwd();
+	writeDesign(cwd, "real", "Real design", 3000);
+	// The link target lives inside design/ under a non-slug name, so only the link is a design.
+	mkdirSync(join(cwd, "design", "_shelf", "kept"), { recursive: true });
+	writeFileSync(join(cwd, "design", "_shelf", "kept", "design.json"), JSON.stringify({ title: "Linked", artboards: [{ file: "01-a.html", title: "A", width: 800, height: 600 }] }));
+	writeFileSync(join(cwd, "design", "_shelf", "kept", "01-a.html"), "<h1>A</h1>");
+	symlinkSync(join(cwd, "design", "_shelf", "kept"), join(cwd, "design", "linked"));
+	writeDesign(outside, "away", "Away");
+	symlinkSync(join(outside, "design", "away"), join(cwd, "design", "escaped"));
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("open linked", ctx);
+	assert.deepEqual(canvas.opens, ["http://127.0.0.1:4100/tok/d/linked/"]);
+	await command().handler("open escaped", ctx);
+	assert.equal(canvas.opens.length, 1);
+	assert.equal(notices.at(-1)!.level, "warning");
+	assert.match(notices.at(-1)!.message, /Available: /);
+	const available = notices.at(-1)!.message.replace(/^.*Available: /s, "").replace(/\.$/, "").split(", ").sort();
+	assert.deepEqual(available, ["linked", "real"]);
+	const server = await startDesignCanvasServer({ designRoot: join(cwd, "design"), onComment: () => {}, randomToken: () => "listing-token-0123456789" });
+	t.after(() => server.close());
+	const listed = await new Promise<string>((resolve, reject) => {
+		httpRequest({ host: "127.0.0.1", port: server.port, path: "/listing-token-0123456789/api/designs" }, (res) => {
+			let body = "";
+			res.setEncoding("utf8");
+			res.on("data", (chunk: string) => { body += chunk; });
+			res.on("end", () => resolve(body));
+		}).on("error", reject).end();
+	});
+	assert.deepEqual(JSON.parse(listed).designs.map((design: { slug: string }) => design.slug).sort(), available);
 });
 
 test("sync and implement stay reserved and send nothing", async () => {

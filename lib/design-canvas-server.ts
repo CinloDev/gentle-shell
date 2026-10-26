@@ -1,10 +1,11 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
-import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DESIGN_COMMENTS_FILE, DESIGN_COMMENT_LIMITS, DesignCommentsError, createDesignCommentStore, isDesignCommentId, type StoredDesignComment } from "./design-comments.ts";
+import { DESIGN_COMMENTS_FILE, DESIGN_COMMENT_LIMITS, DesignCommentsError, createDesignCommentStore, isDesignCommentId, truncateUtf16, type StoredDesignComment } from "./design-comments.ts";
 
 // Loopback canvas host for gentle-design (S4-S6). Every route lives under a
 // per-server random token, the Host header must name this server, POSTs need
@@ -268,6 +269,56 @@ async function readBody(req: IncomingMessage): Promise<string> {
 	return Buffer.concat(chunks).toString("utf8");
 }
 
+export type DesignListing = { slug: string; title: string; mtime: number; valid: boolean };
+
+/**
+ * Designs under `designRoot`, most recent design.json first. The one listing the
+ * command and the canvas server share: a kebab-case entry counts, symlink or
+ * not, when its real path stays inside the real design root and it has a
+ * design.json file that also resolves inside it. An invalid manifest is listed
+ * with valid: false and its slug as the title.
+ */
+export function listDesignEntries(designRoot: string): DesignListing[] {
+	let root: string;
+	let entries;
+	try {
+		root = realpathSync(designRoot);
+		entries = readdirSync(root, { withFileTypes: true });
+	} catch (error) {
+		if (isMissing(error)) return [];
+		throw error;
+	}
+	const designs: DesignListing[] = [];
+	for (const entry of entries) {
+		if (!SLUG.test(entry.name) || !(entry.isDirectory() || entry.isSymbolicLink())) continue;
+		let path: string;
+		let info;
+		try {
+			const design = realpathSync(join(root, entry.name));
+			if (!within(root, design) || design === root) continue;
+			path = realpathSync(join(design, "design.json"));
+			if (!within(design, path)) continue;
+			info = statSync(path);
+		} catch (error) {
+			if (isMissing(error)) continue;
+			throw error;
+		}
+		if (!info.isFile()) continue;
+		let title = entry.name;
+		let valid = false;
+		try {
+			if (info.size <= LIMITS.manifestBytes) {
+				title = normalizeManifest(entry.name, readFileSync(path, "utf8")).title;
+				valid = true;
+			}
+		} catch {
+			valid = false;
+		}
+		designs.push({ slug: entry.name, title, mtime: info.mtimeMs, valid });
+	}
+	return designs.sort((a, b) => b.mtime - a.mtime || a.slug.localeCompare(b.slug));
+}
+
 export async function startDesignCanvasServer(options: DesignCanvasServerOptions): Promise<DesignCanvasServer> {
 	if (typeof options.designRoot !== "string" || !isAbsolute(options.designRoot)) throw new Error("designRoot must be an absolute path");
 	if (typeof options.onComment !== "function") throw new Error("onComment must be a function");
@@ -276,13 +327,25 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	if (!TOKEN_SHAPE.test(token)) throw new Error("token must be 16-128 base64url characters");
 	const designRoot = options.designRoot;
 	const store = createDesignCommentStore(designRoot);
-	// One send-all at a time per design, so two clicks never deliver a batch twice.
+	// Deliveries of one design run one at a time (send-now and send-all), so a
+	// comment is never delivered twice: a send-all waits for an in-flight send-now.
 	const sending = new Map<string, Promise<unknown>>();
+
+	function exclusive<T>(slug: string, task: () => Promise<T>): Promise<T> {
+		const previous = sending.get(slug) ?? Promise.resolve();
+		const run = previous.then(task);
+		const settled = run.then(() => undefined, () => undefined);
+		sending.set(slug, settled);
+		void settled.then(() => { if (sending.get(slug) === settled) sending.delete(slug); });
+		return run;
+	}
 	const base = `/${token}/`;
 	const template = await readFile(join(ASSET_DIR, "index.html"), "utf8");
 
 	let port = 0;
 	let origin = "";
+	/** This server's own origins; a canvas may be opened through either Host name. */
+	let ownOrigins = new Set<string>();
 	let closing: Promise<void> | undefined;
 	let watcher: FSWatcher | undefined;
 	const clients = new Set<ServerResponse>();
@@ -352,32 +415,6 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		if (!info.isFile()) throw new HttpError(404, "not-found");
 		if (info.size > LIMITS.manifestBytes) throw new HttpError(422, "design.json is too large");
 		return normalizeManifest(slug, await readFile(path, "utf8"));
-	}
-
-	async function listDesigns() {
-		const root = await rootReal();
-		if (!root) return [];
-		const entries = await readdir(root, { withFileTypes: true });
-		const designs: Array<{ slug: string; title: string; mtime: number; valid: boolean }> = [];
-		for (const entry of entries) {
-			if (!SLUG.test(entry.name) || !(entry.isDirectory() || entry.isSymbolicLink())) continue;
-			const path = await resolveInside(entry.name, ["design.json"]);
-			if (!path) continue;
-			const info = await stat(path).catch(() => undefined);
-			if (!info?.isFile()) continue;
-			let title = entry.name;
-			let valid = false;
-			try {
-				if (info.size <= LIMITS.manifestBytes) {
-					title = normalizeManifest(entry.name, await readFile(path, "utf8")).title;
-					valid = true;
-				}
-			} catch {
-				valid = false;
-			}
-			designs.push({ slug: entry.name, title, mtime: info.mtimeMs, valid });
-		}
-		return designs.sort((a, b) => b.mtime - a.mtime || a.slug.localeCompare(b.slug));
 	}
 
 	function canvasPage(res: ServerResponse, slug: string | null): void {
@@ -459,26 +496,32 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		const selector = collapse(body.selector);
 		if (selector.length < 1 || selector.length > LIMITS.selector) throw new HttpError(400, "invalid-selector");
 		if (body.excerpt !== undefined && typeof body.excerpt !== "string") throw new HttpError(400, "invalid-excerpt");
-		const excerpt = Array.from(collapse(typeof body.excerpt === "string" ? body.excerpt : "")).slice(0, LIMITS.excerpt).join("").trim();
+		const excerpt = truncateUtf16(collapse(typeof body.excerpt === "string" ? body.excerpt : ""), LIMITS.excerpt).trim();
 		const target = await resolveInside(body.slug, segments);
 		const info = target ? await stat(target).catch(() => undefined) : undefined;
 		if (!target || !info?.isFile() || extname(target).toLowerCase() !== ".html") throw new HttpError(400, "invalid-file");
 		const slug = body.slug;
-		const stored = await store.add(slug, { file: segments.join("/"), selector, excerpt, comment }).catch(storeFailure);
-		if (mode === "collect") return reply(res, 201, { ok: true, id: stored.id, sent: false });
-		try {
-			await options.onComment(toDesignComment(slug, stored));
-		} catch {
-			throw new HttpError(500, "delivery-failed", { error: "delivery-failed", id: stored.id, saved: true, sent: false });
+		const input = { file: segments.join("/"), selector, excerpt, comment };
+		if (mode === "collect") {
+			const stored = await store.add(slug, input).catch(storeFailure);
+			return reply(res, 201, { ok: true, id: stored.id, sent: false });
 		}
-		await store.markSent(slug, [stored.id]).catch(storeFailure);
-		reply(res, 202, { ok: true, id: stored.id, sent: true });
+		// Save, deliver and mark sent under the design's delivery lock, so a send-all cannot see it unsent mid-flight.
+		return exclusive(slug, async () => {
+			const stored = await store.add(slug, input).catch(storeFailure);
+			try {
+				await options.onComment(toDesignComment(slug, stored));
+			} catch {
+				throw new HttpError(500, "delivery-failed", { error: "delivery-failed", id: stored.id, saved: true, sent: false });
+			}
+			await store.markSent(slug, [stored.id]).catch(storeFailure);
+			reply(res, 202, { ok: true, id: stored.id, sent: true });
+		});
 	}
 
 	async function sendAll(req: IncomingMessage, res: ServerResponse, slug: string): Promise<void> {
 		await readJsonObject(req, true);
-		const previous = sending.get(slug) ?? Promise.resolve();
-		const run = previous.then(async () => {
+		return exclusive(slug, async () => {
 			const unsent = (await store.listOpen(slug).catch(storeFailure)).filter((comment) => comment.sentAt === null);
 			if (unsent.length === 0) return reply(res, 200, { ok: true, sent: 0, ids: [] });
 			if (!options.onComments) throw new HttpError(501, "batch-delivery-unavailable");
@@ -491,10 +534,6 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 			await store.markSent(slug, ids).catch(storeFailure);
 			reply(res, 202, { ok: true, sent: ids.length, ids });
 		});
-		const settled = run.then(() => undefined, () => undefined);
-		sending.set(slug, settled);
-		void settled.then(() => { if (sending.get(slug) === settled) sending.delete(slug); });
-		return run;
 	}
 
 	async function changeStatus(req: IncomingMessage, res: ServerResponse, slug: string, id: string): Promise<void> {
@@ -575,7 +614,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		if (method !== (post ? "POST" : "GET")) return reply(res, 405, { error: "method-not-allowed" }, { Allow: post ? "POST" : "GET" });
 		if (post) {
 			// Every write needs this server's exact Origin and a JSON body, so no other page can forge one.
-			if (req.headers.origin !== origin) return reply(res, 403, { error: "forbidden" });
+			if (!ownOrigins.has(String(req.headers.origin))) return reply(res, 403, { error: "forbidden" });
 			if (mediaType(req) !== "application/json") return reply(res, 415, { error: "unsupported-media-type" });
 			return post(req, res);
 		}
@@ -583,7 +622,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		// Sandboxed artboards fetch their own subresources with `Origin: null`.
 		const requestOrigin = req.headers.origin;
 		const artboardSubresource = rest[0] === "files" || (rest.length === 2 && rest[0] === "assets" && rest[1] === "inspector.js");
-		const trusted = requestOrigin === undefined || requestOrigin === origin || requestOrigin === `http://localhost:${port}` || (requestOrigin === "null" && artboardSubresource);
+		const trusted = requestOrigin === undefined || ownOrigins.has(requestOrigin) || (requestOrigin === "null" && artboardSubresource);
 		if (!trusted) return reply(res, 403, { error: "forbidden" });
 		return get!(req, res);
 	}
@@ -615,7 +654,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		if (head === "assets" && tail.length === 1) return (_req, res) => serveAsset(res, safeSegment(tail[0]));
 		if (head === "events" && tail.length === 0) return openEvents;
 		if (head === "api" && tail[0] === "designs") {
-			if (tail.length === 1) return async (_req, res) => reply(res, 200, { designs: await listDesigns() });
+			if (tail.length === 1) return async (_req, res) => reply(res, 200, { designs: listDesignEntries(designRoot) });
 			if (tail.length === 2) {
 				const slug = safeSegment(tail[1]);
 				return slug && SLUG.test(slug) ? async (_req, res) => reply(res, 200, await readManifest(slug)) : undefined;
@@ -649,6 +688,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	}
 	port = address.port;
 	origin = `http://${HOST}:${port}`;
+	ownOrigins = new Set([origin, `http://localhost:${port}`]);
 	await ensureWatcher();
 
 	function close(): Promise<void> {
