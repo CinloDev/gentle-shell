@@ -187,3 +187,4 @@ Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413
   - (5) any token holder counts as connected for S14;
   - (6) Chromium ignores `[::1]` in frame-src (L30).
   The parent removed the verifier scratch. Next: push, CI, merge (L31).
+- **L33** (2026-10-26) CI on `02817ee71` was all green (verify, installer ×3, review-repository-windows, session-transport-macos, test ×2, CodeRabbit), and the PR was MERGEABLE CLEAN. CodeRabbit raised 1 new Minor: `/implement` dropped the refusal reason when `onImplement` throws, so the canvas showed only `delivery-failed`. Fixed test-first (RED 1 → GREEN; focused 266/266; types 0). The reason now reaches the response, and the identity check that routes store errors through `handoffFailure` is kept.

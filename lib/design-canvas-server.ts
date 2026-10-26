@@ -652,16 +652,18 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		const manifest = await readManifest(slug);
 		if (!manifest.artboards.some((artboard) => artboard.file === file)) throw new HttpError(400, "invalid-file", { error: "invalid-file", reason: `${file} is not an artboard of design/${slug}` });
 		const onImplement = options.onImplement;
-		const deliveryFailed = new HttpError(500, "delivery-failed", { error: "delivery-failed", slug, file });
+		let deliveryFailed: HttpError | undefined;
 		// Recorded before delivery, so the agent can report progress on it at once (S15);
-		// a failed delivery takes the record back.
+		// a failed delivery takes the record back. The refusal reason reaches the canvas.
 		const { queued } = await sendDesignHandoff(handoffs, { slug, file, feature: manifest.feature }, async () => {
 			try {
 				return await onImplement({ slug, file });
-			} catch {
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				deliveryFailed = new HttpError(500, "delivery-failed", { error: "delivery-failed", slug, file, reason });
 				throw deliveryFailed;
 			}
-		}).catch((error: unknown) => (error === deliveryFailed ? Promise.reject(error) : handoffFailure(error)));
+		}).catch((error: unknown) => (deliveryFailed !== undefined && error === deliveryFailed ? Promise.reject(error) : handoffFailure(error)));
 		reply(res, 202, { ok: true, slug, file, queued });
 	}
 

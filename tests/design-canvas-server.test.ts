@@ -755,7 +755,7 @@ test("implement is 501 without onImplement and 500 when it throws", async (t) =>
 	t.after(() => failing.close());
 	const reply = await postJson(failing.port, "api/designs/alpha/implement", { file: "01-hero.html" });
 	assert.equal(reply.status, 500);
-	assert.equal(JSON.parse(reply.body).error, "delivery-failed");
+	assert.deepEqual(JSON.parse(reply.body), { error: "delivery-failed", slug: "alpha", file: "01-hero.html", reason: "boom" });
 	assert.equal((await rawRequest(failing.port, `/${TOKEN}/api/designs`)).status, 200, "the server survives");
 });
 
