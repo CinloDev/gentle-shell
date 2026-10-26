@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { formatDesignComment, hasSystemTokens, listDesignEntries, formatDesignCommentBatch, readDesignManifest, resolveSystemBoard, startDesignCanvasServer, type DesignArtboard, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
 import { createDesignCommentStore, DesignCommentsError, type StoredDesignComment } from "./design-comments.ts";
 import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.ts";
+import { detectDesignSources, staleDesignSources } from "./design-sources.ts";
 
 // Gentle Design helpers: argument parsing, the designs already written under
 // design/<slug>/design.json, the usage text, the per-session canvas that
@@ -313,13 +314,24 @@ export const DESIGN_TOOL_NAME = "gentle_design";
 /** Appended to the system prompt while the gentle-design skill is available (S11). */
 export const DESIGN_PROMPT_HINT = [
 	`Gentle Design: any request for a UI design, mockup, screen, landing page or visual directions uses the ${DESIGN_SKILL_NAME} skill by default; read the skill first when it is not loaded.`,
+	`Before designing, call the ${DESIGN_TOOL_NAME} tool (action "list"); when the project has design sources but no design/system.md, run the skill's design system sync first.`,
 	`After writing or changing a design, open or refresh it on the canvas with the ${DESIGN_TOOL_NAME} tool (action "open" with the slug), unless the user said not to.`,
 	"Designs stay under design/<slug>/.",
 ].join("\n");
 
 export type DesignToolParams = { action: "list" | "open" | "stop" | "implement"; slug?: string; target?: string };
+/** How many design source paths list names; `total` still counts them all. */
+const LISTED_DESIGN_SOURCES = 20;
+
+export type DesignSystemState = { exists: boolean; file: "design/system.md"; staleSources: string[] };
 export type DesignToolDetails =
-	| { designs: Array<{ slug: string; title: string; artboards: Array<{ file: string; title: string }>; error?: string }>; systemBoard: boolean; canvas: { running: boolean; url?: string } }
+	| {
+		designs: Array<{ slug: string; title: string; artboards: Array<{ file: string; title: string }>; error?: string }>;
+		systemBoard: boolean;
+		designSources: { paths: string[]; total: number };
+		system: DesignSystemState;
+		canvas: { running: boolean; url?: string };
+	}
 	| { url: string; opened: boolean }
 	| { stopped: boolean }
 	| { target: string; warnings: string[] };
@@ -344,8 +356,25 @@ function listDesignTool(cwd: string, canvas: DesignCanvas): DesignToolResult {
 		for (const artboard of design.artboards) lines.push(`  - ${artboard.file}: ${artboard.title}`);
 	}
 	lines.push(systemBoard ? "System board: design/system.html (shown first on the canvas)." : "No system board (design/system.html).");
+	const sources = detectDesignSources(cwd);
+	const exists = hasSystemTokens(designRoot);
+	const system: DesignSystemState = { exists, file: "design/system.md", staleSources: exists ? staleDesignSources(cwd, sources) : [] };
+	lines.push(sources.length === 0 ? "Design sources: none detected." : `Design sources (${sources.length}): ${capped(sources)}`);
+	if (!system.exists) lines.push(`Design system: no design/system.md.${sources.length > 0 ? " Run the skill's Design system sync before designing." : ""}`);
+	else if (system.staleSources.length === 0) lines.push("Design system: design/system.md is up to date.");
+	else {
+		const count = system.staleSources.length;
+		lines.push(`Design system: design/system.md is older than ${count} source${count === 1 ? "" : "s"} changed after it: ${capped(system.staleSources)}. Say its tokens may be outdated and offer to sync again before designing.`);
+	}
 	lines.push(url ? `Canvas: running at ${url}` : "Canvas: not running.");
-	return { texts: [lines.join("\n")], details: { designs, systemBoard, canvas: url ? { running: true, url } : { running: false } } };
+	const designSources = { paths: sources.slice(0, LISTED_DESIGN_SOURCES), total: sources.length };
+	return { texts: [lines.join("\n")], details: { designs, systemBoard, designSources, system, canvas: url ? { running: true, url } : { running: false } } };
+}
+
+function capped(paths: readonly string[]): string {
+	const shown = paths.slice(0, LISTED_DESIGN_SOURCES);
+	if (paths.length > shown.length) shown.push(`… ${paths.length - shown.length} more`);
+	return shown.join(", ");
 }
 
 /** The gentle_design tool: the /gentle:design actions on the session's canvas, without sending a user message. */

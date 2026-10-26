@@ -61,6 +61,11 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
     - the rest of the canvas is dimmed and does not pan.
   - Exit back to navigation mode through a visible special control (a "Back to canvas" button) or a key combination. Assumption: `Shift+Esc`, which also works while focus is inside the artboard. Plain `Esc` stays with the design. On exit, the previous zoom and position return.
   - Comment mode keeps working: in comment mode a click picks an element instead of entering focus mode.
+- **S13 Automatic first sync and stale warning.** From the proposal the user accepted in L23 (option 1):
+  - Case 1: a design is requested, `design/system.md` does not exist, and the project has design sources. The agent runs the design-system sync first, then designs with those tokens.
+  - Case 2: the project has no design sources. The agent designs freely, as today.
+  - Case 3: `design/system.md` exists, but a source it is based on changed after it. The agent tells the user and offers to sync again, instead of silently using stale tokens.
+  - Implementation choice (parent): detection is deterministic. The `gentle_design` `list` action reports the detected design sources and, when `design/system.md` exists, the sources modified after it. The skill and the system-prompt hint tell the agent to check it before designing.
 
 ## Tasks
 
@@ -72,6 +77,7 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 | T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | done (risk high: independent verifier, no blockers); commit `e8cd68c2b` | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
 | T6 | S11 | delegated: Writer trigger (a) parallel with T7, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): drive the design flow from natural language`; RED 11/12 → GREEN 46/46; mutation on the child guard caught; focused 149/149, types 0 |
 | T7 | S12 | delegated: Writer trigger (a) parallel with T6, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + real-browser proof + parent spot check) | commit `feat(design): add canvas navigation and focus modes`; RED 0/7 → GREEN 9/9; real-browser a-h PASS, plus the panel auto-hide rows; seam check 204/204, types 0 |
+| T8 | S13 | delegated: context backstop (single writer) | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): sync the design system automatically before the first design`; RED 10 failing → GREEN 61/61; parent seam check 217/217, types 0 |
 | T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | done (risk high: feature-end independent verifier PASS after one correction) | commit `feat(design): hand artboards off to code and link designs to ODD features`; RED 11 new → GREEN; parent re-run 123/123, types 0; real-browser proof all PASS |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
@@ -129,3 +135,11 @@ Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413
   - A failed `mktemp` in the writer's shell left `~/server.out` and `~/server.pid`, from a server that never started. The parent inspected and removed both, plus the writer's scratch.
   - Seam check over every design test file: 204/204, types 0, syntax ok.
   - Follow-up recorded, not done: pins re-render on every MutationObserver report, which detaches them under a continuously mutating artboard DOM. This was already the case before T7.
+- **L22** (2026-10-26) User: "pr y merge". The PR was being prepared (no remote action taken yet) when the user asked L23.
+- **L23** (2026-10-26) User: "como seria el design con sync ? cuando decide el agente de que lo use?". The parent explained that today the agent never runs sync on its own, and proposed an automatic first sync plus a stale warning. User: "1" (add it before the PR). Added S13 → T8; PR and merge (L22) continue after T8.
+- **L24** (2026-10-26) T8 done. Only the root `design/` is skipped by the source walk, because nested `design/` dirs may hold real sources (accepted).
+  Delivery for L22 ("pr y merge", singular): ONE PR with the whole branch, not the feature-branch chain. Facts that support it:
+  - the target is Gentleman-Programming/gentle-shell, default branch main, 0 commits behind;
+  - `main` is unprotected and the viewer is ADMIN;
+  - no CI size gate exists, and recent merged PRs carry no size label.
+  The PR body lists the per-slice commits as a review guide. Merge only on green required CI.

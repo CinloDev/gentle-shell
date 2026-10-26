@@ -697,6 +697,8 @@ test("gentle_design list names each design with its artboards, the system board 
 		"- pricing: Pricing",
 		"  - 01-a.html: A",
 		"System board: design/system.html (shown first on the canvas).",
+		"Design sources: none detected.",
+		"Design system: no design/system.md.",
 		"Canvas: not running.",
 	].join("\n"));
 	assert.deepEqual(result.details, {
@@ -705,6 +707,8 @@ test("gentle_design list names each design with its artboards, the system board 
 			{ slug: "pricing", title: "Pricing", artboards: [{ file: "01-a.html", title: "A" }] },
 		],
 		systemBoard: true,
+		designSources: { paths: [], total: 0 },
+		system: NO_SYSTEM,
 		canvas: { running: false },
 	});
 	assert.equal(canvas.starts.length, 0, "list starts nothing");
@@ -722,13 +726,83 @@ test("gentle_design list with no designs, and with only the system board", async
 	const run = designTool(fake);
 	const cwd = scratchCwd();
 	const empty = await run({ action: "list" }, fakeContext(cwd).ctx);
-	assert.equal(toolText(empty), "No designs in design/ yet.\nNo system board (design/system.html).\nCanvas: not running.");
-	assert.deepEqual(empty.details, { designs: [], systemBoard: false, canvas: { running: false } });
+	assert.equal(toolText(empty), "No designs in design/ yet.\nNo system board (design/system.html).\nDesign sources: none detected.\nDesign system: no design/system.md.\nCanvas: not running.");
+	assert.deepEqual(empty.details, { designs: [], systemBoard: false, designSources: { paths: [], total: 0 }, system: NO_SYSTEM, canvas: { running: false } });
 	mkdirSync(join(cwd, "design"), { recursive: true });
 	writeFileSync(join(cwd, "design", "system.html"), "<h1>Tokens</h1>");
 	const system = await run({ action: "list" }, fakeContext(cwd).ctx);
-	assert.equal(toolText(system), "No designs in design/ yet.\nSystem board: design/system.html (shown first on the canvas).\nCanvas: not running.");
-	assert.deepEqual(system.details, { designs: [], systemBoard: true, canvas: { running: false } });
+	assert.equal(toolText(system), "No designs in design/ yet.\nSystem board: design/system.html (shown first on the canvas).\nDesign sources: none detected.\nDesign system: no design/system.md.\nCanvas: not running.");
+	assert.deepEqual(system.details, { designs: [], systemBoard: true, designSources: { paths: [], total: 0 }, system: NO_SYSTEM, canvas: { running: false } });
+});
+
+// S13: list reports the project's design sources and whether design/system.md
+// is missing or older than them, so the skill can sync first or warn.
+
+const NO_SYSTEM = { exists: false, file: "design/system.md", staleSources: [] };
+
+function listDetails(result: ToolResult) {
+	return result.details as { designSources: { paths: string[]; total: number }; system: { exists: boolean; file: string; staleSources: string[] } };
+}
+
+test("gentle_design list asks for a sync when the project has design sources but no design/system.md", async () => {
+	const cwd = scratchCwd();
+	writeFileSync(join(cwd, "tailwind.config.js"), "module.exports = {}");
+	mkdirSync(join(cwd, "src"), { recursive: true });
+	writeFileSync(join(cwd, "src", "globals.css"), ":root { --brand: #0a84ff; }");
+	writeFileSync(join(cwd, "src", "plain.css"), "body { margin: 0; }");
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const result = await designTool(fake)({ action: "list" }, fakeContext(cwd).ctx);
+	assert.equal(toolText(result), [
+		"No designs in design/ yet.",
+		"No system board (design/system.html).",
+		"Design sources (2): src/globals.css, tailwind.config.js",
+		"Design system: no design/system.md. Run the skill's Design system sync before designing.",
+		"Canvas: not running.",
+	].join("\n"));
+	assert.deepEqual(listDetails(result).designSources, { paths: ["src/globals.css", "tailwind.config.js"], total: 2 });
+	assert.deepEqual(listDetails(result).system, NO_SYSTEM);
+});
+
+test("gentle_design list names the sources changed after design/system.md, and none when it is current", async () => {
+	const cwd = scratchCwd();
+	writeFileSync(join(cwd, "tailwind.config.js"), "module.exports = {}");
+	writeFileSync(join(cwd, "tokens.json"), "{}");
+	mkdirSync(join(cwd, "design"), { recursive: true });
+	writeFileSync(join(cwd, "design", "system.md"), "# Tokens");
+	utimesSync(join(cwd, "design", "system.md"), 2000, 2000);
+	utimesSync(join(cwd, "tailwind.config.js"), 1000, 1000);
+	utimesSync(join(cwd, "tokens.json"), 3000, 3000);
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const run = designTool(fake);
+	const stale = await run({ action: "list" }, fakeContext(cwd).ctx);
+	assert.ok(toolText(stale).includes("\nDesign system: design/system.md is older than 1 source changed after it: tokens.json. Say its tokens may be outdated and offer to sync again before designing.\n"), toolText(stale));
+	assert.deepEqual(listDetails(stale).system, { exists: true, file: "design/system.md", staleSources: ["tokens.json"] });
+	utimesSync(join(cwd, "tokens.json"), 1000, 1000);
+	const current = await run({ action: "list" }, fakeContext(cwd).ctx);
+	assert.ok(toolText(current).includes("\nDesign system: design/system.md is up to date.\n"), toolText(current));
+	assert.deepEqual(listDetails(current).system, { exists: true, file: "design/system.md", staleSources: [] });
+});
+
+test("gentle_design list caps the design sources it names at 20, with the total", async () => {
+	const cwd = scratchCwd();
+	for (let index = 0; index < 23; index++) writeFileSync(join(cwd, `t${String(index).padStart(2, "0")}-tokens.json`), "{}");
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const result = await designTool(fake)({ action: "list" }, fakeContext(cwd).ctx);
+	const { paths, total } = listDetails(result).designSources;
+	assert.equal(total, 23);
+	assert.equal(paths.length, 20);
+	assert.equal(paths[19], "t19-tokens.json");
+	assert.ok(toolText(result).includes("Design sources (23): t00-tokens.json, "), toolText(result));
+	assert.ok(toolText(result).includes("t19-tokens.json, … 3 more\n"), toolText(result));
+});
+
+test("the gentle_design tool description says to call list before designing", () => {
+	const fake = fakePi();
+	gentleDesign(fake.pi);
+	assert.match(fake.tool("gentle_design")!.description, /Call list before designing/);
 });
 
 test("gentle_design open starts the canvas once, returns its URL, and /gentle:design open reuses that server", async () => {
@@ -831,6 +905,7 @@ test("gentle_design implement fails on an unknown target and reports an invalid 
 
 const DESIGN_HINT = [
 	"Gentle Design: any request for a UI design, mockup, screen, landing page or visual directions uses the gentle-design skill by default; read the skill first when it is not loaded.",
+	'Before designing, call the gentle_design tool (action "list"); when the project has design sources but no design/system.md, run the skill\'s design system sync first.',
 	'After writing or changing a design, open or refresh it on the canvas with the gentle_design tool (action "open" with the slug), unless the user said not to.',
 	"Designs stay under design/<slug>/.",
 ].join("\n");
@@ -871,4 +946,17 @@ test("the skill triggers on natural-language design requests and opens the canva
 	const steps = source.slice(source.indexOf("## Execution Steps"), source.indexOf("\n## ", source.indexOf("## Execution Steps") + 1));
 	assert.match(steps, /`gentle_design`[^\n]*"open"[^\n]*slug[^\n]*unless the user/);
 	assert.match(source, /`\/gentle:design`[^\n]*optional shortcuts/);
+});
+
+test("the skill's Before designing gate lists first, syncs automatically, and offers a re-sync when stale", () => {
+	const source = readFileSync(SKILL_PATH, "utf8");
+	const start = source.indexOf("## Before designing");
+	assert.ok(start !== -1, "SKILL.md has a Before designing section");
+	assert.ok(start < source.indexOf("## Execution Steps"), "the gate comes before the steps");
+	const section = source.slice(start, source.indexOf("\n## ", start + 1));
+	for (const part of ["`gentle_design`", "`list`", "designSources", "Design system sync", "synced", "design freely", "staleSources", "offer to sync again", "outdated"]) {
+		assert.ok(section.includes(part), `the gate mentions ${part}`);
+	}
+	const output = source.slice(source.indexOf("## Output Contract"), source.indexOf("\n## ", source.indexOf("## Output Contract") + 1));
+	assert.match(output, /automatic sync/);
 });

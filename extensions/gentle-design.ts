@@ -15,6 +15,8 @@ import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_PROMPT_HINT, DESIGN_SKIL
 // Implement button) hands one artboard off to the project's real stack.
 // The gentle_design tool gives the model list/open/stop/implement on the same
 // canvas, and a system-prompt hint makes the skill the default design flow.
+// list also reports the project's design sources and whether design/system.md
+// is missing or stale, so the skill syncs first or warns (S13).
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
@@ -26,7 +28,7 @@ const DesignCommentsParams = Type.Object({
 });
 
 const DesignParams = Type.Object({
-	action: Type.Union([Type.Literal("list"), Type.Literal("open"), Type.Literal("stop"), Type.Literal("implement")], { description: "list: designs, artboards and canvas state; open: show a design on the canvas; stop: close the canvas; implement: get the handoff for one artboard" }),
+	action: Type.Union([Type.Literal("list"), Type.Literal("open"), Type.Literal("stop"), Type.Literal("implement")], { description: "list: designs, artboards, design sources, design/system.md state and canvas state; open: show a design on the canvas; stop: close the canvas; implement: get the handoff for one artboard" }),
 	slug: Type.Optional(Type.String({ description: "Design slug for open (directory under design/); defaults to the most recent design" })),
 	target: Type.Optional(Type.String({ description: "Artboard for implement, as <slug>/<artboard>, such as login/01-split.html" })),
 });
@@ -114,7 +116,7 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	pi.registerTool({
 		name: DESIGN_TOOL_NAME,
 		label: "Gentle Design",
-		description: "Drive the gentle-design canvas: list the designs under design/ (artboards, system board, whether the canvas runs and its URL); open a design on the local canvas (optional slug, default the most recent) or refresh it after writing or changing artboards, returning the URL; stop the canvas; implement one artboard (target <slug>/<artboard>), which returns the handoff instructions to follow. Write briefs and run the design-system sync by following the gentle-design skill, not this tool.",
+		description: "Drive the gentle-design canvas. Call list before designing: it reports the project's design sources and whether design/system.md is missing or older than them (sync first, or offer to sync again). list also gives the designs under design/ (artboards, system board, whether the canvas runs and its URL); open a design on the local canvas (optional slug, default the most recent) or refresh it after writing or changing artboards, returning the URL; stop the canvas; implement one artboard (target <slug>/<artboard>), which returns the handoff instructions to follow. Write briefs and run the design-system sync by following the gentle-design skill, not this tool.",
 		promptSnippet: "List gentle-design designs, open or stop their canvas, and get an artboard's implementation handoff.",
 		parameters: DesignParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

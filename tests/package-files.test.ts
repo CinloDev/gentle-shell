@@ -27,7 +27,7 @@ const designCanvas = [
 
 // The design command names its skill file by path when Pi has not loaded it.
 test("the package check requires the design command, its helpers and its skill", () => {
-	const design = ["extensions/gentle-design.ts", "lib/gentle-design.ts", "skills/design/SKILL.md", ...designCanvas];
+	const design = ["extensions/gentle-design.ts", "lib/gentle-design.ts", "lib/design-sources.ts", "skills/design/SKILL.md", ...designCanvas];
 	for (const path of design) assert.ok(requiredPaths.includes(path), `${path} is required`);
 	assert.deepEqual(missingRequiredPaths(root, design), []);
 });

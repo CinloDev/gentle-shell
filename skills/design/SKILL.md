@@ -35,6 +35,16 @@ The `/gentle:design` commands are optional shortcuts: every action also works fr
 | `/gentle:design sync`, or the user asks to capture the project's design system | Follow "Design system sync" below |
 | The user asks to show, stop, or list designs, or to implement an artboard | Call the `gentle_design` tool (`open`, `stop`, `list`, or `implement` with `<slug>/<artboard>`); follow the handoff text `implement` returns |
 
+## Before designing
+
+Run this gate before every new brief: call the `gentle_design` tool with `action: "list"`, then:
+
+| `list` reports | Action |
+| --- | --- |
+| `system.exists` false and `designSources` present | Run "Design system sync" first, tell the user in one line that you synced the project's design system, then design with it |
+| No `designSources` | Skip the sync and design freely |
+| `system.staleSources` present | Name those sources, say `design/system.md` may be outdated, and offer to sync again before designing; re-sync only with the user's OK, and never use the stale tokens silently |
+
 ## Execution Steps
 
 1. Take the brief: goal, layout, content, audience.
@@ -90,7 +100,7 @@ Never delete or reorder entries, and keep the file valid JSON: the canvas refuse
 
 ## Output Contract
 
-Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Give the canvas URL from step 8, or mention that `/gentle:design open <slug>` shows the canvas when you did not open it. For a sync, return the source paths read, the token counts per group, and whether the system is a proposed starter.
+Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, the comment ids resolved in this turn, and any open question. Give the canvas URL from step 8, or mention that `/gentle:design open <slug>` shows the canvas when you did not open it. For a sync, return the source paths read, the token counts per group, and whether the system is a proposed starter; after an automatic sync from "Before designing", say it ran and report it the same way.
 
 ## References
 
