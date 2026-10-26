@@ -56,7 +56,7 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 | T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | done (risk high: feature-end independent verifier PASS after one correction) | commit `feat(design): hand artboards off to code and link designs to ODD features`; RED 11 new → GREEN; parent re-run 123/123, types 0; real-browser proof all PASS |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
-Slice boundaries: PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + the T4 commit; PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 `e8cd68c2b` + advisory fix `643c70795`. PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
+Slice boundaries: PR1 = `32550812b` (413 lines); PR3 = `49d898da0` (T3) + `81f227e27` (T4) + `8c4ac796b` (verifier correction); PR2 = T2 `23bc81271` + D1 `0e6862116` + T5 `e8cd68c2b` + advisory fix `643c70795`. PR2 exceeds the ~400-line heuristic, because the canvas UI and the security tests are one coherent behavior.
 
 ## Log
 
