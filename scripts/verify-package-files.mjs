@@ -63,6 +63,13 @@ export const requiredPaths = [
   "docs/voice.md",
   "extensions/gentle-design.ts",
   "lib/gentle-design.ts",
+  // The design canvas server reads its page and scripts from assets/ by path.
+  "lib/design-canvas-server.ts",
+  "lib/design-open-browser.ts",
+  "assets/design-canvas/index.html",
+  "assets/design-canvas/canvas.js",
+  "assets/design-canvas/canvas.css",
+  "assets/design-canvas/inspector.js",
   "scripts/npm-pack-result.mjs",
   "assets/orchestrator.md",
   "assets/orchestrator-delegation.md",

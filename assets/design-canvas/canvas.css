@@ -1,0 +1,226 @@
+:root {
+	color-scheme: dark;
+	--gd-bg: #111214;
+	--gd-stage: #1a1b1e;
+	--gd-panel: #222327;
+	--gd-border: #3a3b40;
+	--gd-text: #ececee;
+	--gd-muted: #a9abb2;
+	--gd-accent: #8ab4ff;
+	--gd-accent-text: #0b1220;
+	--gd-danger: #ff9b9b;
+	--gd-focus: #ffd479;
+	font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	font-size: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+	margin: 0;
+	height: 100%;
+	background: var(--gd-bg);
+	color: var(--gd-text);
+	overflow: hidden;
+}
+
+body {
+	display: flex;
+	flex-direction: column;
+}
+
+.gd-visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.gd-bar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 12px;
+	background: var(--gd-panel);
+	border-bottom: 1px solid var(--gd-border);
+	flex: none;
+}
+
+.gd-title {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 32ch;
+}
+
+.gd-group {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+button, select, textarea {
+	font: inherit;
+	color: var(--gd-text);
+	background: var(--gd-stage);
+	border: 1px solid var(--gd-border);
+	border-radius: 6px;
+}
+
+button {
+	min-width: 32px;
+	min-height: 32px;
+	padding: 4px 10px;
+	cursor: pointer;
+}
+
+button:hover { border-color: var(--gd-muted); }
+
+select {
+	min-height: 32px;
+	padding: 4px 8px;
+	max-width: 28ch;
+}
+
+button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport:focus-visible {
+	outline: 2px solid var(--gd-focus);
+	outline-offset: 2px;
+}
+
+#gd-zoom-level {
+	min-width: 5ch;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+	color: var(--gd-muted);
+}
+
+.gd-toggle[aria-pressed="true"], .gd-primary {
+	background: var(--gd-accent);
+	border-color: var(--gd-accent);
+	color: var(--gd-accent-text);
+}
+
+.gd-status {
+	margin: 0 0 0 auto;
+	color: var(--gd-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.gd-viewport {
+	position: relative;
+	flex: 1;
+	overflow: hidden;
+	background: var(--gd-stage);
+	cursor: grab;
+	touch-action: none;
+}
+
+.gd-viewport.gd-panning { cursor: grabbing; }
+
+.gd-world {
+	position: absolute;
+	top: 0;
+	left: 0;
+	display: flex;
+	align-items: flex-start;
+	gap: 80px;
+	padding: 0;
+	transform-origin: 0 0;
+	will-change: transform;
+}
+
+.gd-artboard {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	flex: none;
+}
+
+.gd-artboard-label {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.gd-artboard-title {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+}
+
+.gd-artboard-tradeoff {
+	margin: 0;
+	color: var(--gd-muted);
+}
+
+.gd-artboard-frame {
+	display: block;
+	border: 0;
+	background: #fff;
+	box-shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+}
+
+.gd-commenting .gd-artboard-frame { outline: 2px dashed var(--gd-accent); outline-offset: 4px; }
+
+.gd-empty {
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	height: fit-content;
+	max-width: 48ch;
+	text-align: center;
+	color: var(--gd-muted);
+}
+
+.gd-popover {
+	position: fixed;
+	z-index: 10;
+	width: min(360px, calc(100vw - 24px));
+	padding: 12px;
+	background: var(--gd-panel);
+	border: 1px solid var(--gd-border);
+	border-radius: 8px;
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.gd-popover-title {
+	margin: 0 0 8px;
+	color: var(--gd-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gd-popover-title code { color: var(--gd-text); }
+
+.gd-popover textarea {
+	width: 100%;
+	resize: vertical;
+	padding: 8px;
+}
+
+.gd-popover-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.gd-popover-message {
+	margin-right: auto;
+	color: var(--gd-muted);
+}
+
+.gd-popover-message.gd-error, .gd-status.gd-error { color: var(--gd-danger); }
+
+@media (prefers-reduced-motion: no-preference) {
+	button { transition: border-color 120ms ease; }
+}

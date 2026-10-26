@@ -38,12 +38,13 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 
 | ID | Specs | Route | Status | Commit / evidence |
 |----|-------|-------|--------|-------------------|
-| T1 | S1, S2, S3 (`<brief>` and no-args usage) | delegated: context backstop (L4) | implemented, uncommitted: tests/gentle-design.test.ts RED 9/9 → GREEN 9/9; focused suites 105/105; typecheck 0 diagnostics | |
-| T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | pending | |
+| T1 | S1, S2, S3 (`<brief>` and no-args usage) | delegated: context backstop (L4) | done (risk medium: writer self-verification + parent spot check) | `32550812b`; RED 9/9 → GREEN 9/9; parent re-run of focused suites 102/102, `node scripts/check-types.mjs` 0 diagnostics |
+| T2 | S1, S3 (`open`, `stop`, no-args open), S4, S5, S6 | delegated: context backstop; Risk item 2 (local HTTP server, security) → own commit and independent verifier | implemented; independent check pending | part A + B by one writer (parallel to T1 for part A); RED→GREEN 57/57; two security mutations (realpath containment, POST Origin) caught by tests; parent re-run 94/94, types 0 diagnostics |
 | T3 | S7, S3 (`sync`) | delegated: context backstop | pending | |
 | T4 | S8, S3 (`implement`) | delegated: context backstop | pending | |
 
 Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T1, PR2 = T2, PR3 = T3 + T4. Forecast: about 1,700 authored changed lines.
+Slice boundaries: PR1 = `32550812b` (413 lines); PR2 = the T2 commit (`feat(design): add local design canvas with comments`).
 
 ## Log
 
@@ -51,3 +52,4 @@ Planned slices (`feature-branch-chain`; push and PR stay with the user): PR1 = T
 - **L2** (2026-10-26) Research (support.claude.com/en/articles/14604416, claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html, andrew.ooo/answers/claude-code-design-command-artboards-august-2026). `/design` has four parts: design guidance, an artboard canvas on Anthropic's Artifacts runtime, `/design-sync`, and handoff to code. Only the canvas hosting is provider-bound. Plan proposed: Phase 1 skill and command, Phase 2 local canvas with comments, Phase 3 design system, Phase 4 handoff. Canvas options: (1) build it ourselves, (2) use OpenPencil.
 - **L3** (2026-10-26) User: "1" (build the canvas ourselves).
 - **L4** (2026-10-26) The runtime context backstop fired before the first write, so every task runs in a bounded writer with a short handoff. Pi API facts: `pi.sendUserMessage(content, { deliverAs: "steer" | "followUp" })`; skills are invocable as `/skill:<name>`; extensions register with `pi.registerCommand`; package files are listed in `scripts/verify-package-files.mjs`.
+- **L5** (2026-10-26) T1 landed in `32550812b`. `sendUserMessage` expands `/skill:<name>` only with `expandPromptTemplates: true` and only when the skill is loaded (`pi.getCommands()` lists `skill:gentle-design`); otherwise the command points the model at the bundled SKILL.md path. The palette entry goes in Session. The parent made the test scratch dirs clean themselves.

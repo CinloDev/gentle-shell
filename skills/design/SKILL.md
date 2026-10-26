@@ -53,7 +53,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 
 ## Output Contract
 
-Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas when it is available.
+Return: the slug, each artboard file with its title and tradeoff, which files changed in this turn, and any open question. Mention that `/gentle:design open <slug>` shows the canvas.
 
 ## References
 

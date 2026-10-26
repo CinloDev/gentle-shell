@@ -367,8 +367,13 @@ Expanded cards reserve at most one third of the terminal height (up to 16 rows, 
 `/gentle:design <brief>` asks the session model to design the brief with the bundled `gentle-design` skill. It works with any provider: the model writes several clearly different directions (3 by default), each labeled with its tradeoff, as self-contained HTML artboards under `design/<slug>/`, plus a `design.json` manifest. Artboards inline their CSS, JS, and SVG and use system fonts, so they open offline in any browser. When `design/system.md` exists, the skill follows its tokens. Ask for changes to one artboard and only that file changes; "save and try a different approach" adds an artboard and keeps the others.
 
 - While the agent is busy, the run is queued as a follow-up.
-- `/gentle:design` with no arguments prints usage and the designs already in the project (`design/*/design.json`).
-- `open`, `stop`, `sync`, and `implement` are reserved; the canvas arrives with `/gentle:design open`.
+- `/gentle:design open [slug]` shows a design on a local canvas in the default browser: every artboard side by side at its manifest size, with its title and tradeoff; zoom with the buttons or Ctrl/Cmd + wheel, pan by dragging or scrolling, and Fit to the window. The canvas reloads an artboard when its file changes and the whole design when `design.json` changes. Without a slug it opens the most recent design. The URL is always printed; when the browser cannot be opened, open it manually.
+- `/gentle:design` with no arguments opens the most recent design (by `design.json` modification time) the same way, or prints usage when the project has no designs.
+- Comments: turn on Comment mode, click an element in an artboard, and type a comment. The session receives one message with the design, the artboard file, a CSS selector and a short text excerpt of the element, and the comment; while the agent is busy, it is queued as a follow-up. The agent edits only that artboard, and the canvas reloads it.
+- `/gentle:design stop` closes the canvas; quitting or replacing the session closes it too. There is one canvas server per session, and a second `open` reuses it.
+- `sync` and `implement` are reserved for the design-system and handoff phases.
+
+The canvas server binds `127.0.0.1` on a random port and needs a random per-server token in every URL. It rejects any `Host` other than its own loopback address, accepts comments only with its own `Origin`, a JSON body, and bounded lengths, and serves only files under `design/` in the session cwd, resolved by real path so neither `..` nor a symlink can escape. Artboards run in iframes sandboxed without `allow-same-origin`, so they cannot read the canvas or post comments themselves. No other network traffic is involved.
 
 ### Gentle Music
 

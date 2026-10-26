@@ -1,30 +1,58 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DESIGN_HELP, DESIGN_SKILL_NAME, designRunMessage, designUsage, listDesigns, parseDesignArgs } from "../lib/gentle-design.ts";
+import { formatDesignComment } from "../lib/design-canvas-server.ts";
+import { DESIGN_HELP, DESIGN_SKILL_NAME, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, type DesignCanvasDeps } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
-// whatever model the session uses. No arguments print usage and the designs
-// already in the session cwd. open/stop/sync/implement are reserved for the
-// canvas, design-system, and handoff phases.
+// whatever model the session uses. open (and no arguments, when designs
+// exist) shows them on a loopback canvas whose comments come back to the
+// session; stop and session shutdown close it. sync and implement are
+// reserved for the design-system and handoff phases.
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
-export interface GentleDesignDeps {
+export interface GentleDesignDeps extends DesignCanvasDeps {
 	/** Absolute path of the bundled skill, named in the message when Pi has not loaded it. */
 	skillPath?: string;
 }
 
+/** A stale or replaced context counts as busy, so a comment is queued rather than interrupting. */
+function isIdle(ctx: ExtensionContext | undefined): boolean {
+	try {
+		return ctx?.isIdle() ?? true;
+	} catch {
+		return false;
+	}
+}
+
 export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = {}): void {
 	const skillPath = deps.skillPath ?? fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
+	// Canvas comments arrive between commands; the last command's context answers whether the agent is busy.
+	let latest: ExtensionContext | undefined;
+	const canvas = createDesignCanvas((comment) => {
+		pi.sendUserMessage(formatDesignComment(comment), isIdle(latest) ? undefined : { deliverAs: "followUp" });
+	}, deps);
+
+	const open = async (ctx: ExtensionContext, slug?: string) => {
+		const notice = await canvas.open(ctx.cwd, slug);
+		ctx.ui.notify(notice.message, notice.level);
+	};
 
 	const handle = async (args: string, ctx: ExtensionContext) => {
+		latest = ctx;
 		const parsed = parseDesignArgs(args);
 		if (parsed.kind === "usage") {
-			ctx.ui.notify(designUsage(listDesigns(ctx.cwd)), "info");
+			if (listDesigns(ctx.cwd).length > 0) await open(ctx);
+			else ctx.ui.notify(designUsage([]), "info");
 			return;
 		}
 		if (parsed.kind === "subcommand") {
+			if (parsed.name === "open") return open(ctx, parsed.rest || undefined);
+			if (parsed.name === "stop") {
+				ctx.ui.notify((await canvas.stop()) ? "Design canvas stopped." : "No design canvas is running.", "info");
+				return;
+			}
 			ctx.ui.notify(`/gentle:design ${parsed.name} is not available yet.`, "warning");
 			return;
 		}
@@ -36,4 +64,8 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	};
 
 	pi.registerCommand(DESIGN_COMMAND_NAME, { description: DESIGN_HELP, handler: handle });
+	pi.on("session_shutdown", async () => {
+		latest = undefined;
+		await canvas.stop();
+	});
 }

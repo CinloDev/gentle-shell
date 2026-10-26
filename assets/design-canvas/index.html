@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="referrer" content="no-referrer">
+	<title>Gentle Design</title>
+	<link rel="stylesheet" href="{{BASE}}assets/canvas.css">
+	<script id="gd-config" type="application/json">{{CONFIG}}</script>
+	<script src="{{BASE}}assets/canvas.js" defer></script>
+</head>
+<body>
+	<header class="gd-bar" role="toolbar" aria-label="Design canvas controls">
+		<h1 class="gd-title" id="gd-title">Gentle Design</h1>
+		<label class="gd-field">
+			<span class="gd-visually-hidden">Design</span>
+			<select id="gd-design" aria-label="Design"></select>
+		</label>
+		<div class="gd-group" role="group" aria-label="Zoom">
+			<button type="button" id="gd-zoom-out" aria-label="Zoom out">&minus;</button>
+			<output id="gd-zoom-level" aria-live="polite" aria-label="Zoom level">100%</output>
+			<button type="button" id="gd-zoom-in" aria-label="Zoom in">+</button>
+			<button type="button" id="gd-fit">Fit</button>
+		</div>
+		<button type="button" id="gd-comment" class="gd-toggle" aria-pressed="false">Comment</button>
+		<p id="gd-status" class="gd-status" role="status" aria-live="polite"></p>
+	</header>
+	<main id="gd-viewport" class="gd-viewport" aria-label="Artboards" tabindex="0">
+		<div id="gd-world" class="gd-world"></div>
+		<p id="gd-empty" class="gd-empty" hidden></p>
+	</main>
+	<div id="gd-popover" class="gd-popover" role="dialog" aria-modal="false" aria-labelledby="gd-popover-title" hidden>
+		<form id="gd-popover-form">
+			<p class="gd-popover-title" id="gd-popover-title">Comment on <code id="gd-popover-target"></code></p>
+			<label class="gd-visually-hidden" for="gd-popover-text">Comment</label>
+			<textarea id="gd-popover-text" rows="4" maxlength="2000" required placeholder="What should change?"></textarea>
+			<div class="gd-popover-actions">
+				<span id="gd-popover-message" class="gd-popover-message" role="status" aria-live="polite"></span>
+				<button type="button" id="gd-popover-cancel">Cancel</button>
+				<button type="submit" id="gd-popover-send" class="gd-primary">Send</button>
+			</div>
+		</form>
+	</div>
+</body>
+</html>
