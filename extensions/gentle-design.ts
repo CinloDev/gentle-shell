@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, createDesignCanvas, designRunMessage, designUsage, listDesigns, parseDesignArgs, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
+import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, createDesignCanvas, designRunMessage, designUsage, hasSystemBoard, listDesigns, parseDesignArgs, planDesignImplement, runDesignCommentsTool, type DesignCanvasDeps, type DesignCommentsToolParams } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
@@ -10,8 +10,8 @@ import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_SKILL_NAME, DESIGN_SYNC_
 // session and persist in design/<slug>/comments.json; stop and session
 // shutdown close it. The gentle_design_comments tool lets any model list and
 // resolve those comments. sync runs the skill's design-system mode, which
-// writes design/system.md and design/system.html; implement is reserved for
-// the handoff phase.
+// writes design/system.md and design/system.html; implement (and the canvas
+// Implement button) hands one artboard off to the project's real stack.
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
@@ -40,9 +40,10 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	const skillPath = deps.skillPath ?? fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
 	// Canvas comments arrive between commands; the last command's context answers whether the agent is busy.
 	let latest: ExtensionContext | undefined;
-	const canvas = createDesignCanvas((message) => {
+	const deliver = (message: string) => {
 		pi.sendUserMessage(message, isIdle(latest) ? undefined : { deliverAs: "followUp" });
-	}, deps);
+	};
+	const canvas = createDesignCanvas(deliver, deps);
 
 	const open = async (ctx: ExtensionContext, slug?: string) => {
 		const notice = await canvas.open(ctx.cwd, slug);
@@ -61,7 +62,7 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 		latest = ctx;
 		const parsed = parseDesignArgs(args);
 		if (parsed.kind === "usage") {
-			if (listDesigns(ctx.cwd).length > 0) await open(ctx);
+			if (listDesigns(ctx.cwd).length > 0 || hasSystemBoard(ctx.cwd)) await open(ctx);
 			else ctx.ui.notify(designUsage([]), "info");
 			return;
 		}
@@ -72,7 +73,9 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 				return;
 			}
 			if (parsed.name === "sync") return runSkill(DESIGN_SYNC_REQUEST, ctx);
-			ctx.ui.notify(`/gentle:design ${parsed.name} is not available yet.`, "warning");
+			const plan = await planDesignImplement(ctx.cwd, parsed.rest);
+			if (plan.kind === "send") deliver(plan.message);
+			else ctx.ui.notify(plan.notice.message, plan.notice.level);
 			return;
 		}
 		runSkill(parsed.brief, ctx);

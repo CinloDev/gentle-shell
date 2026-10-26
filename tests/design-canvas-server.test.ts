@@ -78,15 +78,17 @@ async function start(t: TestContext, extra: { initialSlug?: string } = {}) {
 	const { root } = fixture(t);
 	const comments: DesignComment[] = [];
 	const batches: DesignComment[][] = [];
+	const implements_: Array<{ slug: string; file: string }> = [];
 	const server = await startDesignCanvasServer({
 		designRoot: root,
 		onComment: (comment) => { comments.push(comment); },
 		onComments: (batch) => { batches.push(batch); },
+		onImplement: (request) => { implements_.push(request); },
 		randomToken: () => TOKEN,
 		...extra,
 	});
 	t.after(() => server.close());
-	return { server, root, comments, batches, port: server.port, base: `/${TOKEN}/` };
+	return { server, root, comments, batches, implements: implements_, port: server.port, base: `/${TOKEN}/` };
 }
 
 test("start returns a loopback URL with a random base64url token by default", async (t) => {
@@ -657,6 +659,71 @@ test("events stream a change when system.html or system.md is written", async (t
 	await events.waitFor(/event: change\ndata: \{"slug":null,"file":"system\.html"\}\n\n/);
 	writeFileSync(join(root, "system.md"), "# Tokens");
 	await events.waitFor(/event: change\ndata: \{"slug":null,"file":"system\.md"\}\n\n/);
+});
+
+test("implement validates the artboard against the manifest, calls onImplement once and answers 202", async (t) => {
+	const { port, implements: calls } = await start(t);
+	const ok = await postJson(port, "api/designs/alpha/implement", { file: "01-hero.html" });
+	assert.equal(ok.status, 202);
+	assert.deepEqual(JSON.parse(ok.body), { ok: true, slug: "alpha", file: "01-hero.html" });
+	assert.deepEqual(calls, [{ slug: "alpha", file: "01-hero.html" }]);
+	// sub/inner.html exists but is not an artboard of the manifest.
+	for (const file of ["sub/inner.html", "missing.html", "../beta/01-a.html", "styles.css", 7, ""]) {
+		assert.equal((await postJson(port, "api/designs/alpha/implement", { file })).status, 400, String(file));
+	}
+	assert.equal((await postJson(port, "api/designs/missing/implement", { file: "01-hero.html" })).status, 404);
+	assert.equal((await postJson(port, "api/designs/broken/implement", { file: "01-a.html" })).status, 422);
+	assert.equal((await postJson(port, "api/designs/Alpha/implement", { file: "01-hero.html" })).status, 404);
+	assert.equal(calls.length, 1, "no refused request reaches onImplement");
+});
+
+test("the implement route keeps the Host, token, Origin, content-type and method rules", async (t) => {
+	const { port, implements: calls } = await start(t);
+	const path = `/${TOKEN}/api/designs/alpha/implement`;
+	const body = JSON.stringify({ file: "01-hero.html" });
+	const own = { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" };
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: { "Content-Type": "application/json" }, body })).status, 403, "no Origin");
+	for (const origin of ["http://evil.example", "null", `http://localhost:${port + 1}`]) {
+		assert.equal((await rawRequest(port, path, { method: "POST", headers: { ...own, Origin: origin }, body })).status, 403, origin);
+	}
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: { ...own, "Content-Type": "text/plain" }, body })).status, 415);
+	assert.equal((await rawRequest(port, `/wrong-token-0123456789/api/designs/alpha/implement`, { method: "POST", headers: own, body })).status, 404);
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: own, body, host: `evil.example:${port}` })).status, 421);
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: own, body: JSON.stringify({ pad: "x".repeat(17 * 1024) }) })).status, 413);
+	assert.equal((await rawRequest(port, path)).status, 405);
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: { ...own, Origin: `http://localhost:${port}` }, body })).status, 202);
+	assert.equal(calls.length, 1);
+});
+
+test("implement is 501 without onImplement and 500 when it throws", async (t) => {
+	const { root } = fixture(t);
+	const bare = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, randomToken: () => TOKEN });
+	t.after(() => bare.close());
+	assert.equal((await postJson(bare.port, "api/designs/alpha/implement", { file: "01-hero.html" })).status, 501);
+	const failing = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, onImplement: () => { throw new Error("boom"); }, randomToken: () => TOKEN });
+	t.after(() => failing.close());
+	const reply = await postJson(failing.port, "api/designs/alpha/implement", { file: "01-hero.html" });
+	assert.equal(reply.status, 500);
+	assert.equal(JSON.parse(reply.body).error, "delivery-failed");
+	assert.equal((await rawRequest(failing.port, `/${TOKEN}/api/designs`)).status, 200, "the server survives");
+});
+
+test("a valid manifest feature link is kept; an invalid one is dropped and reported", async (t) => {
+	const { port, base, root } = await start(t);
+	const withFeature = (feature: unknown) => JSON.stringify({ title: "Alpha", artboards: [{ file: "01-hero.html", title: "H", width: 10, height: 10 }], feature });
+	writeFileSync(join(root, "alpha", "design.json"), withFeature("odd/tasks/pricing-page.md"));
+	const kept = JSON.parse((await rawRequest(port, `${base}api/designs/alpha`)).body);
+	assert.equal(kept.feature, "odd/tasks/pricing-page.md");
+	assert.equal(kept.warnings, undefined);
+	for (const feature of ["../x.md", "/abs.md", "odd/tasks/x.txt", "odd/other/x.md", "odd/tasks/../x.md", "odd/tasks/.x.md", "odd/tasks/a/b.md", " odd/tasks/x.md", 7]) {
+		writeFileSync(join(root, "alpha", "design.json"), withFeature(feature));
+		const reply = await rawRequest(port, `${base}api/designs/alpha`);
+		assert.equal(reply.status, 200, String(feature));
+		const manifest = JSON.parse(reply.body);
+		assert.equal("feature" in manifest, false, String(feature));
+		assert.equal(manifest.warnings.length, 1, String(feature));
+		assert.match(manifest.warnings[0], /feature/);
+	}
 });
 
 test("close() is idempotent, ends event streams and frees the port", async (t) => {

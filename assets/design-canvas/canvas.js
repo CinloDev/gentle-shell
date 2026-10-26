@@ -21,6 +21,8 @@
 	const els = {
 		title: $("gd-title"),
 		design: $("gd-design"),
+		designField: $("gd-design-field"),
+		feature: $("gd-feature"),
 		zoomOut: $("gd-zoom-out"),
 		zoomIn: $("gd-zoom-in"),
 		zoomLevel: $("gd-zoom-level"),
@@ -167,7 +169,8 @@
 
 	let drag = null;
 	els.viewport.addEventListener("pointerdown", (event) => {
-		if (event.button !== 0 || (event.target !== els.viewport && event.target !== els.world && !event.target.closest(".gd-artboard-label"))) return;
+		if (event.button !== 0 || event.target.closest("button")) return;
+		if (event.target !== els.viewport && event.target !== els.world && !event.target.closest(".gd-artboard-label")) return;
 		drag = { id: event.pointerId, x: event.clientX, y: event.clientY };
 		els.viewport.setPointerCapture(event.pointerId);
 		els.viewport.classList.add("gd-panning");
@@ -227,6 +230,7 @@
 		});
 		els.design.replaceChildren(...options);
 		els.design.disabled = designs.length === 0;
+		els.designField.hidden = designs.length === 0;
 		if (state.slug) els.design.value = state.slug;
 	}
 
@@ -261,6 +265,7 @@
 			tradeoff.textContent = artboard.tradeoff;
 			label.append(tradeoff);
 		}
+		if (!system) label.append(createImplementControl(slug, artboard));
 		if (system) {
 			label.title = SYSTEM_NOTE;
 			const note = document.createElement("p");
@@ -293,6 +298,81 @@
 		return board;
 	}
 
+	/** "Implement this" with an inline confirm step; the system board never gets one. */
+	function createImplementControl(slug, artboard) {
+		const box = document.createElement("div");
+		box.className = "gd-implement";
+		const start = document.createElement("button");
+		start.type = "button";
+		start.className = "gd-implement-start";
+		start.textContent = "Implement this";
+		start.setAttribute("aria-label", `Implement ${artboard.title} in the project`);
+		const confirm = document.createElement("div");
+		confirm.className = "gd-implement-confirm";
+		confirm.setAttribute("role", "group");
+		confirm.setAttribute("aria-label", `Confirm implementing ${artboard.title}`);
+		confirm.hidden = true;
+		const question = document.createElement("span");
+		question.textContent = "Send it to the session to implement?";
+		const yes = document.createElement("button");
+		yes.type = "button";
+		yes.className = "gd-primary";
+		yes.textContent = "Send";
+		const no = document.createElement("button");
+		no.type = "button";
+		no.textContent = "Cancel";
+		confirm.append(question, yes, no);
+		const close = (focus) => {
+			confirm.hidden = true;
+			start.hidden = false;
+			if (focus) start.focus();
+		};
+		start.addEventListener("click", () => {
+			start.hidden = true;
+			confirm.hidden = false;
+			yes.disabled = false;
+			yes.focus();
+		});
+		no.addEventListener("click", () => close(true));
+		confirm.addEventListener("keydown", (event) => {
+			if (event.key !== "Escape") return;
+			event.preventDefault();
+			event.stopPropagation();
+			close(true);
+		});
+		yes.addEventListener("click", async () => {
+			yes.disabled = true;
+			const reply = await postJson(`api/designs/${encodeURIComponent(slug)}/implement`, { file: artboard.file }).catch((error) => ({ ok: false, body: { error: error.message } }));
+			if (reply.ok) setStatus(`Sent ${artboard.file} to the session to implement`, false);
+			else setStatus(`Not sent: ${reply.body.reason || reply.body.error || "error"}`, true);
+			close(true);
+		});
+		box.append(start, confirm);
+		return box;
+	}
+
+	function showFeature(manifest) {
+		const feature = manifest && typeof manifest.feature === "string" ? manifest.feature : "";
+		els.feature.textContent = feature ? `Feature: ${feature}` : "";
+		els.feature.hidden = !feature;
+	}
+
+	/** No design selected: only the system board, or the empty notice. */
+	function showSystemOnly() {
+		state.manifest = null;
+		state.boards = [];
+		showFeature(null);
+		els.title.textContent = "Gentle Design";
+		if (!state.systemBoard) {
+			showEmpty("No designs yet. Run /gentle:design with a brief to create one.");
+			return;
+		}
+		els.empty.hidden = true;
+		placeBoards();
+		setStatus("", false);
+		requestAnimationFrame(fit);
+	}
+
 	async function loadManifest(slug, keepView) {
 		let manifest;
 		try {
@@ -305,6 +385,7 @@
 		if (slug !== state.slug) return;
 		closePopover();
 		state.manifest = manifest;
+		showFeature(manifest);
 		els.title.textContent = manifest.title;
 		document.title = `${manifest.title} · Gentle Design`;
 		history.replaceState(null, "", `${base}d/${encodeURIComponent(slug)}/`);
@@ -315,7 +396,8 @@
 		els.empty.hidden = true;
 		state.boards = manifest.artboards.map((artboard) => createBoard(slug, artboard));
 		placeBoards();
-		setStatus(state.boards.length === 0 ? "This design has no artboards yet." : "", false);
+		const warnings = Array.isArray(manifest.warnings) ? manifest.warnings.filter((warning) => typeof warning === "string") : [];
+		setStatus(warnings.length > 0 ? `design.json: ${warnings.join("; ")}` : state.boards.length === 0 ? "This design has no artboards yet." : "", warnings.length > 0);
 		if (!keepView) requestAnimationFrame(fit);
 		await loadComments();
 	}
@@ -347,6 +429,10 @@
 			if (state.systemBoard) reloadBoard(state.systemBoard);
 			return;
 		}
+		if (!state.slug) {
+			showSystemOnly();
+			return;
+		}
 		if (!state.manifest || state.manifest.slug !== state.slug) return;
 		if (state.boards.length === 0 && !state.systemBoard) showEmpty("This design has no artboards yet.");
 		else {
@@ -370,7 +456,7 @@
 			return;
 		}
 		if (!state.slug) {
-			showEmpty("No designs yet. Run /gentle:design with a brief to create one.");
+			showSystemOnly();
 			return;
 		}
 		await loadManifest(state.slug, false);

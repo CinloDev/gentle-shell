@@ -82,6 +82,8 @@ export type DesignCanvasServerOptions = {
 	onComment: (comment: DesignComment) => void | Promise<void>;
 	/** "Send all": every open unsent comment of one design, as one batch. */
 	onComments?: (batch: DesignComment[]) => void | Promise<void>;
+	/** "Implement this": an artboard of the manifest, already validated; a throw answers 500. */
+	onImplement?: (request: DesignImplementRequest) => void | Promise<void>;
 	initialSlug?: string;
 	randomToken?: () => string;
 };
@@ -89,7 +91,12 @@ export type DesignCanvasServerOptions = {
 export type DesignCanvasServer = { url: string; port: number; token: string; close(): Promise<void> };
 
 export type DesignArtboard = { file: string; title: string; tradeoff: string; width: number; height: number };
-export type DesignManifest = { slug: string; title: string; brief: string; artboards: DesignArtboard[] };
+/** `feature` is present only when valid; `warnings` only when something in design.json was dropped. */
+export type DesignManifest = { slug: string; title: string; brief: string; artboards: DesignArtboard[]; feature?: string; warnings?: string[] };
+export type DesignImplementRequest = { slug: string; file: string };
+
+/** The ODD feature document a design links to (S10): a repository-relative `odd/tasks/<name>.md`. */
+export const DESIGN_FEATURE_PATH = /^odd\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
 
 class HttpError extends Error {
 	readonly status: number;
@@ -240,7 +247,13 @@ function normalizeManifest(slug: string, raw: string): DesignManifest {
 		};
 	});
 	const title = typeof record.title === "string" && record.title.trim() ? record.title.trim() : slug;
-	return { slug, title, brief: typeof record.brief === "string" ? record.brief.trim() : "", artboards };
+	const manifest: DesignManifest = { slug, title, brief: typeof record.brief === "string" ? record.brief.trim() : "", artboards };
+	if (record.feature !== undefined) {
+		// The regex refuses `..` segments too: a name may not start with a dot and has no slash.
+		if (typeof record.feature === "string" && DESIGN_FEATURE_PATH.test(record.feature)) manifest.feature = record.feature;
+		else manifest.warnings = ["feature must be a relative odd/tasks/<name>.md path; it was ignored"];
+	}
+	return manifest;
 }
 
 function escapeHtml(value: string): string {
@@ -322,6 +335,58 @@ export function listDesignEntries(designRoot: string): DesignListing[] {
 		designs.push({ slug: entry.name, title, mtime: info.mtimeMs, valid });
 	}
 	return designs.sort((a, b) => b.mtime - a.mtime || a.slug.localeCompare(b.slug));
+}
+
+/** Real path of `<designRoot>/system.html` when it is a file inside the real design root, else undefined. */
+export function resolveSystemBoard(designRoot: string): string | undefined {
+	try {
+		const root = realpathSync(designRoot);
+		const target = realpathSync(join(root, SYSTEM_FILE));
+		if (!within(root, target) || target === root) return undefined;
+		return statSync(target).isFile() && extname(target).toLowerCase() === ".html" ? target : undefined;
+	} catch (error) {
+		if (isMissing(error)) return undefined;
+		throw error;
+	}
+}
+
+/** Real path of `<designRoot>/<slug>/<relative>` when it stays inside that design, else undefined. */
+function resolveDesignFileSync(designRoot: string, slug: string, segments: string[]): string | undefined {
+	if (!SLUG.test(slug)) return undefined;
+	try {
+		const root = realpathSync(designRoot);
+		const design = realpathSync(join(root, slug));
+		if (!within(root, design) || design === root) return undefined;
+		const target = realpathSync(join(design, ...segments));
+		return within(design, target) && target !== design ? target : undefined;
+	} catch (error) {
+		if (isMissing(error)) return undefined;
+		throw error;
+	}
+}
+
+/** The normalized manifest of one design, with the server's containment and limits; throws a reason when it cannot be read. */
+export function readDesignManifest(designRoot: string, slug: string): DesignManifest {
+	const path = resolveDesignFileSync(designRoot, slug, ["design.json"]);
+	if (!path || !statSync(path).isFile()) throw new Error(`No design "${slug}" in design/.`);
+	if (statSync(path).size > LIMITS.manifestBytes) throw new Error(`design/${slug}/design.json is too large`);
+	try {
+		return normalizeManifest(slug, readFileSync(path, "utf8"));
+	} catch (error) {
+		throw new Error(`design/${slug}/design.json is invalid: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** Whether `<designRoot>/system.md` is a contained file, so a handoff can name it as the token source. */
+export function hasSystemTokens(designRoot: string): boolean {
+	try {
+		const root = realpathSync(designRoot);
+		const target = realpathSync(join(root, "system.md"));
+		return within(root, target) && statSync(target).isFile();
+	} catch (error) {
+		if (isMissing(error)) return false;
+		throw error;
+	}
 }
 
 export async function startDesignCanvasServer(options: DesignCanvasServerOptions): Promise<DesignCanvasServer> {
@@ -413,19 +478,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		}
 	}
 
-	/** Real path of design/system.html when it is a file inside the real design root, else undefined. */
-	async function resolveSystem(): Promise<string | undefined> {
-		const root = await rootReal();
-		if (!root) return undefined;
-		try {
-			const target = await realpath(join(root, SYSTEM_FILE));
-			if (!within(root, target) || target === root) return undefined;
-			return (await stat(target)).isFile() ? target : undefined;
-		} catch (error) {
-			if (isMissing(error)) return undefined;
-			throw error;
-		}
-	}
+	const resolveSystem = async (): Promise<string | undefined> => resolveSystemBoard(designRoot);
 
 	async function readManifest(slug: string): Promise<DesignManifest> {
 		const path = await resolveInside(slug, ["design.json"]);
@@ -566,6 +619,22 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		});
 	}
 
+	async function implement(req: IncomingMessage, res: ServerResponse, slug: string): Promise<void> {
+		const body = await readJsonObject(req);
+		if (!options.onImplement) throw new HttpError(501, "implement-unavailable");
+		const segments = relativeSegments(body.file);
+		if (!segments) throw new HttpError(400, "invalid-file");
+		const file = segments.join("/");
+		const manifest = await readManifest(slug);
+		if (!manifest.artboards.some((artboard) => artboard.file === file)) throw new HttpError(400, "invalid-file", { error: "invalid-file", reason: `${file} is not an artboard of design/${slug}` });
+		try {
+			await options.onImplement({ slug, file });
+		} catch {
+			throw new HttpError(500, "delivery-failed", { error: "delivery-failed", slug, file });
+		}
+		reply(res, 202, { ok: true, slug, file });
+	}
+
 	async function changeStatus(req: IncomingMessage, res: ServerResponse, slug: string, id: string): Promise<void> {
 		const body = await readJsonObject(req);
 		if (body.status !== "open" && body.status !== "resolved") throw new HttpError(400, "invalid-status");
@@ -666,6 +735,10 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	/** POST route table over raw segments after the token. */
 	function postRoute(rest: string[]): Handler | undefined {
 		if (rest.length === 2 && rest[0] === "api" && rest[1] === "comments") return receiveComment;
+		if (rest.length === 4 && rest[0] === "api" && rest[1] === "designs" && rest[3] === "implement") {
+			const slug = safeSegment(rest[2]);
+			return slug && SLUG.test(slug) ? (req, res) => implement(req, res, slug) : undefined;
+		}
 		if (rest.length < 5 || rest[0] !== "api" || rest[1] !== "designs" || rest[3] !== "comments") return undefined;
 		const slug = safeSegment(rest[2]);
 		if (!slug || !SLUG.test(slug)) return undefined;

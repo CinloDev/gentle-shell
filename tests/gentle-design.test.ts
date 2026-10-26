@@ -14,7 +14,8 @@ import { __testing } from "../extensions/skill-registry.ts";
 // /gentle:design wiring: a brief starts one design run through the
 // gentle-design skill; open/no arguments show the canvas for a design in the
 // session cwd; stop and session shutdown close it; canvas comments reach the
-// session; sync runs the skill's design-system mode; implement sends nothing yet.
+// session; sync runs the skill's design-system mode; implement hands an
+// artboard off to code.
 
 const SKILL_PATH = fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
 
@@ -319,6 +320,149 @@ test("integration: a comment POSTed to the real canvas server sends one session 
 	assert.deepEqual(sent, [{ content: formatDesignComment({ id: stored[0].id, slug: "login", file: "01-a.html", selector: "body > h1", excerpt: "A", comment: "Make it red" }), options: undefined }]);
 });
 
+function writeLinkedDesign(cwd: string, slug: string, feature?: unknown) {
+	mkdirSync(join(cwd, "design", slug), { recursive: true });
+	writeFileSync(join(cwd, "design", slug, "design.json"), JSON.stringify({
+		title: "Login screen",
+		brief: "b",
+		...(feature === undefined ? {} : { feature }),
+		artboards: [
+			{ file: "01-split.html", title: "Split layout", tradeoff: "Calm; less room for the form", width: 1440, height: 900 },
+			{ file: "02-card.html", title: "Centered card", tradeoff: "Focused; generic", width: 1440, height: 900 },
+		],
+	}));
+	writeFileSync(join(cwd, "design", slug, "01-split.html"), "<h1>Split</h1>");
+	writeFileSync(join(cwd, "design", slug, "02-card.html"), "<h1>Card</h1>");
+}
+
+test("implement sends one handoff message with the artboard, tokens, open comments and feature link", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "odd/tasks/login-page.md");
+	writeFileSync(join(cwd, "design", "system.md"), "# Tokens");
+	seedComments(cwd, "login", [
+		{ id: "open01", file: "01-split.html", comment: "Make the headline shorter" },
+		{ id: "done01", file: "01-split.html", status: "resolved" },
+		{ id: "other1", file: "02-card.html" },
+	]);
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("implement login/01-split.html", ctx);
+	assert.deepEqual(notices, []);
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0].options, undefined);
+	const content = String(sent[0].content);
+	for (const part of ["design/login/01-split.html", "Split layout", "Calm; less room for the form", "real stack", "visual spec", "existing components", "verbatim", "design/system.md", "open01", "body > h1", "\"A\"", "Make the headline shorter", "gentle_design_comments", "track this implementation in odd/tasks/login-page.md", "This handoff itself commits nothing."]) {
+		assert.ok(content.includes(part), `the message names ${part}`);
+	}
+	for (const absent of ["done01", "other1", "ODD rules as usual"]) assert.ok(!content.includes(absent), `the message omits ${absent}`);
+});
+
+test("implement without system.md, comments or a valid feature falls back to the ODD rules", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "../outside.md");
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await command().handler("implement login/02-card.html", fakeContext(cwd).ctx);
+	assert.equal(sent.length, 1);
+	const content = String(sent[0].content);
+	assert.ok(content.includes("design/login/02-card.html"));
+	assert.ok(content.includes("size it under the project's ODD rules as usual"));
+	assert.ok(content.includes("This handoff itself commits nothing."));
+	for (const absent of ["design/system.md", "track this implementation", "outside.md", "gentle_design_comments"]) assert.ok(!content.includes(absent), `the message omits ${absent}`);
+});
+
+test("implement of an unknown design or artboard warns with the valid targets and sends nothing", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	for (const args of ["implement", "implement login", "implement missing/01-split.html", "implement login/99-none.html", "implement login/../x.html"]) {
+		const { pi, sent, command } = fakePi();
+		gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+		const { ctx, notices } = fakeContext(cwd);
+		await command().handler(args, ctx);
+		assert.equal(sent.length, 0, args);
+		assert.equal(notices.length, 1, args);
+		assert.equal(notices[0].level, "warning", args);
+		assert.match(notices[0].message, /login\/01-split\.html, login\/02-card\.html/, args);
+	}
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(scratchCwd());
+	await command().handler("implement login/01-split.html", ctx);
+	assert.equal(sent.length, 0);
+	assert.match(notices[0].message, /No designs in design\/ yet/);
+});
+
+test("implement is queued as a follow-up while the agent is busy", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await command().handler("implement login/01-split.html", fakeContext(cwd, false).ctx);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(sent[0].options, { deliverAs: "followUp" });
+});
+
+test("integration: the canvas Implement route sends the same text as the command", async (t) => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "odd/tasks/login-page.md");
+	writeFileSync(join(cwd, "design", "system.md"), "# Tokens");
+	seedComments(cwd, "login", [{ id: "open01", file: "01-split.html" }]);
+	const { pi, sent, emit, command } = fakePi();
+	const opens: string[] = [];
+	gentleDesign(pi, { openBrowser: async (url) => { opens.push(url); return { opened: true }; } });
+	t.after(() => emit("session_shutdown", { type: "session_shutdown", reason: "quit" }));
+	const { ctx } = fakeContext(cwd);
+	await command().handler("implement login/01-split.html", ctx);
+	await command().handler("open login", ctx);
+	const url = new URL(opens[0]);
+	const token = url.pathname.split("/")[1];
+	const status = await new Promise<number>((resolve, reject) => {
+		const req = httpRequest({ host: "127.0.0.1", port: url.port, path: `/${token}/api/designs/login/implement`, method: "POST", headers: { Origin: url.origin, "Content-Type": "application/json" } }, (res) => {
+			res.resume();
+			res.on("end", () => resolve(res.statusCode ?? 0));
+		});
+		req.on("error", reject);
+		req.end(JSON.stringify({ file: "01-split.html" }));
+	});
+	assert.equal(status, 202);
+	assert.equal(sent.length, 2);
+	assert.equal(sent[1].content, sent[0].content);
+	assert.ok(String(sent[0].content).includes("open01"));
+});
+
+test("with only design/system.html, no arguments and open start the canvas on the system board", async () => {
+	const cwd = scratchCwd();
+	mkdirSync(join(cwd, "design"), { recursive: true });
+	writeFileSync(join(cwd, "design", "system.html"), "<h1>Tokens</h1>");
+	for (const args of ["", "open"]) {
+		const { pi, sent, command } = fakePi();
+		const canvas = fakeCanvas();
+		gentleDesign(pi, canvas);
+		const { ctx, notices } = fakeContext(cwd);
+		await command().handler(args, ctx);
+		assert.equal(canvas.starts.length, 1, JSON.stringify(args));
+		assert.deepEqual(canvas.opens, ["http://127.0.0.1:4100/tok/"], JSON.stringify(args));
+		assert.deepEqual(notices, [{ message: "Design canvas: http://127.0.0.1:4100/tok/", level: "info" }]);
+		assert.equal(sent.length, 0);
+	}
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("open login", ctx);
+	assert.equal(canvas.starts.length, 0, "a named design still has to exist");
+	assert.equal(notices[0].level, "warning");
+});
+
+test("the skill documents the feature field and the ODD link rule", () => {
+	const source = readFileSync(SKILL_PATH, "utf8");
+	assert.ok(source.includes("\"feature\": \"odd/tasks/"), "the manifest example carries a feature link");
+	const start = source.indexOf("ODD link");
+	assert.ok(start !== -1, "SKILL.md has an ODD link rule");
+	for (const part of ["odd/tasks/", "## Log", "standalone"]) assert.ok(source.includes(part), `SKILL.md mentions ${part}`);
+});
+
 function toolText(result: ToolResult): string {
 	return result.content.map((part) => part.text).join("\n");
 }
@@ -420,18 +564,6 @@ test("a symlinked design inside design/ is listed by the command and the server;
 		}).on("error", reject).end();
 	});
 	assert.deepEqual(JSON.parse(listed).designs.map((design: { slug: string }) => design.slug).sort(), available);
-});
-
-test("implement stays reserved and sends nothing", async () => {
-	for (const subcommand of ["implement", "implement login/01-split.html"]) {
-		const { pi, sent, command } = fakePi();
-		gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
-		const { ctx, notices } = fakeContext(scratchCwd());
-		await command().handler(subcommand, ctx);
-		assert.equal(sent.length, 0, subcommand);
-		assert.equal(notices.length, 1, subcommand);
-		assert.match(notices[0].message, /\/gentle:design implement is not available yet/);
-	}
 });
 
 test("sync sends exactly one message that runs the gentle-design skill in sync mode", async () => {

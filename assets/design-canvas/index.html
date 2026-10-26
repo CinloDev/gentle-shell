@@ -12,10 +12,11 @@
 <body>
 	<header class="gd-bar" role="toolbar" aria-label="Design canvas controls">
 		<h1 class="gd-title" id="gd-title">Gentle Design</h1>
-		<label class="gd-field">
+		<label class="gd-field" id="gd-design-field">
 			<span class="gd-visually-hidden">Design</span>
 			<select id="gd-design" aria-label="Design"></select>
 		</label>
+		<p id="gd-feature" class="gd-feature" hidden></p>
 		<div class="gd-group" role="group" aria-label="Zoom">
 			<button type="button" id="gd-zoom-out" aria-label="Zoom out">&minus;</button>
 			<output id="gd-zoom-level" aria-live="polite" aria-label="Zoom level">100%</output>

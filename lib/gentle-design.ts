@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { formatDesignComment, listDesignEntries, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
+import { formatDesignComment, hasSystemTokens, listDesignEntries, formatDesignCommentBatch, readDesignManifest, resolveSystemBoard, startDesignCanvasServer, type DesignArtboard, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
 import { createDesignCommentStore, DesignCommentsError, type StoredDesignComment } from "./design-comments.ts";
 import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.ts";
 
@@ -9,7 +9,6 @@ import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.t
 
 export const DESIGN_SKILL_NAME = "gentle-design";
 
-/** Subcommands; implement belongs to the handoff phase. */
 export const DESIGN_SUBCOMMANDS = ["open", "stop", "sync", "implement"] as const;
 export type DesignSubcommand = (typeof DESIGN_SUBCOMMANDS)[number];
 
@@ -38,8 +37,13 @@ export function listDesigns(cwd: string): DesignSummary[] {
 	return listDesignEntries(join(cwd, "design")).map(({ slug, title, mtime }) => ({ slug, title, mtime }));
 }
 
+/** Whether design/system.html exists, so the canvas can open on the system board alone. */
+export function hasSystemBoard(cwd: string): boolean {
+	return resolveSystemBoard(join(cwd, "design")) !== undefined;
+}
+
 export const DESIGN_HELP =
-	"Design HTML artboards with any model: /gentle:design <brief> starts a design run; no arguments open the latest design on the local canvas. Subcommands: open [slug], stop, sync (write design/system.md and design/system.html from the project's design sources; the canvas shows that system board first), implement <slug>/<artboard>.";
+	"Design HTML artboards with any model: /gentle:design <brief> starts a design run; no arguments open the latest design (or the system board alone) on the local canvas. Subcommands: open [slug], stop, sync (write design/system.md and design/system.html from the project's design sources; the canvas shows that system board first), implement <slug>/<artboard> (hand an artboard off to the project's real stack, also from the canvas Implement button).";
 
 /** What /gentle:design sync asks the skill to do; it rides designRunMessage like a brief. */
 export const DESIGN_SYNC_REQUEST =
@@ -62,6 +66,108 @@ export function designRunMessage(brief: string, skill: { loaded: boolean; path: 
 
 export type DesignNotice = { message: string; level: "info" | "warning" | "error" };
 
+export type DesignImplementInput = {
+	slug: string;
+	artboard: Pick<DesignArtboard, "file" | "title" | "tradeoff">;
+	/** The design's valid ODD feature document, when design.json links one. */
+	feature?: string;
+	/** Whether design/system.md exists. */
+	systemTokens: boolean;
+	/** The open comments on this artboard. */
+	comments: ReadonlyArray<Pick<StoredDesignComment, "id" | "selector" | "excerpt" | "comment">>;
+};
+
+/** The handoff message for one artboard (S8); the command and the canvas button both send exactly this. */
+export function designImplementMessage(input: DesignImplementInput): string {
+	const path = `design/${input.slug}/${input.artboard.file}`;
+	const lines = [
+		`Implement the design artboard ${path}`,
+		"",
+		`Artboard: ${path}`,
+		`Title: ${input.artboard.title}`,
+	];
+	if (input.artboard.tradeoff) lines.push(`Tradeoff: ${input.artboard.tradeoff}`);
+	lines.push(
+		"",
+		"Implement it in the project's real stack. Use the artboard as the visual spec: map its parts to the project's existing components and styles, and do not copy the artboard HTML verbatim.",
+	);
+	if (input.systemTokens) lines.push("Take colors, typography, spacing, radius and shadows from design/system.md, the project's token source.");
+	if (input.comments.length > 0) {
+		lines.push("", `Open comments on this artboard (${input.comments.length}); apply each one in the implementation:`);
+		input.comments.forEach((comment, index) => {
+			lines.push(
+				`${index + 1}. Comment id: ${comment.id}`,
+				`   Element: ${comment.selector}`,
+				`   Excerpt: ${comment.excerpt ? JSON.stringify(comment.excerpt) : "(none)"}`,
+				"   Comment:",
+				...comment.comment.split("\n").map((line) => `   ${line}`),
+			);
+		});
+		const ids = input.comments.map((comment) => JSON.stringify(comment.id)).join(", ");
+		lines.push(`When they are applied, resolve them with the ${DESIGN_COMMENTS_TOOL_NAME} tool (action "resolve", slug "${input.slug}", ids [${ids}]).`);
+	}
+	lines.push(
+		"",
+		input.feature
+			? `This design belongs to an ODD feature: track this implementation in ${input.feature} (add or reopen its task there and log this handoff).`
+			: "This design is not linked to an ODD feature document: size it under the project's ODD rules as usual.",
+		"This handoff itself commits nothing.",
+	);
+	return lines.join("\n");
+}
+
+export type DesignImplementPlan = { kind: "send"; message: string } | { kind: "refuse"; notice: DesignNotice };
+
+function implementTargets(cwd: string): string[] {
+	const targets: string[] = [];
+	for (const design of listDesigns(cwd)) {
+		try {
+			for (const artboard of readDesignManifest(join(cwd, "design"), design.slug).artboards) targets.push(`${design.slug}/${artboard.file}`);
+		} catch {
+			// An unreadable design has no artboard to hand off.
+		}
+	}
+	return targets;
+}
+
+function unknownTarget(cwd: string, reason: string): DesignImplementPlan {
+	const targets = implementTargets(cwd);
+	if (targets.length === 0) return { kind: "refuse", notice: { message: `${reason}\nNo designs in design/ yet.\n${designUsage([])}`, level: "warning" } };
+	const shown = targets.length > 30 ? [...targets.slice(0, 30), `… ${targets.length - 30} more`] : targets;
+	return { kind: "refuse", notice: { message: `${reason}\nUsage: /gentle:design implement <slug>/<artboard>. Available: ${shown.join(", ")}.`, level: "warning" } };
+}
+
+/** Validates `<slug>/<file>` against the design's manifest and builds its handoff message. */
+export async function planDesignImplement(cwd: string, target: string): Promise<DesignImplementPlan> {
+	const text = target.trim();
+	const slash = text.indexOf("/");
+	const slug = slash === -1 ? text : text.slice(0, slash);
+	const file = slash === -1 ? "" : text.slice(slash + 1);
+	if (!slug || !file) return unknownTarget(cwd, "Name the artboard to implement as <slug>/<artboard>.");
+	if (!listDesigns(cwd).some((design) => design.slug === slug)) return unknownTarget(cwd, `No design "${slug}" in design/.`);
+	const designRoot = join(cwd, "design");
+	let artboard: DesignArtboard | undefined;
+	let feature: string | undefined;
+	try {
+		const manifest = readDesignManifest(designRoot, slug);
+		artboard = manifest.artboards.find((candidate) => candidate.file === file);
+		feature = manifest.feature;
+	} catch (error) {
+		return { kind: "refuse", notice: { message: error instanceof Error ? error.message : String(error), level: "warning" } };
+	}
+	if (!artboard) return unknownTarget(cwd, `No artboard "${file}" in design/${slug}/design.json.`);
+	let comments: StoredDesignComment[];
+	try {
+		comments = await createDesignCommentStore(designRoot).listOpen(slug, artboard.file);
+	} catch (error) {
+		const reason = error instanceof DesignCommentsError && error.code === "invalid-file"
+			? `design/${slug}/comments.json cannot be read: ${error.message}. Fix the file by hand; it is never overwritten.`
+			: error instanceof Error ? error.message : String(error);
+		return { kind: "refuse", notice: { message: reason, level: "warning" } };
+	}
+	return { kind: "send", message: designImplementMessage({ slug, artboard, feature, systemTokens: hasSystemTokens(designRoot), comments }) };
+}
+
 export interface DesignCanvasDeps {
 	startServer?: (options: DesignCanvasServerOptions) => Promise<DesignCanvasServer>;
 	openBrowser?: (url: string) => Promise<OpenInBrowserResult>;
@@ -74,8 +180,9 @@ export interface DesignCanvas {
 	stop(): Promise<boolean>;
 }
 
-function canvasUrl(server: DesignCanvasServer, slug: string): string {
-	return new URL(`/${server.token}/d/${slug}/`, server.url).href;
+/** The canvas of `slug`, or the root canvas (system board only) when slug is null. */
+function canvasUrl(server: DesignCanvasServer, slug: string | null): string {
+	return new URL(slug === null ? `/${server.token}/` : `/${server.token}/d/${slug}/`, server.url).href;
 }
 
 /** One canvas server per session; comment messages go to `deliver`, whose failure the server reports as HTTP 500. */
@@ -93,7 +200,8 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		return server !== undefined;
 	}
 
-	async function serverFor(root: string): Promise<DesignCanvasServer> {
+	async function serverFor(cwd: string): Promise<DesignCanvasServer> {
+		const root = join(cwd, "design");
 		// A new session cwd means a different design root, so the old server goes.
 		if (running && running.root !== root) await stop();
 		if (!running) {
@@ -101,6 +209,12 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 				designRoot: root,
 				onComment: (comment) => deliver(formatDesignComment(comment)),
 				onComments: (batch) => deliver(formatDesignCommentBatch(batch)),
+				// The same plan as /gentle:design implement, so both send identical text.
+				onImplement: async ({ slug, file }) => {
+					const plan = await planDesignImplement(cwd, `${slug}/${file}`);
+					if (plan.kind === "refuse") throw new Error(plan.notice.message);
+					await deliver(plan.message);
+				},
 			});
 			running = { root, server };
 			server.catch(() => { if (running?.server === server) running = undefined; });
@@ -110,14 +224,19 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 
 	async function open(cwd: string, requested?: string): Promise<DesignNotice> {
 		const designs = listDesigns(cwd);
-		if (designs.length === 0) return { message: `No designs in design/ yet.\n${designUsage([])}`, level: "warning" };
-		const slug = requested ?? designs[0].slug;
-		if (!designs.some((design) => design.slug === slug)) {
+		// With only design/system.html, the canvas opens on the system board alone (L14).
+		const systemOnly = designs.length === 0 && requested === undefined && hasSystemBoard(cwd);
+		if (designs.length === 0 && !systemOnly) {
+			const message = requested === undefined ? `No designs in design/ yet.\n${designUsage([])}` : `No design "${requested}" in design/. There are no designs yet.\n${designUsage([])}`;
+			return { message, level: "warning" };
+		}
+		const slug = systemOnly ? null : requested ?? designs[0].slug;
+		if (slug !== null && !designs.some((design) => design.slug === slug)) {
 			return { message: `No design "${slug}" in design/. Available: ${designs.map((design) => design.slug).join(", ")}.`, level: "warning" };
 		}
 		let server: DesignCanvasServer;
 		try {
-			server = await serverFor(join(cwd, "design"));
+			server = await serverFor(cwd);
 		} catch (error) {
 			return { message: `The design canvas could not start: ${error instanceof Error ? error.message : String(error)}`, level: "error" };
 		}

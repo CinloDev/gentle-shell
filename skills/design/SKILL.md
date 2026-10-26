@@ -44,6 +44,7 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 {
   "title": "Pricing page",
   "brief": "Pricing page for a note-taking app aimed at students",
+  "feature": "odd/tasks/pricing-page.md",
   "artboards": [
     { "file": "01-comparison-table.html", "title": "Comparison table", "tradeoff": "Dense and scannable; weaker emotional pull", "width": 1440, "height": 900 },
     { "file": "02-single-plan-hero.html", "title": "Single plan hero", "tradeoff": "Strong focus; hides plan differences", "width": 1440, "height": 900 }
@@ -51,7 +52,8 @@ Use this skill when the user asks for a visual design, mockup, or UI directions,
 }
 ```
 
-6. Set `width`/`height` to the artboard's intended viewport in CSS pixels; keep the manifest in sync with the files on every change.
+6. Set `width`/`height` to the artboard's intended viewport in CSS pixels; keep the manifest in sync with the files on every change. Fields: `title`, `brief`, optional `feature`, and `artboards[]` with `file`, `title`, `tradeoff`, `width`, `height`.
+7. ODD link: when the design comes from a tracked ODD feature (an existing `odd/tasks/<feature>.md` for the current work), set `feature` to that path and append one entry to that document's `## Log` naming `design/<slug>/` and its artboards. For small untracked work, omit `feature` and leave the design standalone; never create a feature document just to link it.
 
 ## Design system sync
 

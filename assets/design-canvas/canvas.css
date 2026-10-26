@@ -110,6 +110,15 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 	color: var(--gd-accent-text);
 }
 
+.gd-feature {
+	margin: 0;
+	max-width: 28ch;
+	color: var(--gd-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
 .gd-status {
 	margin: 0 0 0 auto;
 	color: var(--gd-muted);
@@ -156,10 +165,33 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 }
 
 .gd-artboard-label {
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	gap: 2px;
 }
+
+/* Implement this: anchored to the label's bottom right and kept at screen size like the pins. */
+.gd-implement {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	transform: scale(var(--gd-inv-zoom, 1));
+	transform-origin: right bottom;
+	white-space: nowrap;
+}
+
+.gd-implement-confirm {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 6px;
+	border: 1px solid var(--gd-border);
+	border-radius: 6px;
+	background: var(--gd-panel);
+}
+
+.gd-implement [hidden] { display: none; }
 
 .gd-artboard-title {
 	margin: 0;
