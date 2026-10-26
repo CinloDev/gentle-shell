@@ -143,3 +143,4 @@ Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413
   - `main` is unprotected and the viewer is ADMIN;
   - no CI size gate exists, and recent merged PRs carry no size label.
   The PR body lists the per-slice commits as a review guide. Merge only on green required CI.
+- **L25** (2026-10-26) RDD assess of `e5a06f923..1d337314c` (T6-T8): medium, `reviewDue: false` (under budget), so the writers' self-verification stands. A privacy scan of the branch diff found no personal paths. Issue #2561 created and labeled `status:approved`. Branch pushed. PR #2562 opened (`type:feature`, `Closes #2561`). Waiting on CI.
