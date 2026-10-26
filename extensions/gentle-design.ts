@@ -72,10 +72,16 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 				ctx.ui.notify((await canvas.stop()) ? "Design canvas stopped." : "No design canvas is running.", "info");
 				return;
 			}
-			if (parsed.name === "sync") return runSkill(DESIGN_SYNC_REQUEST, ctx);
+			if (parsed.name === "sync") {
+				if (parsed.rest) ctx.ui.notify("/gentle:design sync takes no arguments.", "warning");
+				else runSkill(DESIGN_SYNC_REQUEST, ctx);
+				return;
+			}
 			const plan = await planDesignImplement(ctx.cwd, parsed.rest);
-			if (plan.kind === "send") deliver(plan.message);
-			else ctx.ui.notify(plan.notice.message, plan.notice.level);
+			if (plan.kind === "send") {
+				for (const warning of plan.warnings) ctx.ui.notify(warning, "warning");
+				deliver(plan.message);
+			} else ctx.ui.notify(plan.notice.message, plan.notice.level);
 			return;
 		}
 		runSkill(parsed.brief, ctx);

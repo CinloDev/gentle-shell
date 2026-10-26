@@ -221,6 +221,19 @@ test("open without designs warns with usage and starts nothing", async () => {
 	assert.match(notices[0].message, /\/gentle:design <brief>/);
 });
 
+test("open <slug> without designs keeps the same no-designs warning as open", async () => {
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const cwd = scratchCwd();
+	const bare = fakeContext(cwd);
+	await command().handler("open", bare.ctx);
+	const named = fakeContext(cwd);
+	await command().handler("open foo", named.ctx);
+	assert.equal(canvas.starts.length, 0);
+	assert.deepEqual(named.notices, bare.notices);
+});
+
 test("no arguments with designs opens the most recent design by design.json mtime", async () => {
 	const cwd = scratchCwd();
 	writeDesign(cwd, "alpha", "Alpha", 1000);
@@ -370,6 +383,28 @@ test("implement without system.md, comments or a valid feature falls back to the
 	assert.ok(content.includes("size it under the project's ODD rules as usual"));
 	assert.ok(content.includes("This handoff itself commits nothing."));
 	for (const absent of ["design/system.md", "track this implementation", "outside.md", "gentle_design_comments"]) assert.ok(!content.includes(absent), `the message omits ${absent}`);
+});
+
+test("implement reports an invalid feature link instead of dropping it silently", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "../outside.md");
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("implement login/02-card.html", ctx);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(notices, [{ message: "design/login/design.json: feature must be a relative odd/tasks/<name>.md path; it was ignored", level: "warning" }]);
+});
+
+test("implement with a valid feature link reports nothing", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("implement login/01-split.html", ctx);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(notices, []);
 });
 
 test("implement of an unknown design or artboard warns with the valid targets and sends nothing", async () => {
@@ -577,6 +612,15 @@ test("sync sends exactly one message that runs the gentle-design skill in sync m
 	for (const part of ["design/system.md", "design/system.html"]) assert.ok(content.includes(part), `names ${part}`);
 	assert.deepEqual(sent[0].options, { expandPromptTemplates: true });
 	assert.deepEqual(notices, []);
+});
+
+test("sync with extra words warns and sends nothing", async () => {
+	const { pi, sent, command } = fakePi();
+	gentleDesign(pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(scratchCwd());
+	await command().handler("sync only the buttons", ctx);
+	assert.equal(sent.length, 0);
+	assert.deepEqual(notices, [{ message: "/gentle:design sync takes no arguments.", level: "warning" }]);
 });
 
 test("sync is queued as a follow-up while the agent is busy", async () => {

@@ -116,7 +116,8 @@ export function designImplementMessage(input: DesignImplementInput): string {
 	return lines.join("\n");
 }
 
-export type DesignImplementPlan = { kind: "send"; message: string } | { kind: "refuse"; notice: DesignNotice };
+/** `warnings` name what design.json dropped (an invalid feature link), so the command can report it. */
+export type DesignImplementPlan = { kind: "send"; message: string; warnings: string[] } | { kind: "refuse"; notice: DesignNotice };
 
 function implementTargets(cwd: string): string[] {
 	const targets: string[] = [];
@@ -148,10 +149,12 @@ export async function planDesignImplement(cwd: string, target: string): Promise<
 	const designRoot = join(cwd, "design");
 	let artboard: DesignArtboard | undefined;
 	let feature: string | undefined;
+	let warnings: string[] = [];
 	try {
 		const manifest = readDesignManifest(designRoot, slug);
 		artboard = manifest.artboards.find((candidate) => candidate.file === file);
 		feature = manifest.feature;
+		warnings = (manifest.warnings ?? []).map((warning) => `design/${slug}/design.json: ${warning}`);
 	} catch (error) {
 		return { kind: "refuse", notice: { message: error instanceof Error ? error.message : String(error), level: "warning" } };
 	}
@@ -165,7 +168,7 @@ export async function planDesignImplement(cwd: string, target: string): Promise<
 			: error instanceof Error ? error.message : String(error);
 		return { kind: "refuse", notice: { message: reason, level: "warning" } };
 	}
-	return { kind: "send", message: designImplementMessage({ slug, artboard, feature, systemTokens: hasSystemTokens(designRoot), comments }) };
+	return { kind: "send", message: designImplementMessage({ slug, artboard, feature, systemTokens: hasSystemTokens(designRoot), comments }), warnings };
 }
 
 export interface DesignCanvasDeps {
@@ -227,8 +230,7 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		// With only design/system.html, the canvas opens on the system board alone (L14).
 		const systemOnly = designs.length === 0 && requested === undefined && hasSystemBoard(cwd);
 		if (designs.length === 0 && !systemOnly) {
-			const message = requested === undefined ? `No designs in design/ yet.\n${designUsage([])}` : `No design "${requested}" in design/. There are no designs yet.\n${designUsage([])}`;
-			return { message, level: "warning" };
+			return { message: `No designs in design/ yet.\n${designUsage([])}`, level: "warning" };
 		}
 		const slug = systemOnly ? null : requested ?? designs[0].slug;
 		if (slug !== null && !designs.some((design) => design.slug === slug)) {
