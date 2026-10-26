@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DESIGN_COMMENTS_FILE, DESIGN_COMMENT_LIMITS, DesignCommentsError, createDesignCommentStore, isDesignCommentId, truncateUtf16, type StoredDesignComment } from "./design-comments.ts";
+import { DESIGN_FEATURE_PATH, DesignHandoffsError, createDesignHandoffStore, sendDesignHandoff, type DesignHandoffDelivery } from "./design-handoffs.ts";
 
 // Loopback canvas host for gentle-design (S4-S6). Every route lives under a
 // per-server random token, the Host header must name this server, POSTs need
@@ -66,7 +67,8 @@ const CANVAS_CSP = [
 	"style-src 'self'",
 	"img-src 'self' data:",
 	"connect-src 'self'",
-	"frame-src 'self'",
+	// Compare (S15) frames the running app next to its artboard: loopback origins only.
+	`frame-src 'self' ${["http", "https"].flatMap((scheme) => ["localhost", "127.0.0.1", "[::1]"].map((host) => `${scheme}://${host}:*`)).join(" ")}`,
 	"base-uri 'none'",
 	"form-action 'none'",
 	"frame-ancestors 'none'",
@@ -82,8 +84,12 @@ export type DesignCanvasServerOptions = {
 	onComment: (comment: DesignComment) => void | Promise<void>;
 	/** "Send all": every open unsent comment of one design, as one batch. */
 	onComments?: (batch: DesignComment[]) => void | Promise<void>;
-	/** "Implement this": an artboard of the manifest, already validated; a throw answers 500. */
-	onImplement?: (request: DesignImplementRequest) => void | Promise<void>;
+	/**
+	 * "Implement this": an artboard of the manifest, already validated and recorded as handed off
+	 * in handoffs.json. It answers whether the handoff was queued behind a busy agent; a throw
+	 * takes the record back and answers 500.
+	 */
+	onImplement?: (request: DesignImplementRequest) => DesignHandoffDelivery | Promise<DesignHandoffDelivery>;
 	initialSlug?: string;
 	randomToken?: () => string;
 };
@@ -104,8 +110,7 @@ export type DesignArtboard = { file: string; title: string; tradeoff: string; wi
 export type DesignManifest = { slug: string; title: string; brief: string; artboards: DesignArtboard[]; feature?: string; warnings?: string[] };
 export type DesignImplementRequest = { slug: string; file: string };
 
-/** The ODD feature document a design links to (S10): a repository-relative `odd/tasks/<name>.md`. */
-export const DESIGN_FEATURE_PATH = /^odd\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
+export { DESIGN_FEATURE_PATH };
 
 class HttpError extends Error {
 	readonly status: number;
@@ -127,6 +132,15 @@ function storeFailure(error: unknown): never {
 	if (error.code === "limit") throw new HttpError(409, "too-many-comments", { error: "too-many-comments", reason: error.message });
 	if (error.code === "invalid-input") throw new HttpError(400, "invalid-comment", { error: "invalid-comment", reason: error.message });
 	throw new HttpError(500, "internal");
+}
+
+/** handoffs.json failures as HTTP: a broken file is 422 and is never overwritten. */
+function handoffFailure(error: unknown): never {
+	if (!(error instanceof DesignHandoffsError)) throw error;
+	if (error.code === "not-found") throw new HttpError(404, "not-found");
+	if (error.code === "invalid-file") throw new HttpError(422, "invalid-handoffs", { error: "invalid-handoffs", reason: error.message });
+	if (error.code === "limit") throw new HttpError(409, "too-many-handoffs", { error: "too-many-handoffs", reason: error.message });
+	throw new HttpError(400, "invalid-handoff", { error: "invalid-handoff", reason: error.message });
 }
 
 function resolveInstruction(slug: string, ids: readonly string[]): string {
@@ -406,6 +420,7 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 	if (!TOKEN_SHAPE.test(token)) throw new Error("token must be 16-128 base64url characters");
 	const designRoot = options.designRoot;
 	const store = createDesignCommentStore(designRoot);
+	const handoffs = createDesignHandoffStore(designRoot);
 	// Deliveries of one design run one at a time (send-now and send-all), so a
 	// comment is never delivered twice: a send-all waits for an in-flight send-now.
 	const sending = new Map<string, Promise<unknown>>();
@@ -636,12 +651,18 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		const file = segments.join("/");
 		const manifest = await readManifest(slug);
 		if (!manifest.artboards.some((artboard) => artboard.file === file)) throw new HttpError(400, "invalid-file", { error: "invalid-file", reason: `${file} is not an artboard of design/${slug}` });
-		try {
-			await options.onImplement({ slug, file });
-		} catch {
-			throw new HttpError(500, "delivery-failed", { error: "delivery-failed", slug, file });
-		}
-		reply(res, 202, { ok: true, slug, file });
+		const onImplement = options.onImplement;
+		const deliveryFailed = new HttpError(500, "delivery-failed", { error: "delivery-failed", slug, file });
+		// Recorded before delivery, so the agent can report progress on it at once (S15);
+		// a failed delivery takes the record back.
+		const { queued } = await sendDesignHandoff(handoffs, { slug, file, feature: manifest.feature }, async () => {
+			try {
+				return await onImplement({ slug, file });
+			} catch {
+				throw deliveryFailed;
+			}
+		}).catch((error: unknown) => (error === deliveryFailed ? Promise.reject(error) : handoffFailure(error)));
+		reply(res, 202, { ok: true, slug, file, queued });
 	}
 
 	async function changeStatus(req: IncomingMessage, res: ServerResponse, slug: string, id: string): Promise<void> {
@@ -782,6 +803,10 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 			if (tail.length === 3 && tail[2] === "comments") {
 				const slug = safeSegment(tail[1]);
 				return slug && SLUG.test(slug) ? async (_req, res) => reply(res, 200, await store.read(slug).catch(storeFailure)) : undefined;
+			}
+			if (tail.length === 3 && tail[2] === "handoffs") {
+				const slug = safeSegment(tail[1]);
+				return slug && SLUG.test(slug) ? async (_req, res) => reply(res, 200, await handoffs.read(slug).catch(handoffFailure)) : undefined;
 			}
 		}
 		if (head === "files" && tail.length >= 2) {

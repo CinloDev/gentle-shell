@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { formatDesignComment, hasSystemTokens, listDesignEntries, formatDesignCommentBatch, readDesignManifest, resolveSystemBoard, startDesignCanvasServer, type DesignArtboard, type DesignCanvasServer, type DesignCanvasServerOptions } from "./design-canvas-server.ts";
 import { createDesignCommentStore, DesignCommentsError, type StoredDesignComment } from "./design-comments.ts";
+import { createDesignHandoffStore, DesignHandoffsError, sendDesignHandoff, type DesignHandoff, type DesignHandoffDelivery, type DesignHandoffStatus } from "./design-handoffs.ts";
 import { openInBrowser, type OpenInBrowserResult } from "./design-open-browser.ts";
 import { detectDesignSources, staleDesignSources } from "./design-sources.ts";
 
@@ -109,6 +110,7 @@ export function designImplementMessage(input: DesignImplementInput): string {
 	}
 	lines.push(
 		"",
+		`Report progress with the ${DESIGN_TOOL_NAME} tool: action "handoff", target "${input.slug}/${input.artboard.file}", status "in_progress" when you start; status "implemented" when it is done, with previewUrl set to the running app's loopback URL (localhost, 127.0.0.1 or [::1]) when one is running, so the canvas can compare it with the artboard.`,
 		input.feature
 			? `This design belongs to an ODD feature: track this implementation in ${input.feature} (add or reopen its task there and log this handoff).`
 			: "This design is not linked to an ODD feature document: size it under the project's ODD rules as usual.",
@@ -117,8 +119,11 @@ export function designImplementMessage(input: DesignImplementInput): string {
 	return lines.join("\n");
 }
 
+/** The artboard a handoff records in handoffs.json (S15). */
+export type DesignHandoffTarget = { slug: string; file: string; feature?: string };
+
 /** `warnings` name what design.json dropped (an invalid feature link), so the command can report it. */
-export type DesignImplementPlan = { kind: "send"; message: string; warnings: string[] } | { kind: "refuse"; notice: DesignNotice };
+export type DesignImplementPlan = { kind: "send"; message: string; warnings: string[]; handoff: DesignHandoffTarget } | { kind: "refuse"; notice: DesignNotice };
 
 function implementTargets(cwd: string): string[] {
 	const targets: string[] = [];
@@ -132,34 +137,43 @@ function implementTargets(cwd: string): string[] {
 	return targets;
 }
 
-function unknownTarget(cwd: string, reason: string): DesignImplementPlan {
+type DesignRefusal = Extract<DesignImplementPlan, { kind: "refuse" }>;
+
+function unknownTarget(cwd: string, reason: string): DesignRefusal {
 	const targets = implementTargets(cwd);
 	if (targets.length === 0) return { kind: "refuse", notice: { message: `${reason}\nNo designs in design/ yet.\n${designUsage([])}`, level: "warning" } };
 	const shown = targets.length > 30 ? [...targets.slice(0, 30), `… ${targets.length - 30} more`] : targets;
 	return { kind: "refuse", notice: { message: `${reason}\nUsage: /gentle:design implement <slug>/<artboard>. Available: ${shown.join(", ")}.`, level: "warning" } };
 }
 
-/** Validates `<slug>/<file>` against the design's manifest and builds its handoff message. */
-export async function planDesignImplement(cwd: string, target: string): Promise<DesignImplementPlan> {
+type ResolvedTarget = { kind: "artboard"; slug: string; artboard: DesignArtboard; feature?: string; warnings: string[] };
+
+/** `<slug>/<file>` checked against the design's manifest; `what` names the action in the refusal. */
+function resolveDesignTarget(cwd: string, target: string, what: string): ResolvedTarget | DesignRefusal {
 	const text = target.trim();
 	const slash = text.indexOf("/");
 	const slug = slash === -1 ? text : text.slice(0, slash);
 	const file = slash === -1 ? "" : text.slice(slash + 1);
-	if (!slug || !file) return unknownTarget(cwd, "Name the artboard to implement as <slug>/<artboard>.");
+	if (!slug || !file) return unknownTarget(cwd, `Name the artboard to ${what} as <slug>/<artboard>.`);
 	if (!listDesigns(cwd).some((design) => design.slug === slug)) return unknownTarget(cwd, `No design "${slug}" in design/.`);
-	const designRoot = join(cwd, "design");
-	let artboard: DesignArtboard | undefined;
-	let feature: string | undefined;
-	let warnings: string[] = [];
+	let manifest;
 	try {
-		const manifest = readDesignManifest(designRoot, slug);
-		artboard = manifest.artboards.find((candidate) => candidate.file === file);
-		feature = manifest.feature;
-		warnings = (manifest.warnings ?? []).map((warning) => `design/${slug}/design.json: ${warning}`);
+		manifest = readDesignManifest(join(cwd, "design"), slug);
 	} catch (error) {
 		return { kind: "refuse", notice: { message: error instanceof Error ? error.message : String(error), level: "warning" } };
 	}
+	const artboard = manifest.artboards.find((candidate) => candidate.file === file);
 	if (!artboard) return unknownTarget(cwd, `No artboard "${file}" in design/${slug}/design.json.`);
+	const warnings = (manifest.warnings ?? []).map((warning) => `design/${slug}/design.json: ${warning}`);
+	return { kind: "artboard", slug, artboard, feature: manifest.feature, warnings };
+}
+
+/** Validates `<slug>/<file>` against the design's manifest and builds its handoff message. */
+export async function planDesignImplement(cwd: string, target: string): Promise<DesignImplementPlan> {
+	const resolved = resolveDesignTarget(cwd, target, "implement");
+	if (resolved.kind === "refuse") return resolved;
+	const { slug, artboard, feature, warnings } = resolved;
+	const designRoot = join(cwd, "design");
 	let comments: StoredDesignComment[];
 	try {
 		comments = await createDesignCommentStore(designRoot).listOpen(slug, artboard.file);
@@ -169,7 +183,26 @@ export async function planDesignImplement(cwd: string, target: string): Promise<
 			: error instanceof Error ? error.message : String(error);
 		return { kind: "refuse", notice: { message: reason, level: "warning" } };
 	}
-	return { kind: "send", message: designImplementMessage({ slug, artboard, feature, systemTokens: hasSystemTokens(designRoot), comments }), warnings };
+	return { kind: "send", message: designImplementMessage({ slug, artboard, feature, systemTokens: hasSystemTokens(designRoot), comments }), warnings, handoff: { slug, file: artboard.file, feature } };
+}
+
+/** A handoffs.json problem as the reason the user or the model reads; a broken file is never overwritten. */
+function handoffsProblem(slug: string, error: unknown): Error {
+	if (error instanceof DesignHandoffsError && error.code === "invalid-file") {
+		return new Error(`design/${slug}/handoffs.json cannot be read: ${error.message}. Fix the file by hand; it is never overwritten.`);
+	}
+	return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Sends a planned handoff (the command): recorded in handoffs.json as sent and
+ * chosen before `deliver` runs, then marked queued when the delivery says so.
+ */
+export async function sendDesignImplement(cwd: string, plan: Extract<DesignImplementPlan, { kind: "send" }>, deliver: (message: string) => DesignHandoffDelivery | Promise<DesignHandoffDelivery>): Promise<{ queued: boolean }> {
+	const store = createDesignHandoffStore(join(cwd, "design"));
+	return sendDesignHandoff(store, plan.handoff, () => deliver(plan.message)).catch((error: unknown) => {
+		throw error instanceof DesignHandoffsError ? handoffsProblem(plan.handoff.slug, error) : error;
+	});
 }
 
 export interface DesignCanvasDeps {
@@ -201,8 +234,11 @@ function canvasUrl(server: DesignCanvasServer, slug: string | null): string {
 	return new URL(slug === null ? `/${server.token}/` : `/${server.token}/d/${slug}/`, server.url).href;
 }
 
-/** One canvas server per session; comment messages go to `deliver`, whose failure the server reports as HTTP 500. */
-export function createDesignCanvas(deliver: (message: string) => void | Promise<void>, deps: DesignCanvasDeps = {}): DesignCanvas {
+/**
+ * One canvas server per session; comment messages go to `deliver`, whose failure the server reports as HTTP 500.
+ * For a handoff, `deliver` also answers whether the message was queued behind a busy agent.
+ */
+export function createDesignCanvas(deliver: (message: string) => DesignHandoffDelivery | Promise<DesignHandoffDelivery>, deps: DesignCanvasDeps = {}): DesignCanvas {
 	const startServer = deps.startServer ?? startDesignCanvasServer;
 	const openBrowser = deps.openBrowser ?? ((url: string) => openInBrowser(url));
 	let running: { root: string; server: Promise<DesignCanvasServer>; url?: string } | undefined;
@@ -223,13 +259,14 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		if (!running) {
 			const server = startServer({
 				designRoot: root,
-				onComment: (comment) => deliver(formatDesignComment(comment)),
-				onComments: (batch) => deliver(formatDesignCommentBatch(batch)),
-				// The same plan as /gentle:design implement, so both send identical text.
+				onComment: async (comment) => { await deliver(formatDesignComment(comment)); },
+				onComments: async (batch) => { await deliver(formatDesignCommentBatch(batch)); },
+				// The same plan as /gentle:design implement, so both send identical text; the server
+				// has already recorded the handoff, and this answers whether it was queued.
 				onImplement: async ({ slug, file }) => {
 					const plan = await planDesignImplement(cwd, `${slug}/${file}`);
 					if (plan.kind === "refuse") throw new Error(plan.notice.message);
-					await deliver(plan.message);
+					return deliver(plan.message);
 				},
 			});
 			running = { root, server };
@@ -331,7 +368,15 @@ export const DESIGN_PROMPT_HINT = [
 	"Designs stay under design/<slug>/.",
 ].join("\n");
 
-export type DesignToolParams = { action: "list" | "open" | "stop" | "implement"; slug?: string; target?: string };
+export type DesignToolParams = {
+	action: "list" | "open" | "stop" | "implement" | "handoff";
+	slug?: string;
+	target?: string;
+	/** handoff only. */
+	status?: string;
+	note?: string;
+	previewUrl?: string;
+};
 /** How many design source paths list names; `total` still counts them all. */
 const LISTED_DESIGN_SOURCES = 20;
 
@@ -346,26 +391,63 @@ export type DesignToolDetails =
 	}
 	| { url: string; opened: boolean; refreshed?: true }
 	| { stopped: boolean }
-	| { target: string; warnings: string[] };
+	| { target: string; warnings: string[] }
+	| { target: string; chosen: string | null; handoff: DesignHandoff };
 /** `texts` become the tool's content parts; a refusal throws, so Pi flags the result as an error. */
 export type DesignToolResult = { texts: string[]; details: DesignToolDetails };
 
-function listDesignTool(cwd: string, canvas: DesignCanvas): DesignToolResult {
+function handoffState(entry: DesignHandoff): string {
+	const status = entry.status === "in_progress" ? "in progress" : entry.status;
+	const parts = [`handoff ${status}${entry.status === "sent" && entry.queued ? ", queued" : ""}`];
+	if (entry.previewUrl) parts.push(`preview ${entry.previewUrl}`);
+	return parts.join("; ");
+}
+
+type ListedDesign = {
+	slug: string;
+	title: string;
+	artboards: Array<{ file: string; title: string }>;
+	error?: string;
+	/** Present only when the design has handoff records (S15). */
+	chosen?: string | null;
+	handoffs?: Record<string, DesignHandoff>;
+	handoffsError?: string;
+};
+
+async function listDesignTool(cwd: string, canvas: DesignCanvas): Promise<DesignToolResult> {
 	const designRoot = join(cwd, "design");
-	const designs = listDesigns(cwd).map(({ slug, title }) => {
+	const handoffStore = createDesignHandoffStore(designRoot);
+	const designs: ListedDesign[] = [];
+	for (const { slug, title } of listDesigns(cwd)) {
+		let design: ListedDesign;
 		try {
 			const artboards = readDesignManifest(designRoot, slug).artboards.map(({ file, title }) => ({ file, title }));
-			return { slug, title, artboards };
+			design = { slug, title, artboards };
 		} catch (error) {
-			return { slug, title, artboards: [], error: error instanceof Error ? error.message : String(error) };
+			design = { slug, title, artboards: [], error: error instanceof Error ? error.message : String(error) };
 		}
-	});
+		try {
+			const document = await handoffStore.read(slug);
+			if (document.chosen !== null || Object.keys(document.handoffs).length > 0) {
+				design.chosen = document.chosen;
+				design.handoffs = document.handoffs;
+			}
+		} catch (error) {
+			design.handoffsError = error instanceof Error ? error.message : String(error);
+		}
+		designs.push(design);
+	}
 	const systemBoard = hasSystemBoard(cwd);
 	const url = canvas.url();
 	const lines = designs.length === 0 ? ["No designs in design/ yet."] : [`Designs in design/ (${designs.length}):`];
 	for (const design of designs) {
 		lines.push(`- ${design.slug}: ${design.title}${design.error ? ` (design.json cannot be read: ${design.error})` : ""}`);
-		for (const artboard of design.artboards) lines.push(`  - ${artboard.file}: ${artboard.title}`);
+		if (design.chosen) lines.push(`  Chosen: ${design.chosen} (the other artboards are alternatives)`);
+		if (design.handoffsError) lines.push(`  handoffs.json cannot be read: ${design.handoffsError}`);
+		for (const artboard of design.artboards) {
+			const entry = design.handoffs && Object.hasOwn(design.handoffs, artboard.file) ? design.handoffs[artboard.file] : undefined;
+			lines.push(`  - ${artboard.file}: ${artboard.title}${entry ? ` (${handoffState(entry)})` : ""}`);
+		}
 	}
 	lines.push(systemBoard ? "System board: design/system.html (shown first on the canvas)." : "No system board (design/system.html).");
 	const sources = detectDesignSources(cwd);
@@ -389,8 +471,25 @@ function capped(paths: readonly string[]): string {
 	return shown.join(", ");
 }
 
+/** The handoff action: the agent's progress on one artboard, validated by the manifest and the store. */
+async function handoffTool(cwd: string, params: DesignToolParams): Promise<DesignToolResult> {
+	if (params.status !== "in_progress" && params.status !== "implemented") throw new Error('handoff needs status "in_progress" or "implemented".');
+	const status: Exclude<DesignHandoffStatus, "sent"> = params.status;
+	const resolved = resolveDesignTarget(cwd, params.target ?? "", "report on");
+	if (resolved.kind === "refuse") throw new Error(resolved.notice.message);
+	const { slug, artboard } = resolved;
+	const store = createDesignHandoffStore(join(cwd, "design"));
+	const handoff = await store.setStatus(slug, artboard.file, status, { note: params.note, previewUrl: params.previewUrl }).catch((error: unknown) => { throw handoffsProblem(slug, error); });
+	const { chosen } = await store.read(slug).catch((error: unknown) => { throw handoffsProblem(slug, error); });
+	const path = `design/${slug}/${artboard.file}`;
+	const lines = [`Handoff of ${path}: ${status === "in_progress" ? "in progress" : "implemented"}.${chosen === artboard.file ? ` It is the chosen artboard of design/${slug}.` : ""}`];
+	if (handoff.previewUrl) lines.push(`Preview: ${handoff.previewUrl}${status === "implemented" ? " (the canvas offers Compare)" : ""}.`);
+	return { texts: [lines.join("\n")], details: { target: `${slug}/${artboard.file}`, chosen, handoff } };
+}
+
 /** The gentle_design tool: the /gentle:design actions on the session's canvas, without sending a user message. */
 export async function runDesignTool(cwd: string, params: DesignToolParams, canvas: DesignCanvas): Promise<DesignToolResult> {
+	if (params.action === "handoff") return handoffTool(cwd, params);
 	if (params.action === "list") return listDesignTool(cwd, canvas);
 	if (params.action === "stop") {
 		const stopped = await canvas.stop();
@@ -405,5 +504,8 @@ export async function runDesignTool(cwd: string, params: DesignToolParams, canva
 	const target = params.target ?? "";
 	const plan = await planDesignImplement(cwd, target);
 	if (plan.kind === "refuse") throw new Error(plan.notice.message);
+	// The model follows this handoff in its current run, so it is never queued.
+	await createDesignHandoffStore(join(cwd, "design")).markSent(plan.handoff.slug, plan.handoff.file, { queued: false, feature: plan.handoff.feature })
+		.catch((error: unknown) => { throw handoffsProblem(plan.handoff.slug, error); });
 	return { texts: [plan.message, ...plan.warnings.map((warning) => `Warning: ${warning}`)], details: { target: target.trim(), warnings: plan.warnings } };
 }

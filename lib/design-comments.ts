@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { lstat, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { extname, join, sep } from "node:path";
 
 // The single owner of design/<slug>/comments.json (S9). The canvas server and
@@ -62,10 +62,12 @@ export interface DesignCommentStore {
 	listOpen(slug: string, file?: string): Promise<StoredDesignComment[]>;
 }
 
-// Keyed by the real path of each comments.json, shared by every store in this process.
+// Keyed by the real path of each design file (comments.json, handoffs.json),
+// shared by every store in this process.
 const queues = new Map<string, Promise<unknown>>();
 
-function serialize<T>(key: string, task: () => Promise<T>): Promise<T> {
+/** Runs `task` after every earlier task queued for `key`, the real path of the file it writes. */
+export function serializeDesignWrite<T>(key: string, task: () => Promise<T>): Promise<T> {
 	const previous = queues.get(key) ?? Promise.resolve();
 	const run = previous.then(task, task);
 	const settled = run.then(() => undefined, () => undefined);
@@ -81,6 +83,68 @@ function within(root: string, target: string): boolean {
 function isMissing(error: unknown): boolean {
 	const code = (error as NodeJS.ErrnoException)?.code;
 	return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
+}
+
+/**
+ * Real `<root>/<slug>/<name>` path of a design-owned file, refusing a slug that
+ * escapes the real design root and a `name` that is not a regular file (a link
+ * would make the atomic rename replace the link, not its target). `notFound`
+ * builds the caller's typed error from the message.
+ */
+export async function locateDesignFile(designRoot: string, slug: string, name: string, notFound: (message: string) => Error): Promise<{ dir: string; path: string }> {
+	const missing = notFound(`No design "${slug}" in design/.`);
+	if (typeof slug !== "string" || !SLUG.test(slug)) throw missing;
+	let root: string;
+	let dir: string;
+	try {
+		root = await realpath(designRoot);
+		dir = await realpath(join(root, slug));
+	} catch (error) {
+		if (isMissing(error)) throw missing;
+		throw error;
+	}
+	if (!within(root, dir) || !(await lstat(dir)).isDirectory()) throw missing;
+	const path = join(dir, name);
+	try {
+		if (!(await lstat(path)).isFile()) throw notFound(`design/${slug}/${name} must be a regular file.`);
+	} catch (error) {
+		if (!isMissing(error)) throw error;
+	}
+	return { dir, path };
+}
+
+/** The UTF-8 content of `path`, or undefined when it does not exist; `tooLarge` is thrown past `maxBytes`. */
+export async function readDesignFile(path: string, maxBytes: number, tooLarge: () => Error): Promise<string | undefined> {
+	try {
+		const handle = await open(path, "r");
+		try {
+			if ((await handle.stat()).size > maxBytes) throw tooLarge();
+			return await handle.readFile("utf8");
+		} finally {
+			await handle.close();
+		}
+	} catch (error) {
+		if (isMissing(error)) return undefined;
+		throw error;
+	}
+}
+
+/** Replaces `<dir>/<name>` (at `path`) atomically: a synced temp file in the same directory, then rename. */
+export async function replaceDesignFile(dir: string, path: string, name: string, content: string): Promise<void> {
+	const temp = join(dir, `.${name}.${randomBytes(6).toString("hex")}.tmp`);
+	const handle = await open(temp, "wx", 0o644);
+	try {
+		await handle.writeFile(content, "utf8");
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	try {
+		await rename(temp, path);
+	} catch (error) {
+		await unlink(temp).catch(() => {});
+		throw error;
+	}
 }
 
 /** A relative `.html` path of plain segments, such as `sub/01-a.html`. */
@@ -167,67 +231,23 @@ export function createDesignCommentStore(designRoot: string, deps: DesignComment
 	const randomId = deps.randomId ?? defaultRandomId;
 
 	/** Real comments.json path inside `<root>/<slug>`, refusing any escape or a non-file comments.json. */
-	async function locate(slug: string): Promise<{ dir: string; path: string }> {
-		const notFound = new DesignCommentsError("not-found", `No design "${slug}" in design/.`);
-		if (typeof slug !== "string" || !SLUG.test(slug)) throw notFound;
-		let root: string;
-		let dir: string;
-		try {
-			root = await realpath(designRoot);
-			dir = await realpath(join(root, slug));
-		} catch (error) {
-			if (isMissing(error)) throw notFound;
-			throw error;
-		}
-		if (!within(root, dir) || !(await lstat(dir)).isDirectory()) throw notFound;
-		const path = join(dir, DESIGN_COMMENTS_FILE);
-		try {
-			// A link would make the atomic rename replace the link, not its target.
-			if (!(await lstat(path)).isFile()) throw new DesignCommentsError("not-found", `design/${slug}/${DESIGN_COMMENTS_FILE} must be a regular file.`);
-		} catch (error) {
-			if (!isMissing(error)) throw error;
-		}
-		return { dir, path };
+	function locate(slug: string): Promise<{ dir: string; path: string }> {
+		return locateDesignFile(designRoot, slug, DESIGN_COMMENTS_FILE, (message) => new DesignCommentsError("not-found", message));
 	}
 
 	async function load(path: string): Promise<DesignCommentsDocument> {
-		let raw: string;
-		try {
-			const handle = await open(path, "r");
-			try {
-				if ((await handle.stat()).size > MAX_FILE_BYTES) throw new DesignCommentsError("invalid-file", "comments.json is too large");
-				raw = await handle.readFile("utf8");
-			} finally {
-				await handle.close();
-			}
-		} catch (error) {
-			if (isMissing(error)) return { version: 1, comments: [] };
-			throw error;
-		}
-		return parseDocument(raw);
+		const raw = await readDesignFile(path, MAX_FILE_BYTES, () => new DesignCommentsError("invalid-file", "comments.json is too large"));
+		return raw === undefined ? { version: 1, comments: [] } : parseDocument(raw);
 	}
 
-	async function save(dir: string, path: string, document: DesignCommentsDocument): Promise<void> {
-		const temp = join(dir, `.${DESIGN_COMMENTS_FILE}.${randomBytes(6).toString("hex")}.tmp`);
-		const handle = await open(temp, "wx", 0o644);
-		try {
-			await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		try {
-			await rename(temp, path);
-		} catch (error) {
-			await unlink(temp).catch(() => {});
-			throw error;
-		}
+	function save(dir: string, path: string, document: DesignCommentsDocument): Promise<void> {
+		return replaceDesignFile(dir, path, DESIGN_COMMENTS_FILE, `${JSON.stringify(document, null, 2)}\n`);
 	}
 
 	/** Read-modify-write in the file's queue; `change` sets `write: false` when nothing changed. */
 	async function mutate<T>(slug: string, change: (document: DesignCommentsDocument) => { result: T; write: boolean }): Promise<T> {
 		const { dir, path } = await locate(slug);
-		return serialize(path, async () => {
+		return serializeDesignWrite(path, async () => {
 			const document = await load(path);
 			const { result, write } = change(document);
 			if (write) await save(dir, path, document);

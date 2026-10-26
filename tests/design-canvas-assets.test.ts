@@ -32,6 +32,10 @@ class FakeElement {
 	disabled = false;
 	inert = false;
 	value = "";
+	// Set by the canvas on iframes, the Open in new tab link and the Scale to fit checkbox.
+	src = "";
+	href = "";
+	checked = false;
 	rect: Rect = { left: 0, top: 0, width: 0, height: 0 };
 	contentWindow: { posted: any[]; postMessage(message: any): void } | null = null;
 	doc: FakeDocument;
@@ -143,7 +147,7 @@ class FakeDocument {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function loadCanvas(firstHeight = 300) {
+async function loadCanvas(firstHeight = 300, extraReplies: Record<string, unknown> = {}) {
 	const document = new FakeDocument();
 	document.getElementById("gd-config").textContent = JSON.stringify({ base: "/t/", slug: "alpha" });
 	const viewport = document.getElementById("gd-viewport");
@@ -164,6 +168,7 @@ async function loadCanvas(firstHeight = 300) {
 			],
 		},
 		"/t/api/designs/alpha/comments": { comments: [] },
+		"/t/api/designs/alpha/handoffs": { version: 1, chosen: null, handoffs: {} },
 		"/t/api/designs/beta": {
 			slug: "beta",
 			title: "Beta",
@@ -171,22 +176,29 @@ async function loadCanvas(firstHeight = 300) {
 			artboards: [{ file: "01-only.html", title: "Only", tradeoff: "", width: 500, height: 400 }],
 		},
 		"/t/api/designs/beta/comments": { comments: [] },
+		"/t/api/designs/beta/handoffs": { version: 1, chosen: null, handoffs: {} },
+		...extraReplies,
 	};
 	const fetched: string[] = [];
+	const posts: Array<{ url: string; body: unknown }> = [];
 	const urls: string[] = [];
 	const sourceListeners = new Map<string, Listener[]>();
 	const context: Record<string, any> = {
 		document,
 		console,
-		setTimeout,
+		// Canvas timers (toasts, the preview load timeout) must not keep the test process alive.
+		setTimeout: (callback: () => void, ms?: number) => { const timer = setTimeout(callback, ms); timer.unref(); return timer; },
 		clearTimeout,
+		location: { port: "4100", origin: "http://127.0.0.1:4100" },
+		URL,
 		innerWidth: 1200,
 		innerHeight: 800,
 		CSS: { escape: (value: string) => value },
 		history: { replaceState(_state: unknown, _title: string, url: string) { urls.push(url); } },
 		localStorage: { getItem: () => null, setItem() {} },
 		requestAnimationFrame: (callback: () => void) => { callback(); return 0; },
-		fetch: async (url: string) => {
+		fetch: async (url: string, init?: { method?: string; body?: string }) => {
+			if (init?.method === "POST") posts.push({ url, body: JSON.parse(init.body ?? "null") });
 			fetched.push(url);
 			return { ok: url in replies, status: url in replies ? 200 : 404, json: async () => replies[url] ?? {} };
 		},
@@ -220,7 +232,7 @@ async function loadCanvas(firstHeight = 300) {
 		for (let i = 0; i < 10; i++) await flush();
 	};
 	const frames = () => world.children.map((wrapper) => wrapper.children.find((child) => child.classes.has("gd-frame-box"))!.children.find((child) => child.localName === "iframe")!);
-	return { document, viewport, world, boards, message, windowEvent, serverEvent, frames, fetched, urls, replies, zoomLevel: document.getElementById("gd-zoom-level"), navMode: document.getElementById("gd-nav-mode") };
+	return { document, viewport, world, boards, message, windowEvent, serverEvent, frames, fetched, posts, urls, replies, zoomLevel: document.getElementById("gd-zoom-level"), navMode: document.getElementById("gd-nav-mode") };
 }
 
 function click(target: FakeElement, x: number, y: number) {
@@ -505,13 +517,194 @@ test("canvas assets keep the sandbox, the source check and no remote URLs", () =
 	const canvas = read("canvas.js");
 	assert.match(canvas, /frame\.setAttribute\("sandbox", "allow-scripts"\)/);
 	assert.match(canvas, /candidate\.frame\.contentWindow === event\.source/);
+	// Only the Compare preview of the running app (another loopback origin) may keep its own origin.
+	assert.equal(canvas.split("allow-same-origin").length - 1, 1);
+	assert.match(canvas, /const PREVIEW_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups";/);
 	for (const name of ["index.html", "canvas.css", "canvas.js", "inspector.js"]) {
 		const source = read(name);
-		assert.ok(!source.includes("allow-same-origin"), `${name} must not grant allow-same-origin`);
+		assert.ok(!source.includes("allow-top-navigation"), `${name} must not grant top navigation`);
+		if (name !== "canvas.js") assert.ok(!source.includes("allow-same-origin"), `${name} must not grant allow-same-origin`);
 		assert.ok(!/https?:\/\//i.test(source), `${name} must not reference remote URLs`);
 		assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML/.test(source), `${name} must not parse HTML strings`);
 	}
 	const html = read("index.html");
 	assert.match(html, /id="gd-back"[^>]*>Back to canvas</);
 	assert.match(html, /id="gd-nav-mode"[^>]*>Navigating</);
+});
+
+// S15: handoff badges, the chosen artboard, and Compare.
+
+/** Every element under `root` (itself included) that matches `test`. */
+function findAll(root: FakeElement, test: (element: FakeElement) => boolean): FakeElement[] {
+	const found: FakeElement[] = test(root) ? [root] : [];
+	for (const child of root.children) found.push(...findAll(child, test));
+	return found;
+}
+
+const withClass = (root: FakeElement, name: string) => findAll(root, (element) => element.classes.has(name));
+const texts = (root: FakeElement, name: string) => withClass(root, name).map((element) => element.textContent);
+
+function handoffDoc(chosen: string | null, handoffs: Record<string, Record<string, unknown>>) {
+	const entries = Object.fromEntries(Object.entries(handoffs).map(([file, entry]) => [file, { status: "sent", queued: false, sentAt: "2026-10-26T10:00:00.000Z", startedAt: null, implementedAt: null, ...entry }]));
+	return { version: 1, chosen, handoffs: entries };
+}
+
+async function setHandoffs(canvas: Awaited<ReturnType<typeof loadCanvas>>, document: unknown) {
+	canvas.replies["/t/api/designs/alpha/handoffs"] = document;
+	await canvas.serverEvent("change", { slug: "alpha", file: "handoffs.json" });
+}
+
+const boardsOf = (canvas: Awaited<ReturnType<typeof loadCanvas>>) => canvas.world.children;
+
+test("the handoff badge follows the state live, and shows the linked feature document", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/handoffs": handoffDoc("01-a.html", { "01-a.html": { queued: true, feature: "odd/tasks/login.md" } }) });
+	const [first, second] = boardsOf(canvas);
+	assert.deepEqual(texts(first, "gd-handoff-badge"), ["Queued"]);
+	assert.deepEqual(texts(first, "gd-handoff-feature"), ["odd/tasks/login.md"]);
+	assert.deepEqual(texts(second, "gd-handoff-badge"), [], "an artboard never handed off has no badge");
+	const states: Array<[Record<string, unknown>, string]> = [
+		[{ queued: false }, "Implementing…"],
+		[{ status: "in_progress", startedAt: "2026-10-26T10:01:00.000Z" }, "In progress"],
+		[{ status: "implemented", implementedAt: "2026-10-26T10:02:00.000Z", note: "Done with the header" }, "Implemented ✓"],
+	];
+	for (const [entry, label] of states) {
+		await setHandoffs(canvas, handoffDoc("01-a.html", { "01-a.html": { feature: "odd/tasks/login.md", ...entry } }));
+		assert.deepEqual(texts(boardsOf(canvas)[0], "gd-handoff-badge"), [label], label);
+	}
+	assert.deepEqual(texts(boardsOf(canvas)[0], "gd-handoff-note"), ["Done with the header"]);
+	assert.ok(canvas.fetched.filter((url) => url === "/t/api/designs/alpha/handoffs").length >= 4, "every handoffs.json change is fetched");
+	assert.equal(boardsOf(canvas)[0], first, "a handoffs.json change does not reload the artboards");
+});
+
+test("the chosen artboard gets a Chosen badge and an accent frame; the others are labeled Alternative", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/handoffs": handoffDoc(null, {}) });
+	for (const board of boardsOf(canvas)) {
+		assert.deepEqual(texts(board, "gd-choice"), [], "nothing is chosen yet");
+		assert.equal(board.classes.has("gd-chosen"), false);
+	}
+	await setHandoffs(canvas, handoffDoc("02-b.html", { "02-b.html": {} }));
+	const [first, second] = boardsOf(canvas);
+	assert.deepEqual(texts(second, "gd-choice"), ["Chosen"]);
+	assert.equal(second.classes.has("gd-chosen"), true);
+	assert.deepEqual(texts(first, "gd-choice"), ["Alternative"]);
+	assert.equal(first.classes.has("gd-chosen"), false);
+	await setHandoffs(canvas, handoffDoc("01-a.html", { "02-b.html": {}, "01-a.html": {} }));
+	assert.deepEqual(boardsOf(canvas).map((board) => texts(board, "gd-choice")[0]), ["Chosen", "Alternative"], "a new handoff moves Chosen");
+});
+
+test("Compare appears only on an implemented artboard with a loopback previewUrl other than the canvas", async () => {
+	const canvas = await loadCanvas();
+	const compareButtons = () => boardsOf(canvas).map((board) => withClass(board, "gd-compare-start").length);
+	const cases: Array<[Record<string, unknown>, number]> = [
+		[{ status: "implemented" }, 0],
+		[{ status: "in_progress", previewUrl: "http://localhost:3000/" }, 0],
+		[{ status: "implemented", previewUrl: "http://example.com/" }, 0],
+		[{ status: "implemented", previewUrl: "http://localhost:4100/" }, 0],
+		[{ status: "implemented", previewUrl: "javascript:alert(1)" }, 0],
+		[{ status: "implemented", previewUrl: "http://localhost:3000/" }, 1],
+		[{ status: "implemented", previewUrl: "http://[::1]:3000/" }, 1],
+	];
+	for (const [entry, count] of cases) {
+		await setHandoffs(canvas, handoffDoc("01-a.html", { "01-a.html": entry }));
+		assert.deepEqual(compareButtons(), [count, 0], JSON.stringify(entry));
+	}
+});
+
+test("Compare shows the artboard and the sandboxed app side by side at the artboard size, and Shift+Esc or Back exits", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/handoffs": handoffDoc("01-a.html", { "01-a.html": { status: "implemented", previewUrl: "http://localhost:5173/login" } }) });
+	const overlay = canvas.document.getElementById("gd-compare");
+	const panes = canvas.document.getElementById("gd-compare-panes");
+	const open = () => withClass(boardsOf(canvas)[0], "gd-compare-start")[0].dispatch("click");
+	open();
+	assert.equal(overlay.hidden, false);
+	const frames = findAll(panes, (element) => element.localName === "iframe");
+	assert.equal(frames.length, 2);
+	const [artboard, preview] = frames;
+	assert.equal(artboard.getAttribute("sandbox"), "allow-scripts", "the artboard stays sandboxed as on the canvas");
+	assert.equal(artboard.src, "/t/files/alpha/01-a.html");
+	assert.equal(preview.getAttribute("sandbox"), "allow-scripts allow-same-origin allow-forms allow-popups");
+	assert.equal(preview.getAttribute("referrerpolicy"), "no-referrer");
+	assert.equal(preview.src, "http://localhost:5173/login");
+	for (const frame of frames) assert.deepEqual([frame.style.width, frame.style.height], ["400px", "300px"]);
+	const link = canvas.document.getElementById("gd-compare-open");
+	assert.equal(link.href, "http://localhost:5173/login");
+	assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+	assert.equal(link.getAttribute("target"), "_blank");
+	assert.equal(canvas.viewport.inert, true, "the canvas underneath is inert");
+
+	const keydown = canvas.document.listeners.get("keydown") ?? [];
+	const press = (shiftKey: boolean) => {
+		const event: any = { key: "Escape", shiftKey, target: canvas.document.body, defaultPrevented: false, preventDefault() { event.defaultPrevented = true; } };
+		keydown.forEach((listener) => listener(event));
+	};
+	press(false);
+	assert.equal(overlay.hidden, false, "plain Esc stays");
+	press(true);
+	assert.equal(overlay.hidden, true, "Shift+Esc exits Compare");
+	assert.deepEqual(panes.children, [], "the app frame is removed");
+	assert.equal(canvas.viewport.inert, false);
+
+	open();
+	canvas.document.getElementById("gd-compare-back").dispatch("click");
+	assert.equal(overlay.hidden, true, "Back to canvas exits Compare");
+
+	open();
+	const [shownArtboard] = findAll(panes, (element) => element.localName === "iframe");
+	canvas.message({}, { type: "gd:exit-focus" });
+	assert.equal(overlay.hidden, false, "only the compared artboard may ask to exit");
+	canvas.message(shownArtboard.contentWindow, { type: "gd:exit-focus" });
+	assert.equal(overlay.hidden, true, "Shift+Esc inside the artboard exits Compare");
+});
+
+test("Compare offers scale to fit when the pair is wider than the window", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/handoffs": handoffDoc("01-a.html", { "01-a.html": { status: "implemented", previewUrl: "http://localhost:3000/" } }) });
+	const stage = canvas.document.getElementById("gd-compare-stage");
+	stage.rect = { left: 0, top: 0, width: 500, height: 600 };
+	withClass(boardsOf(canvas)[0], "gd-compare-start")[0].dispatch("click");
+	const fit = canvas.document.getElementById("gd-compare-fit");
+	const field = canvas.document.getElementById("gd-compare-fit-field");
+	const panes = canvas.document.getElementById("gd-compare-panes");
+	assert.equal(field.hidden, false, "two 400 px boards do not fit in 500 px");
+	assert.equal(panes.style.transform, "none", "Compare starts at 100%");
+	fit.checked = true;
+	fit.dispatch("change");
+	assert.match(panes.style.transform, /^scale\(0\.\d+\)$/);
+	canvas.document.getElementById("gd-compare-back").dispatch("click");
+	stage.rect = { left: 0, top: 0, width: 2000, height: 600 };
+	withClass(boardsOf(canvas)[0], "gd-compare-start")[0].dispatch("click");
+	assert.equal(field.hidden, true, "no toggle when the pair fits");
+	assert.equal(panes.style.transform, "none");
+});
+
+test("Implement this shows a toast and the badge at once: Queued when busy, Implementing… when idle", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/implement": { ok: true, slug: "alpha", file: "01-a.html", queued: true } });
+	const toast = canvas.document.getElementById("gd-toast");
+	assert.match(read("index.html"), /<div id="gd-toast" class="gd-toast" role="status" aria-live="polite" hidden><\/div>/, "the toast starts hidden");
+	const send = async () => {
+		const [control] = withClass(boardsOf(canvas)[0], "gd-implement");
+		withClass(control, "gd-implement-start")[0].dispatch("click");
+		const yes = withClass(control, "gd-primary")[0];
+		yes.dispatch("click");
+		for (let i = 0; i < 10; i++) await flush();
+	};
+	await send();
+	assert.deepEqual(canvas.posts.at(-1), { url: "/t/api/designs/alpha/implement", body: { file: "01-a.html" } });
+	assert.equal(toast.hidden, false);
+	assert.equal(toast.textContent, "Queued: the session will implement First after its current task.");
+	assert.deepEqual(texts(boardsOf(canvas)[0], "gd-handoff-badge"), ["Queued"]);
+	assert.deepEqual(texts(boardsOf(canvas)[0], "gd-choice"), ["Chosen"]);
+	assert.deepEqual(texts(boardsOf(canvas)[1], "gd-choice"), ["Alternative"]);
+
+	canvas.replies["/t/api/designs/alpha/implement"] = { ok: true, slug: "alpha", file: "01-a.html", queued: false };
+	await send();
+	assert.equal(toast.textContent, "Sent: the session is implementing First now.");
+	assert.deepEqual(texts(boardsOf(canvas)[0], "gd-handoff-badge"), ["Implementing…"]);
+});
+
+test("an [::1] preview says browsers refuse to frame it, and keeps Open in new tab", async () => {
+	const canvas = await loadCanvas(300, { "/t/api/designs/alpha/handoffs": handoffDoc("01-a.html", { "01-a.html": { status: "implemented", previewUrl: "http://[::1]:3000/" } }) });
+	withClass(boardsOf(canvas)[0], "gd-compare-start")[0].dispatch("click");
+	const message = canvas.document.getElementById("gd-compare-message");
+	assert.equal(message.textContent, "Browsers do not frame [::1] under the canvas policy (CSP has no IPv6 sources): use Open in new tab, or report the preview on localhost.");
+	assert.equal(canvas.document.getElementById("gd-compare-open").href, "http://[::1]:3000/");
 });

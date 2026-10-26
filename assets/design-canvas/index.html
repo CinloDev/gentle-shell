@@ -48,7 +48,22 @@
 			<p id="gd-panel-empty" class="gd-panel-empty">No comments yet. Turn on Comment mode and click an element.</p>
 			<ol id="gd-comment-list" class="gd-comment-list" aria-label="Comments"></ol>
 		</aside>
+		<section id="gd-compare" class="gd-compare" aria-labelledby="gd-compare-title" hidden>
+			<div class="gd-compare-bar">
+				<h2 id="gd-compare-title" class="gd-compare-title">Compare</h2>
+				<label class="gd-radio" id="gd-compare-fit-field" hidden><input type="checkbox" id="gd-compare-fit"> Scale to fit</label>
+				<a id="gd-compare-open" class="gd-compare-open" target="_blank" rel="noopener noreferrer">Open in new tab</a>
+				<button type="button" id="gd-compare-back" class="gd-primary" aria-keyshortcuts="Shift+Escape" title="Back to canvas (Shift+Esc)">Back to canvas</button>
+			</div>
+			<p id="gd-compare-message" class="gd-compare-message" role="status" aria-live="polite"></p>
+			<div id="gd-compare-stage" class="gd-compare-stage">
+				<div id="gd-compare-sizer" class="gd-compare-sizer">
+					<div id="gd-compare-panes" class="gd-compare-panes"></div>
+				</div>
+			</div>
+		</section>
 	</div>
+	<div id="gd-toast" class="gd-toast" role="status" aria-live="polite" hidden></div>
 	<div id="gd-popover" class="gd-popover" role="dialog" aria-modal="false" aria-labelledby="gd-popover-title" hidden>
 		<form id="gd-popover-form">
 			<p class="gd-popover-title" id="gd-popover-title">Comment on <code id="gd-popover-target"></code></p>

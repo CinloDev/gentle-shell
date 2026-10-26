@@ -436,7 +436,7 @@ test("implement sends one handoff message with the artboard, tokens, open commen
 	assert.equal(sent.length, 1);
 	assert.equal(sent[0].options, undefined);
 	const content = String(sent[0].content);
-	for (const part of ["design/login/01-split.html", "Split layout", "Calm; less room for the form", "real stack", "visual spec", "existing components", "verbatim", "design/system.md", "open01", "body > h1", "\"A\"", "Make the headline shorter", "gentle_design_comments", "track this implementation in odd/tasks/login-page.md", "This handoff itself commits nothing."]) {
+	for (const part of ["design/login/01-split.html", "Split layout", "Calm; less room for the form", "real stack", "visual spec", "existing components", "verbatim", "design/system.md", "open01", "body > h1", "\"A\"", "Make the headline shorter", "gentle_design_comments", "track this implementation in odd/tasks/login-page.md", "This handoff itself commits nothing.", 'gentle_design tool: action "handoff", target "login/01-split.html"', 'status "in_progress" when you start', 'status "implemented" when it is done', "previewUrl"]) {
 		assert.ok(content.includes(part), `the message names ${part}`);
 	}
 	for (const absent of ["done01", "other1", "ODD rules as usual"]) assert.ok(!content.includes(absent), `the message omits ${absent}`);
@@ -1053,4 +1053,203 @@ test("the skill's Before designing gate lists first, syncs automatically, and of
 	}
 	const output = source.slice(source.indexOf("## Output Contract"), source.indexOf("\n## ", source.indexOf("## Output Contract") + 1));
 	assert.match(output, /automatic sync/);
+});
+
+// S15: handoff state in design/<slug>/handoffs.json, the chosen artboard, and the tool's handoff action.
+
+const handoffsFile = (cwd: string, slug = "login") => JSON.parse(readFileSync(join(cwd, "design", slug, "handoffs.json"), "utf8"));
+
+test("the handoff message tells the agent to report in_progress and implemented with a previewUrl", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const result = await designTool(fake)({ action: "implement", target: "login/02-card.html" }, fakeContext(cwd).ctx);
+	const text = result.content[0].text;
+	assert.ok(text.includes('Report progress with the gentle_design tool: action "handoff", target "login/02-card.html", status "in_progress" when you start; status "implemented" when it is done, with previewUrl set to the running app\'s loopback URL (localhost, 127.0.0.1 or [::1]) when one is running, so the canvas can compare it with the artboard.'), text);
+	assert.ok(text.indexOf("Report progress") < text.indexOf("This handoff itself commits nothing."));
+});
+
+test("the command records the handoff as chosen before sending it, queued while the agent is busy", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "odd/tasks/login-page.md");
+	const fake = fakePi();
+	const seen: unknown[] = [];
+	const send = fake.pi.sendUserMessage;
+	(fake.pi as { sendUserMessage: unknown }).sendUserMessage = (content: unknown, options?: unknown) => {
+		seen.push(handoffsFile(cwd));
+		return (send as (content: unknown, options?: unknown) => void)(content, options);
+	};
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await fake.command().handler("implement login/01-split.html", fakeContext(cwd, false).ctx);
+	assert.equal(fake.sent.length, 1);
+	assert.equal((seen[0] as { chosen: string }).chosen, "01-split.html", "recorded before the message is sent");
+	const busy = handoffsFile(cwd);
+	assert.equal(busy.chosen, "01-split.html");
+	assert.deepEqual({ ...busy.handoffs["01-split.html"], sentAt: "t" }, { status: "sent", queued: true, sentAt: "t", startedAt: null, implementedAt: null, feature: "odd/tasks/login-page.md" });
+
+	await fake.command().handler("implement login/02-card.html", fakeContext(cwd, true).ctx);
+	const idle = handoffsFile(cwd);
+	assert.equal(idle.chosen, "02-card.html", "a new handoff moves chosen");
+	assert.equal(idle.handoffs["02-card.html"].queued, false);
+});
+
+test("the command refuses a handoff when handoffs.json is invalid, and never overwrites it", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	writeFileSync(join(cwd, "design", "login", "handoffs.json"), "{ broken");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const { ctx, notices } = fakeContext(cwd);
+	await fake.command().handler("implement login/01-split.html", ctx);
+	assert.equal(fake.sent.length, 0);
+	assert.equal(notices.length, 1);
+	assert.equal(notices[0].level, "warning");
+	assert.match(notices[0].message, /design\/login\/handoffs\.json cannot be read: .*never overwritten/);
+	assert.equal(readFileSync(join(cwd, "design", "login", "handoffs.json"), "utf8"), "{ broken");
+	await assert.rejects(designTool(fake)({ action: "implement", target: "login/01-split.html" }, ctx), /handoffs\.json cannot be read/);
+});
+
+test("gentle_design implement records the handoff as sent and chosen", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	await designTool(fake)({ action: "implement", target: "login/02-card.html" }, fakeContext(cwd).ctx);
+	const file = handoffsFile(cwd);
+	assert.equal(file.chosen, "02-card.html");
+	assert.equal(file.handoffs["02-card.html"].status, "sent");
+	assert.equal(file.handoffs["02-card.html"].queued, false, "the model follows it in this run");
+});
+
+test("gentle_design handoff moves an artboard to in_progress, then implemented with a previewUrl", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login", "odd/tasks/login-page.md");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	await run({ action: "implement", target: "login/01-split.html" }, ctx);
+	const started = await run({ action: "handoff", target: "login/01-split.html", status: "in_progress", note: "Header first" }, ctx);
+	assert.equal(toolText(started), "Handoff of design/login/01-split.html: in progress. It is the chosen artboard of design/login.");
+	assert.equal(handoffsFile(cwd).handoffs["01-split.html"].status, "in_progress");
+	assert.equal(handoffsFile(cwd).handoffs["01-split.html"].note, "Header first");
+	const done = await run({ action: "handoff", target: "login/01-split.html", status: "implemented", previewUrl: "http://localhost:5173/login" }, ctx);
+	assert.equal(toolText(done), "Handoff of design/login/01-split.html: implemented. It is the chosen artboard of design/login.\nPreview: http://localhost:5173/login (the canvas offers Compare).");
+	const entry = handoffsFile(cwd).handoffs["01-split.html"];
+	assert.equal(entry.status, "implemented");
+	assert.equal(entry.previewUrl, "http://localhost:5173/login");
+	assert.equal(entry.feature, "odd/tasks/login-page.md", "the handoff keeps its feature link");
+	assert.deepEqual(done.details, { target: "login/01-split.html", chosen: "01-split.html", handoff: entry });
+	assert.equal(fake.sent.length, 0, "the tool sends no user message");
+});
+
+test("gentle_design handoff refuses an invalid previewUrl, an unknown target and a bad status, writing nothing", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const fake = fakePi();
+	gentleDesign(fake.pi, { startServer: unexpectedServer, openBrowser: unexpectedBrowser });
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	for (const previewUrl of ["http://example.com/", "http://localhost.evil.test:3000/", "javascript:alert(1)", "http://user:pw@localhost:3000/", "file:///etc/passwd"]) {
+		await assert.rejects(run({ action: "handoff", target: "login/01-split.html", status: "implemented", previewUrl }, ctx), /previewUrl/, previewUrl);
+	}
+	for (const target of ["login/99-none.html", "missing/01-split.html", "login", ""]) {
+		await assert.rejects(run({ action: "handoff", target, status: "in_progress" }, ctx), /Available: login\/01-split\.html, login\/02-card\.html/, target);
+	}
+	await assert.rejects(run({ action: "handoff", target: "login/01-split.html" }, ctx), /status "in_progress" or "implemented"/);
+	await assert.rejects(run({ action: "handoff", target: "login/01-split.html", status: "sent" }, ctx), /status "in_progress" or "implemented"/);
+	assert.throws(() => readFileSync(join(cwd, "design", "login", "handoffs.json")), /ENOENT/);
+});
+
+test("gentle_design list reports each design's chosen artboard and its handoff states", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	writeDesign(cwd, "pricing", "Pricing", 1000);
+	utimesSync(join(cwd, "design", "login", "design.json"), 2000, 2000);
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	await fake.command().handler("implement login/02-card.html", fakeContext(cwd, false).ctx);
+	await fake.command().handler("implement login/01-split.html", ctx);
+	await run({ action: "handoff", target: "login/01-split.html", status: "implemented", previewUrl: "http://127.0.0.1:3000/" }, ctx);
+	const result = await run({ action: "list" }, ctx);
+	const text = toolText(result);
+	assert.ok(text.startsWith([
+		"Designs in design/ (2):",
+		"- login: Login screen",
+		"  Chosen: 01-split.html (the other artboards are alternatives)",
+		"  - 01-split.html: Split layout (handoff implemented; preview http://127.0.0.1:3000/)",
+		"  - 02-card.html: Centered card (handoff sent, queued)",
+		"- pricing: Pricing",
+		"  - 01-a.html: A",
+		"",
+	].join("\n")), text);
+	const [login, pricing] = (result.details as { designs: Array<Record<string, unknown>> }).designs;
+	assert.equal(login.chosen, "01-split.html");
+	const states = login.handoffs as Record<string, { status: string; queued: boolean; previewUrl?: string }>;
+	assert.deepEqual(Object.keys(states).sort(), ["01-split.html", "02-card.html"]);
+	assert.equal(states["01-split.html"].status, "implemented");
+	assert.equal(states["01-split.html"].previewUrl, "http://127.0.0.1:3000/");
+	assert.equal(states["02-card.html"].queued, true);
+	assert.equal("chosen" in pricing, false, "a design with no handoffs keeps the earlier details");
+	assert.equal("handoffs" in pricing, false);
+});
+
+test("gentle_design list reports an unreadable handoffs.json without hiding the design", async () => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	writeFileSync(join(cwd, "design", "login", "handoffs.json"), "[]");
+	const fake = fakePi();
+	gentleDesign(fake.pi, fakeCanvas());
+	const result = await designTool(fake)({ action: "list" }, fakeContext(cwd).ctx);
+	assert.ok(toolText(result).includes("  handoffs.json cannot be read: handoffs.json must be a JSON object"), toolText(result));
+	assert.equal((result.details as { designs: Array<{ artboards: unknown[] }> }).designs[0].artboards.length, 2);
+});
+
+test("integration: the canvas Implement route records the handoff and answers queued from the session state", async (t) => {
+	const cwd = scratchCwd();
+	writeLinkedDesign(cwd, "login");
+	const { pi, sent, emit, command } = fakePi();
+	const opens: string[] = [];
+	gentleDesign(pi, { openBrowser: async (url) => { opens.push(url); return { opened: true }; } });
+	t.after(() => emit("session_shutdown", { type: "session_shutdown", reason: "quit" }));
+	const session = fakeContext(cwd, false);
+	await command().handler("open login", session.ctx);
+	const url = new URL(opens[0]);
+	const token = url.pathname.split("/")[1];
+	const post = (file: string) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+		const req = httpRequest({ host: "127.0.0.1", port: url.port, path: `/${token}/api/designs/login/implement`, method: "POST", headers: { Origin: url.origin, "Content-Type": "application/json" } }, (res) => {
+			let body = "";
+			res.setEncoding("utf8");
+			res.on("data", (chunk: string) => { body += chunk; });
+			res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+		});
+		req.on("error", reject);
+		req.end(JSON.stringify({ file }));
+	});
+	const busy = await post("01-split.html");
+	assert.equal(busy.status, 202);
+	assert.equal(JSON.parse(busy.body).queued, true);
+	assert.deepEqual(sent[0].options, { deliverAs: "followUp" });
+	assert.equal(handoffsFile(cwd).handoffs["01-split.html"].queued, true);
+	session.state.idle = true;
+	const idle = await post("02-card.html");
+	assert.equal(JSON.parse(idle.body).queued, false);
+	assert.equal(sent[1].options, undefined);
+	assert.equal(handoffsFile(cwd).chosen, "02-card.html");
+});
+
+test("the gentle_design tool schema and description name the handoff action", () => {
+	const fake = fakePi();
+	gentleDesign(fake.pi);
+	const tool = fake.tool("gentle_design") as unknown as { description: string; parameters: { properties: Record<string, unknown> } };
+	for (const part of ["handoff", "in_progress", "implemented", "previewUrl"]) assert.ok(tool.description.includes(part), `the description names ${part}`);
+	for (const key of ["status", "note", "previewUrl"]) assert.ok(key in tool.parameters.properties, `the schema has ${key}`);
+});
+
+test("the skill tells the agent to report handoff progress and to name the chosen artboard in the ODD Log", () => {
+	const source = readFileSync(SKILL_PATH, "utf8");
+	for (const part of ['action "handoff"', '"in_progress"', '"implemented"', "previewUrl", "chosen artboard"]) assert.ok(source.includes(part), `SKILL.md mentions ${part}`);
 });

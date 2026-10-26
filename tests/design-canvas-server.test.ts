@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { TestContext } from "node:test";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignComment } from "../lib/design-canvas-server.ts";
+import { formatDesignComment, formatDesignCommentBatch, startDesignCanvasServer, type DesignCanvasServerOptions, type DesignComment } from "../lib/design-canvas-server.ts";
 
 const TOKEN = "test-token-0123456789abcdef";
 const ASSET_DIR = fileURLToPath(new URL("../assets/design-canvas/", import.meta.url));
@@ -74,7 +74,7 @@ function fixture(t: TestContext) {
 	return { root, outside };
 }
 
-async function start(t: TestContext, extra: { initialSlug?: string } = {}) {
+async function start(t: TestContext, extra: { initialSlug?: string; onImplement?: DesignCanvasServerOptions["onImplement"] } = {}) {
 	const { root } = fixture(t);
 	const comments: DesignComment[] = [];
 	const batches: DesignComment[][] = [];
@@ -716,7 +716,7 @@ test("implement validates the artboard against the manifest, calls onImplement o
 	const { port, implements: calls } = await start(t);
 	const ok = await postJson(port, "api/designs/alpha/implement", { file: "01-hero.html" });
 	assert.equal(ok.status, 202);
-	assert.deepEqual(JSON.parse(ok.body), { ok: true, slug: "alpha", file: "01-hero.html" });
+	assert.deepEqual(JSON.parse(ok.body), { ok: true, slug: "alpha", file: "01-hero.html", queued: false });
 	assert.deepEqual(calls, [{ slug: "alpha", file: "01-hero.html" }]);
 	// sub/inner.html exists but is not an artboard of the manifest.
 	for (const file of ["sub/inner.html", "missing.html", "../beta/01-a.html", "styles.css", 7, ""]) {
@@ -757,6 +757,141 @@ test("implement is 501 without onImplement and 500 when it throws", async (t) =>
 	assert.equal(reply.status, 500);
 	assert.equal(JSON.parse(reply.body).error, "delivery-failed");
 	assert.equal((await rawRequest(failing.port, `/${TOKEN}/api/designs`)).status, 200, "the server survives");
+});
+
+// S15: the canvas Implement route records the handoff in design/<slug>/handoffs.json.
+
+const handoffsOf = (root: string, slug = "alpha") => JSON.parse(readFileSync(join(root, slug, "handoffs.json"), "utf8"));
+
+test("implement records the handoff as sent and chosen before delivery, with queued from onImplement", async (t) => {
+	const seen: unknown[] = [];
+	const state = { busy: true, root: "" };
+	const started = await start(t, {
+		onImplement: () => {
+			seen.push(handoffsOf(state.root));
+			return { queued: state.busy };
+		},
+	});
+	state.root = started.root;
+	const queued = await postJson(started.port, "api/designs/alpha/implement", { file: "01-hero.html" });
+	assert.equal(queued.status, 202);
+	assert.deepEqual(JSON.parse(queued.body), { ok: true, slug: "alpha", file: "01-hero.html", queued: true });
+	assert.equal(seen.length, 1);
+	const before = seen[0] as { chosen: string; handoffs: Record<string, { status: string }> };
+	assert.equal(before.chosen, "01-hero.html", "recorded before delivery");
+	assert.equal(before.handoffs["01-hero.html"].status, "sent");
+	const afterQueued = handoffsOf(state.root);
+	assert.equal(afterQueued.chosen, "01-hero.html");
+	assert.deepEqual({ status: afterQueued.handoffs["01-hero.html"].status, queued: afterQueued.handoffs["01-hero.html"].queued }, { status: "sent", queued: true });
+	assert.match(afterQueued.handoffs["01-hero.html"].sentAt, /^\d{4}-\d\d-\d\dT/);
+
+	state.busy = false;
+	const immediate = await postJson(started.port, "api/designs/alpha/implement", { file: "02-bare.html" });
+	assert.deepEqual(JSON.parse(immediate.body), { ok: true, slug: "alpha", file: "02-bare.html", queued: false });
+	const moved = handoffsOf(state.root);
+	assert.equal(moved.chosen, "02-bare.html", "handing off another artboard moves chosen");
+	assert.equal(moved.handoffs["02-bare.html"].queued, false);
+	assert.equal(moved.handoffs["01-hero.html"].queued, true, "the earlier handoff keeps its state");
+});
+
+test("implement links the handoff to the design's feature document", async (t) => {
+	const { port, root } = await start(t);
+	writeFileSync(join(root, "alpha", "design.json"), JSON.stringify({ title: "Alpha", feature: "odd/tasks/login.md", artboards: [{ file: "01-hero.html", title: "H", width: 10, height: 10 }] }));
+	assert.equal((await postJson(port, "api/designs/alpha/implement", { file: "01-hero.html" })).status, 202);
+	assert.equal(handoffsOf(root).handoffs["01-hero.html"].feature, "odd/tasks/login.md");
+});
+
+test("a failed delivery takes the handoff back, and an invalid handoffs.json refuses the handoff untouched", async (t) => {
+	const { root } = fixture(t);
+	const failing = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, onImplement: () => { throw new Error("boom"); }, randomToken: () => TOKEN });
+	t.after(() => failing.close());
+	assert.equal((await postJson(failing.port, "api/designs/alpha/implement", { file: "01-hero.html" })).status, 500);
+	assert.deepEqual(handoffsOf(root), { version: 1, chosen: null, handoffs: {} }, "no handoff is left behind");
+
+	const calls: unknown[] = [];
+	const server = await startDesignCanvasServer({ designRoot: root, onComment: () => {}, onImplement: (request) => { calls.push(request); }, randomToken: () => "other-token-0123456789abcdef" });
+	t.after(() => server.close());
+	const path = join(root, "alpha", "handoffs.json");
+	writeFileSync(path, "{ broken");
+	const reply = await rawRequest(server.port, "/other-token-0123456789abcdef/api/designs/alpha/implement", { method: "POST", headers: { Origin: `http://127.0.0.1:${server.port}`, "Content-Type": "application/json" }, body: JSON.stringify({ file: "01-hero.html" }) });
+	assert.equal(reply.status, 422);
+	assert.equal(JSON.parse(reply.body).error, "invalid-handoffs");
+	assert.equal(readFileSync(path, "utf8"), "{ broken", "never overwritten");
+	assert.deepEqual(calls, [], "nothing is delivered");
+	assert.equal((await rawRequest(server.port, "/other-token-0123456789abcdef/api/designs/alpha/handoffs")).status, 422);
+});
+
+test("GET handoffs returns the design's handoffs.json, or an empty document", async (t) => {
+	const { port, base, root } = await start(t);
+	assert.deepEqual(JSON.parse((await rawRequest(port, `${base}api/designs/alpha/handoffs`)).body), { version: 1, chosen: null, handoffs: {} });
+	await postJson(port, "api/designs/alpha/implement", { file: "01-hero.html" });
+	const reply = await rawRequest(port, `${base}api/designs/alpha/handoffs`);
+	assert.equal(reply.status, 200);
+	assert.match(String(reply.headers["content-type"]), /^application\/json/);
+	assert.deepEqual(JSON.parse(reply.body), handoffsOf(root));
+	assert.equal((await rawRequest(port, `${base}api/designs/missing/handoffs`)).status, 404);
+	assert.equal((await rawRequest(port, `${base}api/designs/Bad_Slug/handoffs`)).status, 404);
+	assert.equal((await rawRequest(port, `${base}api/designs/alpha/handoffs/extra`)).status, 404);
+});
+
+test("the handoffs route keeps the Host, token, Origin and method rules", async (t) => {
+	const { port } = await start(t);
+	const path = `/${TOKEN}/api/designs/alpha/handoffs`;
+	assert.equal((await rawRequest(port, path)).status, 200);
+	assert.equal((await rawRequest(port, path, { headers: { Origin: `http://localhost:${port}` } })).status, 200);
+	for (const origin of ["http://evil.example", "null", `http://localhost:${port + 1}`, `http://localhost.evil.test:${port}`]) {
+		assert.equal((await rawRequest(port, path, { headers: { Origin: origin } })).status, 403, origin);
+	}
+	assert.equal((await rawRequest(port, path, { host: `evil.example:${port}` })).status, 421);
+	assert.equal((await rawRequest(port, `/wrong-token-0123456789/api/designs/alpha/handoffs`)).status, 404);
+	assert.equal((await rawRequest(port, path, { method: "POST", headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" }, body: "{}" })).status, 405);
+});
+
+test("a refused implement request records no handoff", async (t) => {
+	const { port, root } = await start(t);
+	const path = `/${TOKEN}/api/designs/alpha/implement`;
+	const body = JSON.stringify({ file: "01-hero.html" });
+	const own = { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" };
+	await rawRequest(port, path, { method: "POST", headers: { ...own, Origin: "null" }, body });
+	await rawRequest(port, path, { method: "POST", headers: { ...own, Origin: "http://evil.example" }, body });
+	await rawRequest(port, path, { method: "POST", headers: own, body, host: `evil.example:${port}` });
+	await rawRequest(port, `/wrong-token-0123456789/api/designs/alpha/implement`, { method: "POST", headers: own, body });
+	await postJson(port, "api/designs/alpha/implement", { file: "sub/inner.html" });
+	assert.throws(() => readFileSync(join(root, "alpha", "handoffs.json")), /ENOENT/);
+});
+
+test("events stream a change when handoffs.json is written", async (t) => {
+	const { port } = await start(t);
+	const events = openEvents(port);
+	t.after(() => events.req.destroy());
+	await events.ready;
+	await events.waitFor(/: connected\n\n/);
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.equal((await postJson(port, "api/designs/alpha/implement", { file: "01-hero.html" })).status, 202);
+	await events.waitFor(/event: change\ndata: \{"slug":"alpha","file":"handoffs\.json"\}\n\n/);
+});
+
+test("the canvas CSP frames only loopback previews, and the artboard CSP is unchanged", async (t) => {
+	const { port, base } = await start(t);
+	assert.equal(String((await rawRequest(port, base)).headers["content-security-policy"]), [
+		"default-src 'none'",
+		"script-src 'self'",
+		"style-src 'self'",
+		"img-src 'self' data:",
+		"connect-src 'self'",
+		"frame-src 'self' http://localhost:* http://127.0.0.1:* http://[::1]:* https://localhost:* https://127.0.0.1:* https://[::1]:*",
+		"base-uri 'none'",
+		"form-action 'none'",
+		"frame-ancestors 'none'",
+	].join("; "));
+	assert.equal(String((await rawRequest(port, `${base}files/alpha/01-hero.html`)).headers["content-security-policy"]), [
+		"sandbox allow-scripts",
+		`default-src 'self' http://127.0.0.1:${port} 'unsafe-inline' data: blob:`,
+		"connect-src 'none'",
+		"base-uri 'none'",
+		"form-action 'none'",
+		`frame-ancestors http://127.0.0.1:${port} http://localhost:${port}`,
+	].join("; "));
 });
 
 test("a valid manifest feature link is kept; an invalid one is dropped and reported", async (t) => {
@@ -847,9 +982,11 @@ test("formatDesignCommentBatch builds one exact message listing every comment", 
 test("canvas assets sandbox artboards without allow-same-origin and reference no remote URL", () => {
 	const canvas = readFileSync(join(ASSET_DIR, "canvas.js"), "utf8");
 	assert.match(canvas, /setAttribute\("sandbox", "allow-scripts"\)/);
+	// The one allow-same-origin is the Compare preview of the running app, another loopback origin (S15).
+	assert.deepEqual(canvas.match(/"[^"\n]*allow-same-origin[^"\n]*"/g), ['"allow-scripts allow-same-origin allow-forms allow-popups"']);
 	for (const name of ["index.html", "canvas.css", "canvas.js", "inspector.js"]) {
 		const source = readFileSync(join(ASSET_DIR, name), "utf8");
-		assert.ok(!source.includes("allow-same-origin"), `${name} must not grant allow-same-origin`);
+		if (name !== "canvas.js") assert.ok(!source.includes("allow-same-origin"), `${name} must not grant allow-same-origin`);
 		assert.ok(!/https?:\/\//i.test(source), `${name} must not reference remote URLs`);
 	}
 	const inspector = readFileSync(join(ASSET_DIR, "inspector.js"), "utf8");

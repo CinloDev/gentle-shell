@@ -8,6 +8,9 @@
 // drags and clicks always reach the canvas; a click on a shield enters focus mode,
 // which shows that artboard at 100% and lets it own the pointer and the keyboard
 // until "Back to canvas" or Shift+Esc restores the previous view.
+// Handoffs (design/<slug>/handoffs.json) show live on each artboard's header: the
+// handoff state, the chosen artboard and its alternatives, and, once implemented
+// with a loopback previewUrl, a Compare view of the artboard next to the running app.
 (() => {
 	"use strict";
 
@@ -24,6 +27,21 @@
 	const MODE_KEY = "gentle-design:send-mode";
 	const SYSTEM_LABEL = { title: "Design system", tradeoff: "Project tokens (design/system.md)" };
 	const SYSTEM_NOTE = "Comments apply to design artboards only. To change the system, update the project's design sources and run /gentle:design sync.";
+	const HANDOFF_LABELS = { queued: "Queued", sent: "Implementing…", in_progress: "In progress", implemented: "Implemented ✓" };
+	const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+	const MAX_PREVIEW_URL = 2048;
+	// The running app is another loopback origin (previewTarget refuses this server's own
+	// port), so the same-origin flag below gives the app its own origin, never the canvas's: it cannot
+	// reach this page, its token or its API, and its scripts, storage and forms work as in
+	// production. No top-navigation flag is granted, so it can never navigate the canvas away.
+	const PREVIEW_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups";
+	const PREVIEW_TIMEOUT_MS = 6000;
+	const PREVIEW_HINT = "If the app refuses to be framed, use Open in new tab.";
+	// CSP host sources have no IPv6 literal form, so Chromium drops the [::1] source from frame-src.
+	const IPV6_HINT = "Browsers do not frame [::1] under the canvas policy (CSP has no IPv6 sources): use Open in new tab, or report the preview on localhost.";
+	const COMPARE_GAP = 24;
+	const COMPARE_PADDING = 24;
+	const TOAST_MS = 5000;
 
 	const $ = (id) => document.getElementById(id);
 	const els = {
@@ -58,6 +76,17 @@
 		filterResolved: $("gd-filter-resolved"),
 		panelEmpty: $("gd-panel-empty"),
 		list: $("gd-comment-list"),
+		toast: $("gd-toast"),
+		compare: $("gd-compare"),
+		compareTitle: $("gd-compare-title"),
+		compareFit: $("gd-compare-fit"),
+		compareFitField: $("gd-compare-fit-field"),
+		compareOpen: $("gd-compare-open"),
+		compareBack: $("gd-compare-back"),
+		compareMessage: $("gd-compare-message"),
+		compareStage: $("gd-compare-stage"),
+		compareSizer: $("gd-compare-sizer"),
+		comparePanes: $("gd-compare-panes"),
 	};
 
 	function storedMode() {
@@ -90,11 +119,25 @@
 		savedView: null,
 		savedPanel: null,
 		hoverBoard: null,
+		// The handoffs.json of design `slug`; boards of another design ignore it.
+		handoffs: { slug: null, chosen: null, handoffs: {} },
+		// The open Compare view: { board, preview, artboardFrame, timer }.
+		compare: null,
+		toastTimer: 0,
 	};
 
 	function setStatus(text, isError) {
 		els.status.textContent = text;
 		els.status.classList.toggle("gd-error", Boolean(isError));
+	}
+
+	/** A confirmation that stays on screen for a few seconds, beyond the status line. */
+	function showToast(text, isError) {
+		clearTimeout(state.toastTimer);
+		els.toast.textContent = text;
+		els.toast.classList.toggle("gd-error", Boolean(isError));
+		els.toast.hidden = false;
+		state.toastTimer = setTimeout(() => { els.toast.hidden = true; }, TOAST_MS);
 	}
 
 	function fileUrl(slug, file) {
@@ -419,7 +462,17 @@
 			tradeoff.textContent = artboard.tradeoff;
 			label.append(tradeoff);
 		}
-		if (!system) label.append(createImplementControl(slug, artboard));
+		// The handoff state, the chosen badge and Compare (rendered by renderHandoff) stack above
+		// Implement this, at screen size, so neither covers the other at any zoom.
+		const handoff = document.createElement("div");
+		handoff.className = "gd-handoff";
+		handoff.hidden = true;
+		if (!system) {
+			const actions = document.createElement("div");
+			actions.className = "gd-board-actions";
+			actions.append(handoff, createImplementControl(slug, artboard));
+			label.append(actions);
+		}
 		if (system) {
 			label.title = SYSTEM_NOTE;
 			const note = document.createElement("p");
@@ -449,8 +502,9 @@
 		const pins = document.createElement("div");
 		pins.className = "gd-pins";
 		// rects: null until the artboard reports where each commented element is.
-		const board = { slug, artboard, frame, wrapper, shield, pins, rects: null, system, viewHeight: 0 };
+		const board = { slug, artboard, frame, wrapper, shield, pins, handoff, rects: null, system, viewHeight: 0 };
 		setFrameHeight(board, artboard.height);
+		renderHandoff(board);
 		shield.addEventListener("keydown", (event) => {
 			if (event.key !== "Enter" && event.key !== " ") return;
 			event.preventDefault();
@@ -515,13 +569,248 @@
 		yes.addEventListener("click", async () => {
 			yes.disabled = true;
 			const reply = await postJson(`api/designs/${encodeURIComponent(slug)}/implement`, { file: artboard.file }).catch((error) => ({ ok: false, body: { error: error.message } }));
-			if (reply.ok) setStatus(`Sent ${artboard.file} to the session to implement`, false);
-			else setStatus(`Not sent: ${reply.body.reason || reply.body.error || "error"}`, true);
+			if (reply.ok) {
+				const queued = reply.body.queued === true;
+				const text = queued
+					? `Queued: the session will implement ${artboard.title} after its current task.`
+					: `Sent: the session is implementing ${artboard.title} now.`;
+				setStatus(text, false);
+				showToast(text, false);
+				// The server recorded it before answering; the handoffs.json change event confirms it.
+				noteHandoff(slug, artboard.file, queued);
+			} else {
+				const text = `Not sent: ${reply.body.reason || reply.body.error || "error"}`;
+				setStatus(text, true);
+				showToast(text, true);
+			}
 			close(true);
 		});
 		box.append(start, confirm);
 		return box;
 	}
+
+	// ---- handoffs ------------------------------------------------------------
+
+	function ownPort() {
+		const location = window.location;
+		return location && typeof location.port === "string" ? location.port : "";
+	}
+
+	/**
+	 * The preview URL Compare may frame: http(s) on localhost, 127.0.0.1 or [::1], no
+	 * credentials, and never this canvas server's port (the server validates it too).
+	 */
+	function previewTarget(value) {
+		if (typeof value !== "string" || value.length === 0 || value.length > MAX_PREVIEW_URL) return null;
+		let url;
+		try { url = new URL(value); } catch { return null; }
+		if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+		if (url.username || url.password || !LOOPBACK_HOSTS.includes(url.hostname)) return null;
+		const port = url.port || (url.protocol === "https:" ? "443" : "80");
+		return port === ownPort() ? null : url.href;
+	}
+
+	function handoffOf(board) {
+		const data = state.handoffs;
+		if (board.system || data.slug !== board.slug) return { chosen: null, entry: null };
+		const file = board.artboard.file;
+		const entry = Object.prototype.hasOwnProperty.call(data.handoffs, file) ? data.handoffs[file] : null;
+		return { chosen: data.chosen, entry: entry && typeof entry === "object" ? entry : null };
+	}
+
+	function handoffKind(entry) {
+		if (entry.status === "sent") return entry.queued === true ? "queued" : "sent";
+		return entry.status === "in_progress" || entry.status === "implemented" ? entry.status : null;
+	}
+
+	function chip(className, text) {
+		const element = document.createElement("span");
+		element.className = className;
+		element.textContent = text;
+		return element;
+	}
+
+	/** The header row of one artboard: Chosen or Alternative, the handoff badge, its feature document, note and Compare. */
+	function renderHandoff(board) {
+		if (board.system || !board.handoff) return;
+		const { chosen, entry } = handoffOf(board);
+		const isChosen = typeof chosen === "string" && chosen === board.artboard.file;
+		board.wrapper.classList.toggle("gd-chosen", isChosen);
+		const parts = [];
+		if (typeof chosen === "string") parts.push(chip(`gd-choice ${isChosen ? "gd-choice-chosen" : "gd-choice-alternative"}`, isChosen ? "Chosen" : "Alternative"));
+		const kind = entry ? handoffKind(entry) : null;
+		let compare = null;
+		if (kind) {
+			const badge = chip("gd-handoff-badge", HANDOFF_LABELS[kind]);
+			badge.dataset.status = kind;
+			parts.push(badge);
+			if (typeof entry.feature === "string" && entry.feature) {
+				const feature = chip("gd-handoff-feature", entry.feature);
+				feature.title = "Tracked in this ODD feature document";
+				parts.push(feature);
+			}
+			if (typeof entry.note === "string" && entry.note) {
+				const note = chip("gd-handoff-note", entry.note);
+				note.title = entry.note;
+				parts.push(note);
+			}
+			const preview = kind === "implemented" ? previewTarget(entry.previewUrl) : null;
+			if (preview) {
+				compare = document.createElement("button");
+				compare.type = "button";
+				compare.className = "gd-compare-start";
+				compare.textContent = "Compare";
+				compare.setAttribute("aria-label", `Compare ${board.artboard.title} with the running app`);
+				compare.addEventListener("click", () => enterCompare(board, preview));
+				parts.push(compare);
+			}
+		}
+		const hadFocus = board.handoff.contains(document.activeElement);
+		board.handoff.replaceChildren(...parts);
+		board.handoff.hidden = parts.length === 0;
+		board.wrapper.classList.toggle("gd-has-handoff", parts.length > 0);
+		if (hadFocus && compare) compare.focus();
+	}
+
+	function renderHandoffs() {
+		state.boards.forEach(renderHandoff);
+	}
+
+	function setHandoffs(slug, data) {
+		const valid = Boolean(data && typeof data === "object" && data.handoffs && typeof data.handoffs === "object" && !Array.isArray(data.handoffs));
+		state.handoffs = { slug, chosen: valid && typeof data.chosen === "string" ? data.chosen : null, handoffs: valid ? data.handoffs : {} };
+		renderHandoffs();
+	}
+
+	async function loadHandoffs() {
+		const slug = state.slug;
+		if (!slug) return;
+		let data = null;
+		try {
+			data = await getJson(`api/designs/${encodeURIComponent(slug)}/handoffs`);
+		} catch (error) {
+			setStatus(`handoffs.json for ${slug} cannot be read: ${error.message}`, true);
+		}
+		if (slug === state.slug) setHandoffs(slug, data);
+	}
+
+	/** Shows a handoff the server just accepted, before its handoffs.json change event arrives. */
+	function noteHandoff(slug, file, queued) {
+		const current = state.handoffs.slug === slug ? state.handoffs.handoffs : {};
+		const feature = state.manifest && state.manifest.slug === slug && typeof state.manifest.feature === "string" ? state.manifest.feature : undefined;
+		const entry = { status: "sent", queued, sentAt: new Date().toISOString(), startedAt: null, implementedAt: null };
+		if (feature) entry.feature = feature;
+		const handoffs = Object.assign({}, current);
+		handoffs[file] = entry;
+		state.handoffs = { slug, chosen: file, handoffs };
+		renderHandoffs();
+	}
+
+	// ---- compare -------------------------------------------------------------
+
+	function comparePane(caption, frame) {
+		const figure = document.createElement("figure");
+		figure.className = "gd-compare-pane";
+		const label = document.createElement("figcaption");
+		label.className = "gd-compare-caption";
+		label.textContent = caption;
+		figure.append(label, frame);
+		return figure;
+	}
+
+	function compareFrame(width, height, title) {
+		const frame = document.createElement("iframe");
+		frame.className = "gd-compare-frame";
+		frame.setAttribute("referrerpolicy", "no-referrer");
+		frame.title = title;
+		frame.style.width = `${width}px`;
+		frame.style.height = `${height}px`;
+		return frame;
+	}
+
+	function setCompareMessage(text, isError) {
+		els.compareMessage.textContent = text;
+		els.compareMessage.classList.toggle("gd-error", Boolean(isError));
+	}
+
+	/** 100% by default; past the window width, "Scale to fit" shrinks the pair to fit. */
+	function layoutCompare() {
+		const compare = state.compare;
+		if (!compare) return;
+		const { width } = compare.board.artboard;
+		const needed = width * 2 + COMPARE_GAP;
+		const available = els.compareStage.getBoundingClientRect().width - COMPARE_PADDING * 2;
+		const wide = needed > available;
+		els.compareFitField.hidden = !wide;
+		const scale = wide && els.compareFit.checked ? Math.max(0.05, available / needed) : 1;
+		els.comparePanes.style.transform = scale === 1 ? "none" : `scale(${scale.toFixed(3)})`;
+		// The sizer keeps the scroll area at the scaled size.
+		els.compareSizer.style.width = scale === 1 ? "" : `${Math.ceil(needed * scale)}px`;
+		els.compareSizer.style.height = scale === 1 ? "" : `${Math.ceil(els.comparePanes.offsetHeight * scale)}px`;
+	}
+
+	/** The artboard (sandboxed as on the canvas) next to the running app, both at the artboard's size. */
+	function enterCompare(board, preview) {
+		exitCompare(false);
+		exitFocus();
+		closePopover();
+		setHoverBoard(null);
+		const { width, height, title } = board.artboard;
+		const artboardFrame = compareFrame(width, height, `${title} artboard`);
+		artboardFrame.setAttribute("sandbox", "allow-scripts");
+		// Like focus mode: the artboard owns its scroll, and Shift+Esc inside it asks to leave.
+		artboardFrame.addEventListener("load", () => artboardFrame.contentWindow?.postMessage({ type: "gd:focus", enabled: true }, "*"));
+		artboardFrame.src = boardUrl(board);
+		const app = compareFrame(width, height, `Running app at ${preview}`);
+		app.setAttribute("sandbox", PREVIEW_SANDBOX);
+		const compare = { board, preview, artboardFrame, timer: 0, loaded: false };
+		const failed = (text) => {
+			if (state.compare === compare) setCompareMessage(text, true);
+		};
+		// A frame refused by X-Frame-Options or frame-ancestors may still fire load, so the
+		// Open in new tab fallback is always shown; a missing load also says so.
+		app.addEventListener("load", () => { compare.loaded = true; });
+		app.addEventListener("error", () => failed(`The app at ${preview} could not be loaded in the frame. Use Open in new tab.`));
+		compare.timer = setTimeout(() => {
+			if (!compare.loaded) failed(`The app at ${preview} has not loaded; it may be down or refuse to be framed. Use Open in new tab.`);
+		}, PREVIEW_TIMEOUT_MS);
+		app.src = preview;
+		state.compare = compare;
+		els.compareTitle.textContent = `Compare: ${title}`;
+		// A new tab with no opener and no Referer: the canvas URL carries the server token.
+		els.compareOpen.setAttribute("target", "_blank");
+		els.compareOpen.setAttribute("rel", "noopener noreferrer");
+		els.compareOpen.href = preview;
+		setCompareMessage(new URL(preview).hostname === "[::1]" ? IPV6_HINT : PREVIEW_HINT, false);
+		els.comparePanes.replaceChildren(comparePane(`Design: ${board.artboard.file}`, artboardFrame), comparePane(`Implementation: ${preview}`, app));
+		els.compareFit.checked = false;
+		els.compare.hidden = false;
+		els.viewport.inert = true;
+		els.panel.inert = true;
+		for (const control of [els.zoomOut, els.zoomIn, els.fit, els.design]) control.disabled = true;
+		layoutCompare();
+		els.compareBack.focus();
+	}
+
+	function exitCompare(restoreFocus) {
+		const compare = state.compare;
+		if (!compare) return;
+		clearTimeout(compare.timer);
+		state.compare = null;
+		els.comparePanes.replaceChildren();
+		els.compareOpen.removeAttribute("href");
+		els.compare.hidden = true;
+		els.viewport.inert = false;
+		els.panel.inert = false;
+		applyFocusState();
+		if (!restoreFocus) return;
+		const board = state.boards.find((candidate) => candidate.artboard.file === compare.board.artboard.file);
+		const button = board ? Array.from(board.handoff.children).find((child) => child.classList.contains("gd-compare-start")) : null;
+		(button ?? els.viewport).focus();
+	}
+
+	els.compareBack.addEventListener("click", () => exitCompare(true));
+	els.compareFit.addEventListener("change", layoutCompare);
 
 	function showFeature(manifest) {
 		const feature = manifest && typeof manifest.feature === "string" ? manifest.feature : "";
@@ -575,6 +864,7 @@
 		const warnings = Array.isArray(manifest.warnings) ? manifest.warnings.filter((warning) => typeof warning === "string") : [];
 		setStatus(warnings.length > 0 ? `design.json: ${warnings.join("; ")}` : state.boards.length === 0 ? "This design has no artboards yet." : "", warnings.length > 0);
 		if (!keepView) requestAnimationFrame(fit);
+		await loadHandoffs();
 		await loadComments();
 	}
 
@@ -621,6 +911,7 @@
 	}
 
 	els.design.addEventListener("change", () => {
+		exitCompare(false);
 		state.slug = els.design.value;
 		loadManifest(state.slug, false);
 	});
@@ -635,6 +926,7 @@
 	async function showDesign(slug) {
 		const same = slug === state.slug;
 		if (!same) {
+			exitCompare(false);
 			exitFocus();
 			state.slug = slug;
 			state.comments = [];
@@ -711,6 +1003,11 @@
 				loadComments();
 				return;
 			}
+			if (change.file === "handoffs.json") {
+				loadHandoffs();
+				return;
+			}
+			if (state.compare && state.compare.board.artboard.file === change.file) state.compare.artboardFrame.src = `${boardUrl(state.compare.board)}?v=${Date.now()}`;
 			const matching = state.boards.filter((board) => board.artboard.file === change.file);
 			// A shared asset (CSS, image, font) can affect every artboard of the design.
 			const targets = matching.length > 0 ? matching : change.file.endsWith(".html") ? [] : state.boards;
@@ -1010,6 +1307,11 @@
 	document.addEventListener("keydown", (event) => {
 		if (event.defaultPrevented || event.key !== "Escape") return;
 		if (event.shiftKey) {
+			if (state.compare) {
+				event.preventDefault();
+				exitCompare(true);
+				return;
+			}
 			if (!state.focus) return;
 			event.preventDefault();
 			exitFocus();
@@ -1058,6 +1360,11 @@
 	});
 
 	window.addEventListener("message", (event) => {
+		// Shift+Esc inside the compared artboard leaves Compare; nothing else from it is trusted.
+		if (state.compare && event.source === state.compare.artboardFrame.contentWindow) {
+			if (event.data && typeof event.data === "object" && event.data.type === "gd:exit-focus") exitCompare(true);
+			return;
+		}
 		const system = state.systemBoard && state.systemBoard.frame.contentWindow === event.source ? state.systemBoard : null;
 		const board = system ?? state.boards.find((candidate) => candidate.frame.contentWindow === event.source);
 		if (!board || !event.data || typeof event.data !== "object") return;
@@ -1091,6 +1398,7 @@
 	});
 
 	window.addEventListener("resize", closePopover);
+	window.addEventListener("resize", layoutCompare);
 	// The viewport also changes size when the comments panel opens or closes.
 	if (typeof ResizeObserver === "function") new ResizeObserver(() => centerFocus()).observe(els.viewport);
 	else window.addEventListener("resize", () => centerFocus());

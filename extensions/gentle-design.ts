@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
-import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_PROMPT_HINT, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, DESIGN_TOOL_NAME, createDesignCanvas, designRunMessage, designUsage, hasSystemBoard, listDesigns, parseDesignArgs, planDesignImplement, runDesignCommentsTool, runDesignTool, type DesignCanvasDeps, type DesignCommentsToolParams, type DesignToolParams } from "../lib/gentle-design.ts";
+import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_PROMPT_HINT, DESIGN_SKILL_NAME, DESIGN_SYNC_REQUEST, DESIGN_TOOL_NAME, createDesignCanvas, designRunMessage, designUsage, hasSystemBoard, listDesigns, parseDesignArgs, planDesignImplement, runDesignCommentsTool, runDesignTool, sendDesignImplement, type DesignCanvasDeps, type DesignCommentsToolParams, type DesignToolParams } from "../lib/gentle-design.ts";
 
 // Gentle Design: /gentle:design <brief> runs the bundled gentle-design skill,
 // which writes self-contained HTML artboards under design/<slug>/ with
@@ -17,6 +17,9 @@ import { DESIGN_COMMENTS_TOOL_NAME, DESIGN_HELP, DESIGN_PROMPT_HINT, DESIGN_SKIL
 // canvas, and a system-prompt hint makes the skill the default design flow.
 // list also reports the project's design sources and whether design/system.md
 // is missing or stale, so the skill syncs first or warns (S13).
+// Every handoff (command, tool, canvas) is recorded in design/<slug>/handoffs.json
+// as sent and chosen; the tool's handoff action records in_progress and
+// implemented (with the running app's loopback previewUrl) for the canvas (S15).
 
 export const DESIGN_COMMAND_NAME = "gentle:design";
 
@@ -28,9 +31,12 @@ const DesignCommentsParams = Type.Object({
 });
 
 const DesignParams = Type.Object({
-	action: Type.Union([Type.Literal("list"), Type.Literal("open"), Type.Literal("stop"), Type.Literal("implement")], { description: "list: designs, artboards, design sources, design/system.md state and canvas state; open: show a design on the canvas; stop: close the canvas; implement: get the handoff for one artboard" }),
+	action: Type.Union([Type.Literal("list"), Type.Literal("open"), Type.Literal("stop"), Type.Literal("implement"), Type.Literal("handoff")], { description: "list: designs, artboards, chosen artboards and handoff states, design sources, design/system.md state and canvas state; open: show a design on the canvas; stop: close the canvas; implement: get the handoff for one artboard; handoff: report progress on a handed-off artboard" }),
 	slug: Type.Optional(Type.String({ description: "Design slug for open (directory under design/); defaults to the most recent design" })),
-	target: Type.Optional(Type.String({ description: "Artboard for implement, as <slug>/<artboard>, such as login/01-split.html" })),
+	target: Type.Optional(Type.String({ description: "Artboard for implement or handoff, as <slug>/<artboard>, such as login/01-split.html" })),
+	status: Type.Optional(Type.Union([Type.Literal("in_progress"), Type.Literal("implemented")], { description: "handoff only: in_progress when you start implementing, implemented when it is done" })),
+	note: Type.Optional(Type.String({ maxLength: 1000, description: "handoff only: a short note shown on the canvas" })),
+	previewUrl: Type.Optional(Type.String({ maxLength: 2048, description: "handoff only: the running app's loopback URL (http or https on localhost, 127.0.0.1 or [::1], any port), so the canvas can compare it with the artboard" })),
 });
 
 export interface GentleDesignDeps extends DesignCanvasDeps {
@@ -53,8 +59,11 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	const skillPath = deps.skillPath ?? fileURLToPath(new URL("../skills/design/SKILL.md", import.meta.url));
 	// Canvas comments arrive between commands; the last command's context answers whether the agent is busy.
 	let latest: ExtensionContext | undefined;
+	// Answers whether the message waits as a follow-up, which a handoff records as queued (S15).
 	const deliver = (message: string) => {
-		pi.sendUserMessage(message, isIdle(latest) ? undefined : { deliverAs: "followUp" });
+		const queued = !isIdle(latest);
+		pi.sendUserMessage(message, queued ? { deliverAs: "followUp" } : undefined);
+		return { queued };
 	};
 	const canvas = createDesignCanvas(deliver, deps);
 
@@ -94,7 +103,11 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 			const plan = await planDesignImplement(ctx.cwd, parsed.rest);
 			if (plan.kind === "send") {
 				for (const warning of plan.warnings) ctx.ui.notify(warning, "warning");
-				deliver(plan.message);
+				try {
+					await sendDesignImplement(ctx.cwd, plan, deliver);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+				}
 			} else ctx.ui.notify(plan.notice.message, plan.notice.level);
 			return;
 		}
@@ -116,8 +129,8 @@ export default function gentleDesign(pi: ExtensionAPI, deps: GentleDesignDeps = 
 	pi.registerTool({
 		name: DESIGN_TOOL_NAME,
 		label: "Gentle Design",
-		description: "Drive the gentle-design canvas. Call list before designing: it reports the project's design sources and whether design/system.md is missing or older than them (sync first, or offer to sync again). list also gives the designs under design/ (artboards, system board, whether the canvas runs and its URL); open a design on the local canvas (optional slug, default the most recent) or refresh it after writing or changing artboards, returning the URL; stop the canvas; implement one artboard (target <slug>/<artboard>), which returns the handoff instructions to follow. Write briefs and run the design-system sync by following the gentle-design skill, not this tool.",
-		promptSnippet: "List gentle-design designs, open or stop their canvas, and get an artboard's implementation handoff.",
+		description: "Drive the gentle-design canvas. Call list before designing: it reports the project's design sources and whether design/system.md is missing or older than them (sync first, or offer to sync again). list also gives the designs under design/ (artboards, system board, whether the canvas runs and its URL); open a design on the local canvas (optional slug, default the most recent) or refresh it after writing or changing artboards, returning the URL; stop the canvas; implement one artboard (target <slug>/<artboard>), which returns the handoff instructions to follow and records it as the design's chosen artboard; handoff reports your progress on that artboard (status in_progress when you start, implemented when done, with previewUrl of the running app on localhost, 127.0.0.1 or [::1] when there is one), which the canvas shows live. Write briefs and run the design-system sync by following the gentle-design skill, not this tool.",
+		promptSnippet: "List gentle-design designs, open or stop their canvas, get an artboard's implementation handoff, and report its progress.",
 		parameters: DesignParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			// Comments from a canvas the tool opened are queued while this run is busy.

@@ -139,6 +139,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 }
 
 .gd-main {
+	position: relative;
 	display: flex;
 	flex: 1;
 	min-height: 0;
@@ -182,15 +183,25 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 	gap: 2px;
 }
 
-/* Implement this: anchored to the label's bottom right and kept at screen size like the pins. */
-.gd-implement {
+/* The handoff row above Implement this: anchored to the label's bottom right, kept at screen
+   size like the pins, and wrapped within the artboard's on-screen width. */
+.gd-board-actions {
 	position: absolute;
 	right: 0;
 	bottom: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 4px;
+	max-width: calc(100% / var(--gd-inv-zoom, 1));
 	transform: scale(var(--gd-inv-zoom, 1));
 	transform-origin: right bottom;
-	white-space: nowrap;
 }
+
+.gd-implement { white-space: nowrap; }
+
+/* At 100% the label makes room for the handoff row above Implement this. */
+.gd-has-handoff .gd-artboard-label { padding-top: 30px; }
 
 .gd-implement-confirm {
 	display: flex;
@@ -214,6 +225,39 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, .gd-viewport
 	margin: 0;
 	color: var(--gd-muted);
 }
+
+/* Handoff row (S15): Chosen or Alternative, the handoff state, its feature document, note and Compare. */
+.gd-handoff {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	font-size: 12px;
+}
+
+.gd-handoff[hidden] { display: none; }
+
+.gd-choice, .gd-handoff-badge, .gd-handoff-feature, .gd-handoff-note {
+	padding: 1px 8px;
+	border: 1px solid var(--gd-border);
+	border-radius: 999px;
+	background: var(--gd-panel);
+	white-space: nowrap;
+}
+
+.gd-choice-chosen { background: var(--gd-accent); border-color: var(--gd-accent); color: var(--gd-accent-text); font-weight: 700; }
+.gd-choice-alternative { color: var(--gd-muted); }
+.gd-handoff-badge { font-weight: 600; }
+.gd-handoff-badge[data-status="queued"] { color: var(--gd-focus); border-color: var(--gd-focus); }
+.gd-handoff-badge[data-status="sent"], .gd-handoff-badge[data-status="in_progress"] { color: var(--gd-accent); border-color: var(--gd-accent); }
+.gd-handoff-badge[data-status="implemented"] { color: var(--gd-success); border-color: var(--gd-success); }
+.gd-handoff-feature { color: var(--gd-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.gd-handoff-note { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; color: var(--gd-muted); font-style: italic; }
+.gd-compare-start { min-height: 24px; padding: 0 10px; font-size: 12px; }
+
+/* The chosen artboard keeps an accent frame at every zoom level. */
+.gd-chosen .gd-artboard-frame { box-shadow: 0 0 0 calc(3px * var(--gd-inv-zoom, 1)) var(--gd-accent), 0 2px 16px rgba(0, 0, 0, 0.5); }
 
 .gd-artboard-frame {
 	display: block;
@@ -456,6 +500,116 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 
 .gd-popover-message.gd-error, .gd-status.gd-error { color: var(--gd-danger); }
+
+/* Compare (S15): the artboard and the running app side by side, over the canvas and the panel. */
+.gd-compare {
+	position: absolute;
+	inset: 0;
+	z-index: 8;
+	display: flex;
+	flex-direction: column;
+	background: var(--gd-stage);
+}
+
+.gd-compare[hidden] { display: none; }
+
+.gd-compare-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 12px;
+	padding: 8px 12px;
+	background: var(--gd-panel);
+	border-bottom: 1px solid var(--gd-border);
+}
+
+.gd-compare-title {
+	margin: 0 auto 0 0;
+	font-size: 15px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.gd-compare-bar .gd-radio[hidden] { display: none; }
+
+.gd-compare-open {
+	display: inline-flex;
+	align-items: center;
+	min-height: 32px;
+	padding: 4px 10px;
+	border: 1px solid var(--gd-border);
+	border-radius: 6px;
+	color: var(--gd-accent);
+}
+
+.gd-compare-open:focus-visible { outline: 2px solid var(--gd-focus); outline-offset: 2px; }
+
+.gd-compare-message {
+	margin: 0;
+	padding: 6px 12px;
+	color: var(--gd-muted);
+}
+
+.gd-compare-message.gd-error { color: var(--gd-danger); }
+
+.gd-compare-stage {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	padding: 24px;
+}
+
+.gd-compare-sizer { overflow: hidden; }
+
+.gd-compare-panes {
+	display: flex;
+	align-items: flex-start;
+	gap: 24px;
+	width: max-content;
+	transform-origin: 0 0;
+}
+
+.gd-compare-pane {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 0;
+}
+
+.gd-compare-caption {
+	max-width: 100%;
+	color: var(--gd-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.gd-compare-frame {
+	display: block;
+	border: 0;
+	background: #fff;
+	box-shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* A confirmation that outlives the status line, such as a sent handoff. */
+.gd-toast {
+	position: fixed;
+	left: 50%;
+	bottom: 24px;
+	z-index: 20;
+	max-width: min(560px, calc(100vw - 32px));
+	padding: 10px 16px;
+	transform: translateX(-50%);
+	background: var(--gd-panel);
+	border: 1px solid var(--gd-accent);
+	border-radius: 8px;
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+	font-weight: 600;
+}
+
+.gd-toast[hidden] { display: none; }
+.gd-toast.gd-error { border-color: var(--gd-danger); color: var(--gd-danger); }
 
 @media (prefers-reduced-motion: no-preference) {
 	button { transition: border-color 120ms ease; }
