@@ -61,6 +61,25 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
     - the rest of the canvas is dimmed and does not pan.
   - Exit back to navigation mode through a visible special control (a "Back to canvas" button) or a key combination. Assumption: `Shift+Esc`, which also works while focus is inside the artboard. Plain `Esc` stays with the design. On exit, the previous zoom and position return.
   - Comment mode keeps working: in comment mode a click picks an element instead of entering focus mode.
+- **S15 Implement feedback, live handoff state, and Compare.** From the proposal the user accepted in L28 ("todos me encantaron": all three points). Acceptance (parent design; assumptions marked):
+  - Immediate feedback: after "Implement this" is sent, that artboard's header shows a visible badge: **Queued** when the agent was busy (follow-up), **Implementing…** when it was idle. A clear on-screen confirmation is shown, not just the status line.
+  - Persisted live state: the handoff state of each artboard (`sent`, `in_progress`, `implemented`, with timestamps, the linked feature document when present, and an optional note) is stored in the design, in `design/<slug>/handoffs.json`, through a single owner module with serialized writes, like comments.json.
+    - The agent updates it with the `gentle_design` tool (new `handoff` action: `in_progress` when it starts, `implemented` when it finishes).
+    - The handoff message tells the agent to do so.
+    - The canvas reflects the state live over SSE, and the badge shows the feature document when the design is linked.
+  - Chosen direction (L29): the artboard that was handed off to implement is marked as **the chosen one over the rest**. It gets a visible "Chosen" badge and an accent frame, and the other artboards of that design are labeled as alternatives.
+    - Assumption: one chosen artboard per design; handing off another artboard moves the mark.
+    - It is persisted with the handoff state.
+    - The `gentle_design` `list` action reports it.
+    - When the design is linked to an ODD feature, the skill's Log entry names the chosen artboard.
+  - Compare: when the agent marks an artboard implemented, it may register the URL of the running app (`previewUrl`). The canvas then offers **Compare**, which shows the artboard and the real implementation side by side at the same size.
+    - Assumption: `previewUrl` must be a loopback `http(s)` URL (`localhost`, `127.0.0.1`, `[::1]`, any port), validated by the tool and the server.
+    - Assumption: an app that refuses to be framed shows an "Open in new tab" fallback.
+    - Assumption: Compare exits with "Back to canvas" / `Shift+Esc`, like focus mode.
+- **S14 Refresh the open canvas instead of opening a new tab.** User (L27): "que si se hace un cambio no se abra ded nuevo otra url, sino que refresque la que ya esta". Acceptance (assumptions marked):
+  - Assumption: when a canvas page is connected to the running server (its live-reload stream is open), `open` from the command or the tool spawns no browser. The server tells the connected page(s) to show the requested design and refresh. The result says the canvas was refreshed and gives the URL.
+  - The browser opens only when no canvas page is connected (none was opened yet, or it was closed), or when the server had to start.
+  - File changes keep live-reloading the open page, as today.
 - **S13 Automatic first sync and stale warning.** From the proposal the user accepted in L23 (option 1):
   - Case 1: a design is requested, `design/system.md` does not exist, and the project has design sources. The agent runs the design-system sync first, then designs with those tokens.
   - Case 2: the project has no design sources. The agent designs freely, as today.
@@ -77,6 +96,8 @@ Requirements S2-S8 come from the plan the user accepted (L2, L3). Wording outsid
 | T5 | S9 (and the S5 message carries the comment id) | delegated: context backstop; same writer as T2b; Risk item 4 (server and agent write the same comments.json) | done (risk high: independent verifier, no blockers); commit `e8cd68c2b` | RED→GREEN store 9/9, server 28/28, extension 19/19; mutations (store queue, POST Origin) caught; real-browser proof all PASS, plus a toolbar overflow fix at ~950px; parent re-run 116/116, types 0 diagnostics |
 | T6 | S11 | delegated: Writer trigger (a) parallel with T7, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): drive the design flow from natural language`; RED 11/12 → GREEN 46/46; mutation on the child guard caught; focused 149/149, types 0 |
 | T7 | S12 | delegated: Writer trigger (a) parallel with T6, disjoint surfaces; docs paragraph reported to the parent | done (risk medium: writer self-verification + real-browser proof + parent spot check) | commit `feat(design): add canvas navigation and focus modes`; RED 0/7 → GREEN 9/9; real-browser a-h PASS, plus the panel auto-hide rows; seam check 204/204, types 0 |
+| T9 | S14 | delegated: context backstop (single writer) | done (risk medium: writer self-verification + real-browser proof + parent spot check; independent verifier with T10) | commit `feat(design): refresh the open canvas tab instead of opening a new one`; RED 7 → GREEN 109/109; 2 mutations caught; real-browser a-d PASS; parent seam check 225/225, types 0 |
+| T10 | S15 | delegated: context backstop (single writer, after T9: shared canvas/server/lib files); Risk items 2 (canvas CSP frame-src for loopback previews, URL validation) and 4 (handoffs.json writers) → independent verifier over T9+T10 | pending | |
 | T8 | S13 | delegated: context backstop (single writer) | done (risk medium: writer self-verification + parent spot check) | commit `feat(design): sync the design system automatically before the first design`; RED 10 failing → GREEN 61/61; parent seam check 217/217, types 0 |
 | T4 | S8, S10, S3 (`implement`), and `open` with only the system board (L14) | delegated: context backstop | done (risk high: feature-end independent verifier PASS after one correction) | commit `feat(design): hand artboards off to code and link designs to ODD features`; RED 11 new → GREEN; parent re-run 123/123, types 0; real-browser proof all PASS |
 
@@ -149,3 +170,6 @@ Slice boundaries: PR4 = `ba48a22d0` (T6) + the T7 commit; PR1 = `32550812b` (413
   - Fixed: `truncateUtf16` left a lone high surrogate when the canvas had already cut at 300 units; it now strips a trailing high surrogate at any length.
   - Done: the 256 KiB read buffer is now reused.
   - Deferred as a follow-up: consolidating the duplicated path validators of the server and the store. It is a refactor of security code, and the current differences are deliberate (the server maps EACCES to 404).
+- **L27** (2026-10-26) User: "una cosa!!! que si se hace un cambio no se abra ded nuevo otra url, sino que refresque la que ya esta". The merge is on hold. Added S14 → T9, into the same PR #2562.
+- **L28** (2026-10-26) User: "una cosa mas, que tendria que pasar al hacer \"implement this\" ? lo manda y que ? no se ve nada en el canvas". The parent explained that today only a status line appears, and proposed (1) immediate feedback, (2) persisted live handoff state, and (3) Compare. User: "todos me encantaron". Added S15 → T10 (after T9), in the same PR #2562.
+- **L29** (2026-10-26) User: "tambien hay que señalar cual es el que se eligio sobre el resto". Folded into S15 (the chosen direction) and T10.

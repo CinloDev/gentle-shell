@@ -80,18 +80,27 @@ function writeDesign(cwd: string, slug: string, title: string, mtimeSeconds?: nu
 const unexpectedServer = async (): Promise<DesignCanvasServer> => { throw new Error("no canvas server expected"); };
 const unexpectedBrowser = async (): Promise<OpenInBrowserResult> => { throw new Error("no browser expected"); };
 
-/** Fake canvas server factory: records starts, closes and the comment callback. */
+/** Fake canvas server factory: records starts, closes, shows and the comment callback; `pages.connected` is its open canvas page count. */
 function fakeCanvas(opened: OpenInBrowserResult = { opened: true }) {
 	const starts: DesignCanvasServerOptions[] = [];
 	const opens: string[] = [];
+	const shows: Array<string | null> = [];
+	const pages = { connected: 0 };
 	let closes = 0;
 	const startServer = async (options: DesignCanvasServerOptions): Promise<DesignCanvasServer> => {
 		starts.push(options);
 		const base = "http://127.0.0.1:4100/tok/";
-		return { port: 4100, token: "tok", url: options.initialSlug ? `${base}d/${options.initialSlug}/` : base, close: async () => { closes++; } };
+		return {
+			port: 4100,
+			token: "tok",
+			url: options.initialSlug ? `${base}d/${options.initialSlug}/` : base,
+			close: async () => { closes++; },
+			connectedClients: () => pages.connected,
+			show: (slug) => { shows.push(slug); return pages.connected; },
+		};
 	};
 	const openBrowser = async (url: string) => { opens.push(url); return opened; };
-	return { startServer, openBrowser, starts, opens, closes: () => closes };
+	return { startServer, openBrowser, starts, opens, shows, pages, closes: () => closes };
 }
 
 test("registers /gentle:design with help text naming the brief form and every subcommand", () => {
@@ -171,6 +180,68 @@ test("open starts one canvas server on design/, opens the slug URL and notifies 
 	assert.deepEqual(canvas.opens.at(-1), "http://127.0.0.1:4100/tok/d/login/");
 	assert.equal(notices.at(-1)!.message, "Design canvas: http://127.0.0.1:4100/tok/d/login/");
 	assert.equal(sent.length, 0);
+});
+
+// S14: while a canvas page is connected, open refreshes it instead of opening another tab.
+
+test("open refreshes the connected canvas page instead of opening the browser again", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "pricing-page", "Pricing page", 2000);
+	writeDesign(cwd, "login", "Login screen", 1000);
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("open login", ctx);
+	assert.deepEqual(canvas.opens, ["http://127.0.0.1:4100/tok/d/login/"], "the first open spawns the browser");
+	assert.deepEqual(canvas.shows, []);
+	canvas.pages.connected = 1;
+	await command().handler("open login", ctx);
+	assert.equal(canvas.opens.length, 1, "no new tab while a page is connected");
+	assert.deepEqual(canvas.shows, ["login"]);
+	assert.deepEqual(notices.at(-1), { message: "Design canvas refreshed: http://127.0.0.1:4100/tok/d/login/", level: "info" });
+	await command().handler("", ctx);
+	assert.deepEqual(canvas.shows, ["login", "pricing-page"], "no-args open switches the same page to the latest design");
+	assert.equal(notices.at(-1)!.message, "Design canvas refreshed: http://127.0.0.1:4100/tok/d/pricing-page/");
+	canvas.pages.connected = 0;
+	await command().handler("open login", ctx);
+	assert.deepEqual(canvas.opens, ["http://127.0.0.1:4100/tok/d/login/", "http://127.0.0.1:4100/tok/d/login/"], "a closed page lets open spawn the browser again");
+	assert.equal(canvas.shows.length, 2);
+	assert.equal(notices.at(-1)!.message, "Design canvas: http://127.0.0.1:4100/tok/d/login/");
+	assert.equal(canvas.starts.length, 1);
+});
+
+test("open on a server it had to start always opens the browser, even after a stop", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "login", "Login screen");
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const { ctx } = fakeContext(cwd);
+	canvas.pages.connected = 1;
+	await command().handler("open login", ctx);
+	assert.equal(canvas.opens.length, 1, "a new server has no page of its own yet");
+	await command().handler("stop", ctx);
+	await command().handler("open login", ctx);
+	assert.equal(canvas.starts.length, 2);
+	assert.equal(canvas.opens.length, 2);
+	assert.deepEqual(canvas.shows, []);
+});
+
+test("with only the system board, a refresh shows the system-only view", async () => {
+	const cwd = scratchCwd();
+	mkdirSync(join(cwd, "design"), { recursive: true });
+	writeFileSync(join(cwd, "design", "system.html"), "<h1>Tokens</h1>");
+	const { pi, command } = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(pi, canvas);
+	const { ctx, notices } = fakeContext(cwd);
+	await command().handler("open", ctx);
+	canvas.pages.connected = 2;
+	await command().handler("open", ctx);
+	assert.equal(canvas.opens.length, 1);
+	assert.deepEqual(canvas.shows, [null]);
+	assert.equal(notices.at(-1)!.message, "Design canvas refreshed: http://127.0.0.1:4100/tok/");
 });
 
 test("when the browser cannot open, the URL is still printed with a manual hint", async () => {
@@ -826,6 +897,29 @@ test("gentle_design open starts the canvas once, returns its URL, and /gentle:de
 	await fake.command().handler("stop", ctx);
 	assert.equal(canvas.closes(), 1);
 	assert.equal(fake.sent.length, 0);
+});
+
+test("gentle_design open refreshes a connected canvas page, and opens the browser once none is connected", async () => {
+	const cwd = scratchCwd();
+	writeDesign(cwd, "pricing-page", "Pricing page", 2000);
+	writeDesign(cwd, "login", "Login screen", 1000);
+	const fake = fakePi();
+	const canvas = fakeCanvas();
+	gentleDesign(fake.pi, canvas);
+	const run = designTool(fake);
+	const { ctx } = fakeContext(cwd);
+	await run({ action: "open", slug: "login" }, ctx);
+	assert.equal(canvas.opens.length, 1);
+	canvas.pages.connected = 1;
+	const refreshed = await run({ action: "open", slug: "pricing-page" }, ctx);
+	assert.equal(toolText(refreshed), "Design canvas refreshed: http://127.0.0.1:4100/tok/d/pricing-page/");
+	assert.deepEqual(refreshed.details, { url: "http://127.0.0.1:4100/tok/d/pricing-page/", opened: true, refreshed: true });
+	assert.equal(canvas.opens.length, 1, "the tool opens no new tab either");
+	assert.deepEqual(canvas.shows, ["pricing-page"]);
+	canvas.pages.connected = 0;
+	const reopened = await run({ action: "open", slug: "login" }, ctx);
+	assert.deepEqual(reopened.details, { url: "http://127.0.0.1:4100/tok/d/login/", opened: true });
+	assert.equal(canvas.opens.length, 2);
 });
 
 test("gentle_design open reports the manual URL when the browser cannot open", async () => {

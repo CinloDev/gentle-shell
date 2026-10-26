@@ -387,9 +387,10 @@
 		if (state.slug) els.design.value = state.slug;
 	}
 
-	async function refreshDesigns() {
+	/** pickLatest: with no design selected, select the most recent one (not for the system-only view). */
+	async function refreshDesigns(pickLatest = true) {
 		const { designs } = await getJson("api/designs");
-		if (!state.slug && designs.length > 0) state.slug = designs[0].slug;
+		if (pickLatest && !state.slug && designs.length > 0) state.slug = designs[0].slug;
 		renderDesignOptions(designs);
 		return designs;
 	}
@@ -624,6 +625,39 @@
 		loadManifest(state.slug, false);
 	});
 
+	/**
+	 * The server's show event (S14): `open` while this page is connected switches it to
+	 * that design (null: the system-only view) and reloads every board from the server, so
+	 * a change event this page missed is caught up. The same design refreshes in place and
+	 * keeps zoom, pan and focus mode on the same artboard; another design leaves focus mode
+	 * first, since its artboards differ.
+	 */
+	async function showDesign(slug) {
+		const same = slug === state.slug;
+		if (!same) {
+			exitFocus();
+			state.slug = slug;
+			state.comments = [];
+			state.activeId = null;
+			renderComments();
+		}
+		if (!(await refreshSystem()) && state.systemBoard) reloadBoard(state.systemBoard);
+		if (slug !== state.slug) return;
+		try {
+			await refreshDesigns(false);
+		} catch (error) {
+			setStatus(`Designs cannot be listed: ${error.message}`, true);
+		}
+		if (slug !== state.slug) return;
+		if (slug === null) {
+			history.replaceState(null, "", base);
+			document.title = "Gentle Design";
+			if (!same || !state.systemBoard) showSystemOnly();
+			return;
+		}
+		await loadManifest(slug, same);
+	}
+
 	async function start() {
 		applyView();
 		await refreshSystem();
@@ -648,6 +682,13 @@
 			if (els.status.classList.contains("gd-error")) setStatus("", false);
 		});
 		source.addEventListener("error", () => setStatus("Live reload disconnected, retrying…", true));
+		source.addEventListener("show", (event) => {
+			let request;
+			try { request = JSON.parse(event.data); } catch { return; }
+			if (!request || typeof request !== "object") return;
+			if (request.slug !== null && !(typeof request.slug === "string" && /^[a-z0-9][a-z0-9-]*$/.test(request.slug))) return;
+			showDesign(request.slug).catch(() => {});
+		});
 		source.addEventListener("change", (event) => {
 			let change;
 			try { change = JSON.parse(event.data); } catch { return; }

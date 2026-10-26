@@ -88,7 +88,16 @@ export type DesignCanvasServerOptions = {
 	randomToken?: () => string;
 };
 
-export type DesignCanvasServer = { url: string; port: number; token: string; close(): Promise<void> };
+export type DesignCanvasServer = {
+	url: string;
+	port: number;
+	token: string;
+	close(): Promise<void>;
+	/** Canvas pages with an open live-reload stream. */
+	connectedClients(): number;
+	/** Tells every connected page to show `slug` (null: the system-only view) and reload it; returns how many it reached. */
+	show(slug: string | null): number;
+};
 
 export type DesignArtboard = { file: string; title: string; tradeoff: string; width: number; height: number };
 /** `feature` is present only when valid; `warnings` only when something in design.json was dropped. */
@@ -817,6 +826,13 @@ export async function startDesignCanvasServer(options: DesignCanvasServerOptions
 		return closing;
 	}
 
+	function show(slug: string | null): number {
+		if (slug !== null && (typeof slug !== "string" || !SLUG.test(slug))) throw new Error("slug must be kebab-case or null");
+		if (closing) return 0;
+		broadcast(`event: show\ndata: ${JSON.stringify({ slug })}\n\n`);
+		return clients.size;
+	}
+
 	const url = `${origin}${base}${options.initialSlug ? `d/${options.initialSlug}/` : ""}`;
-	return { url, port, token, close };
+	return { url, port, token, close, connectedClients: () => clients.size, show };
 }

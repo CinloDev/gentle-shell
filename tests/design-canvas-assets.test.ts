@@ -27,6 +27,7 @@ class FakeElement {
 	style: Record<string, any> = { setProperty(name: string, value: string) { this[name] = value; } };
 	dataset: Record<string, string> = {};
 	textContent = "";
+	title = "";
 	hidden = false;
 	disabled = false;
 	inert = false;
@@ -163,7 +164,17 @@ async function loadCanvas(firstHeight = 300) {
 			],
 		},
 		"/t/api/designs/alpha/comments": { comments: [] },
+		"/t/api/designs/beta": {
+			slug: "beta",
+			title: "Beta",
+			brief: "",
+			artboards: [{ file: "01-only.html", title: "Only", tradeoff: "", width: 500, height: 400 }],
+		},
+		"/t/api/designs/beta/comments": { comments: [] },
 	};
+	const fetched: string[] = [];
+	const urls: string[] = [];
+	const sourceListeners = new Map<string, Listener[]>();
 	const context: Record<string, any> = {
 		document,
 		console,
@@ -172,11 +183,18 @@ async function loadCanvas(firstHeight = 300) {
 		innerWidth: 1200,
 		innerHeight: 800,
 		CSS: { escape: (value: string) => value },
-		history: { replaceState() {} },
+		history: { replaceState(_state: unknown, _title: string, url: string) { urls.push(url); } },
 		localStorage: { getItem: () => null, setItem() {} },
 		requestAnimationFrame: (callback: () => void) => { callback(); return 0; },
-		fetch: async (url: string) => ({ ok: url in replies, status: url in replies ? 200 : 404, json: async () => replies[url] ?? {} }),
-		EventSource: class { addEventListener() {} },
+		fetch: async (url: string) => {
+			fetched.push(url);
+			return { ok: url in replies, status: url in replies ? 200 : 404, json: async () => replies[url] ?? {} };
+		},
+		EventSource: class {
+			addEventListener(type: string, listener: Listener) {
+				sourceListeners.set(type, [...(sourceListeners.get(type) ?? []), listener]);
+			}
+		},
 		addEventListener(type: string, listener: Listener) {
 			windowListeners.set(type, [...(windowListeners.get(type) ?? []), listener]);
 		},
@@ -196,7 +214,13 @@ async function loadCanvas(firstHeight = 300) {
 	const windowEvent = (type: string) => {
 		for (const listener of windowListeners.get(type) ?? []) listener({ type });
 	};
-	return { document, viewport, world, boards, message, windowEvent, zoomLevel: document.getElementById("gd-zoom-level"), navMode: document.getElementById("gd-nav-mode") };
+	/** A server-sent event on the canvas's live-reload stream, then the async work it starts. */
+	const serverEvent = async (type: string, data: unknown) => {
+		for (const listener of sourceListeners.get(type) ?? []) listener({ type, data: JSON.stringify(data) });
+		for (let i = 0; i < 10; i++) await flush();
+	};
+	const frames = () => world.children.map((wrapper) => wrapper.children.find((child) => child.classes.has("gd-frame-box"))!.children.find((child) => child.localName === "iframe")!);
+	return { document, viewport, world, boards, message, windowEvent, serverEvent, frames, fetched, urls, replies, zoomLevel: document.getElementById("gd-zoom-level"), navMode: document.getElementById("gd-nav-mode") };
 }
 
 function click(target: FakeElement, x: number, y: number) {
@@ -325,6 +349,62 @@ test("a drag over an artboard pans the canvas, and in comment mode a click is ro
 	assert.equal(canvas.navMode.textContent, "Navigating", "comment mode picks instead of focusing");
 	// The frame shows a 400x300 artboard at half size: (150-100)/0.5, (130-100)/0.5.
 	assert.deepEqual(first.frame.contentWindow!.posted.at(-1), { type: "gd:pick-at", x: 100, y: 60 });
+});
+
+// S14: `open` while a canvas page is connected sends it a show event instead of opening a tab.
+
+test("a show event for the same design re-fetches its manifest and reloads its artboards, keeping zoom, pan and focus", async () => {
+	const canvas = await loadCanvas();
+	// A laid-out world, so a fit() during the refresh would visibly change the view.
+	Object.defineProperty(canvas.world, "offsetWidth", { get: () => 2000 });
+	Object.defineProperty(canvas.world, "offsetHeight", { get: () => 900 });
+	canvas.viewport.dispatch("wheel", { deltaX: 0, deltaY: 40, deltaMode: 0, ctrlKey: true, metaKey: false, shiftKey: false, clientX: 300, clientY: 300 });
+	const view = canvas.world.style.transform;
+	const zoom = canvas.zoomLevel.textContent;
+	const before = canvas.frames();
+	const manifestFetches = canvas.fetched.filter((url) => url === "/t/api/designs/alpha").length;
+	// A file written while the page missed the change event: the refresh must still pick it up.
+	(canvas.replies["/t/api/designs/alpha"] as { artboards: unknown[] }).artboards.push({ file: "03-c.html", title: "Third", tradeoff: "", width: 400, height: 300 });
+	await canvas.serverEvent("show", { slug: "alpha" });
+	assert.equal(canvas.fetched.filter((url) => url === "/t/api/designs/alpha").length, manifestFetches + 1, "the manifest is fetched again");
+	const after = canvas.frames();
+	assert.equal(after.length, 3, "the new artboard appears");
+	assert.ok(after.every((frame) => !before.includes(frame)), "every artboard is reloaded");
+	assert.equal(canvas.world.style.transform, view, "pan and zoom stay");
+	assert.equal(canvas.zoomLevel.textContent, zoom);
+	assert.equal(canvas.urls.at(-1), "/t/d/alpha/");
+
+	// Focus mode survives a refresh of the same design, on the same artboard.
+	const shield = canvas.frames()[0].parentElement!.children.find((child) => child.classes.has("gd-shield"))!;
+	click(shield, 200, 200);
+	assert.match(canvas.navMode.textContent, /^Using: First/);
+	await canvas.serverEvent("show", { slug: "alpha" });
+	assert.match(canvas.navMode.textContent, /^Using: First/, "focus stays on the same artboard");
+	assert.equal(canvas.zoomLevel.textContent, "100%");
+});
+
+test("a show event for another design leaves focus, loads that design and replaces the URL", async () => {
+	const canvas = await loadCanvas();
+	const [first] = canvas.boards;
+	click(first.shield!, 200, 200);
+	assert.match(canvas.navMode.textContent, /^Using:/);
+	await canvas.serverEvent("show", { slug: "beta" });
+	assert.ok(canvas.fetched.includes("/t/api/designs/beta"), "the other design's manifest is loaded");
+	assert.ok(canvas.fetched.includes("/t/api/designs/beta/comments"), "and its comments");
+	assert.equal(canvas.urls.at(-1), "/t/d/beta/");
+	assert.equal(canvas.document.getElementById("gd-title").textContent, "Beta");
+	assert.equal(canvas.document.getElementById("gd-design").value, "beta", "the design selector follows");
+	assert.equal(canvas.navMode.textContent, "Navigating", "focus mode ends when the design changes");
+	assert.deepEqual(canvas.frames().map((frame) => frame.title), ["Only artboard"]);
+
+	await canvas.serverEvent("show", { slug: null });
+	assert.equal(canvas.urls.at(-1), "/t/", "null shows the system-only view at the root URL");
+	assert.equal(canvas.document.getElementById("gd-title").textContent, "Gentle Design");
+	assert.deepEqual(canvas.frames(), []);
+
+	const fetches = canvas.fetched.length;
+	for (const data of [{ slug: 3 }, {}, "beta", { slug: "../x" }]) await canvas.serverEvent("show", data);
+	assert.equal(canvas.fetched.length, fetches, "a malformed show event is ignored");
 });
 
 function loadInspector() {

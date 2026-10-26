@@ -583,6 +583,47 @@ test("events stream a debounced change after an artboard write", async (t) => {
 	assert.deepEqual(JSON.parse(match[1]), { slug: "alpha", file: "01-hero.html" });
 });
 
+async function until(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error("condition not reached in time");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
+test("connectedClients counts the open event streams", async (t) => {
+	const { server, port } = await start(t);
+	assert.equal(server.connectedClients(), 0);
+	const first = openEvents(port);
+	t.after(() => first.req.destroy());
+	await first.ready;
+	await first.waitFor(/: connected\n\n/);
+	assert.equal(server.connectedClients(), 1);
+	const second = openEvents(port);
+	t.after(() => second.req.destroy());
+	await second.ready;
+	await second.waitFor(/: connected\n\n/);
+	assert.equal(server.connectedClients(), 2);
+	first.req.destroy();
+	second.req.destroy();
+	await until(() => server.connectedClients() === 0);
+});
+
+test("show() tells every connected page which design to show, or the system-only view for null", async (t) => {
+	const { server, port } = await start(t);
+	assert.equal(server.show("alpha"), 0, "no page is connected yet");
+	const events = openEvents(port);
+	t.after(() => events.req.destroy());
+	await events.ready;
+	await events.waitFor(/: connected\n\n/);
+	assert.equal(server.show("beta"), 1);
+	const match = await events.waitFor(/event: show\ndata: (\{[^\n]*\})\n\n/);
+	assert.deepEqual(JSON.parse(match[1]), { slug: "beta" });
+	assert.equal(server.show(null), 1);
+	await events.waitFor(/event: show\ndata: \{"slug":null\}\n\n/);
+	for (const slug of ["../x", "Beta", "", "a b"]) assert.throws(() => server.show(slug), /kebab-case/, slug);
+});
+
 test("events stream a change when comments.json is written", async (t) => {
 	const { port } = await start(t);
 	const events = openEvents(port);

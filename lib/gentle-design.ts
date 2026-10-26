@@ -177,11 +177,18 @@ export interface DesignCanvasDeps {
 	openBrowser?: (url: string) => Promise<OpenInBrowserResult>;
 }
 
-/** `url` is set once the canvas shows something; `opened` says whether the browser opened it. */
-export type DesignOpenNotice = DesignNotice & { url?: string; opened?: boolean };
+/**
+ * `url` is set once the canvas shows something; `opened` says whether a browser tab shows it.
+ * `refreshed` is true when an already connected canvas page was told to show and reload it,
+ * so no new tab was opened (S14).
+ */
+export type DesignOpenNotice = DesignNotice & { url?: string; opened?: boolean; refreshed?: boolean };
 
 export interface DesignCanvas {
-	/** Shows `slug`, or the most recent design, on the session's canvas server, starting it when needed. */
+	/**
+	 * Shows `slug`, or the most recent design, on the session's canvas server, starting it when needed.
+	 * A running server with a connected canvas page refreshes that page instead of opening the browser.
+	 */
 	open(cwd: string, slug?: string): Promise<DesignOpenNotice>;
 	/** Closes the running server; false when none was running. */
 	stop(): Promise<boolean>;
@@ -242,6 +249,8 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		if (slug !== null && !designs.some((design) => design.slug === slug)) {
 			return { message: `No design "${slug}" in design/. Available: ${designs.map((design) => design.slug).join(", ")}.`, level: "warning" };
 		}
+		// Only a server that was already running can have a canvas page of its own connected.
+		const reused = running?.root === join(cwd, "design");
 		let server: DesignCanvasServer;
 		try {
 			server = await serverFor(cwd);
@@ -250,6 +259,9 @@ export function createDesignCanvas(deliver: (message: string) => void | Promise<
 		}
 		const url = canvasUrl(server, slug);
 		if (running) running.url = url;
+		if (reused && server.connectedClients() > 0 && server.show(slug) > 0) {
+			return { message: `Design canvas refreshed: ${url}`, level: "info", url, opened: true, refreshed: true };
+		}
 		const result = await openBrowser(url);
 		if (result.opened) return { message: `Design canvas: ${url}`, level: "info", url, opened: true };
 		const reason = result.error ? ` (${result.error})` : "";
@@ -332,7 +344,7 @@ export type DesignToolDetails =
 		system: DesignSystemState;
 		canvas: { running: boolean; url?: string };
 	}
-	| { url: string; opened: boolean }
+	| { url: string; opened: boolean; refreshed?: true }
 	| { stopped: boolean }
 	| { target: string; warnings: string[] };
 /** `texts` become the tool's content parts; a refusal throws, so Pi flags the result as an error. */
@@ -387,7 +399,8 @@ export async function runDesignTool(cwd: string, params: DesignToolParams, canva
 	if (params.action === "open") {
 		const notice = await canvas.open(cwd, params.slug || undefined);
 		if (notice.url === undefined) throw new Error(notice.message);
-		return { texts: [notice.message], details: { url: notice.url, opened: notice.opened === true } };
+		const details = notice.refreshed ? { url: notice.url, opened: true, refreshed: true as const } : { url: notice.url, opened: notice.opened === true };
+		return { texts: [notice.message], details };
 	}
 	const target = params.target ?? "";
 	const plan = await planDesignImplement(cwd, target);
