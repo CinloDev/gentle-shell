@@ -16,7 +16,7 @@ export interface RunningJobDisplay {
 	startedAt: number;
 	// Finished-tail fields; optional so older publishers that only list running
 	// jobs keep validating (the Agents-card pattern: results linger briefly).
-	status?: "exited" | "stopped";
+	status?: "exited" | "stopped" | "failed";
 	endedAt?: number;
 	exitCode?: number | null;
 }
@@ -31,7 +31,7 @@ export function isJobsSidebarSnapshot(value: unknown): value is JobsSidebarSnaps
 		if (!job || typeof job !== "object") return false;
 		if (typeof job.id !== "string" || job.id.length === 0 || typeof job.label !== "string") return false;
 		if (typeof job.startedAt !== "number" || !Number.isFinite(job.startedAt)) return false;
-		if (job.status !== undefined && job.status !== "exited" && job.status !== "stopped") return false;
+		if (job.status !== undefined && job.status !== "exited" && job.status !== "stopped" && job.status !== "failed") return false;
 		if (job.endedAt !== undefined && (typeof job.endedAt !== "number" || !Number.isFinite(job.endedAt))) return false;
 		if (job.exitCode !== undefined && typeof job.exitCode !== "number" && job.exitCode !== null) return false;
 		return true;

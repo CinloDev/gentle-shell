@@ -1236,9 +1236,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const running = sessionJobs.filter((job) => job.status === "running")
 			.sort((a, b) => b.startedAt - a.startedAt);
 		// Finished tails ride the same snapshot so the sidebar card can linger
-		// them briefly, like the Agents card's results. Failed jobs (spawn
-		// errors) are excluded: the display snapshot only carries exited/stopped.
-		const finished = sessionJobs.filter((job) => (job.status === "exited" || job.status === "stopped") && job.endedAt !== undefined && deps.now() - job.endedAt < JOBS_FINISHED_TTL_MS)
+		// them briefly, like the Agents card's results; failed jobs ride too,
+		// painting the ✗ glyph like a nonzero exit.
+		const finished = sessionJobs.filter((job) => (job.status === "exited" || job.status === "stopped" || job.status === "failed") && job.endedAt !== undefined && deps.now() - job.endedAt < JOBS_FINISHED_TTL_MS)
 			.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 3);
 		try { parentCtx?.ui.setStatus(JOBS_STATUS_KEY, running.length === 0 ? undefined : `${JOB_GLYPH} ${running.length} job${running.length === 1 ? "" : "s"}`); } catch { /* Status is cosmetic. */ }
 		if (sessionId) {

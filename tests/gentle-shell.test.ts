@@ -526,6 +526,13 @@ test("jobs snapshots feed their own rail card, keep one compact fallback, and re
 		publish("shell-session", [{ id: "job-1", label: "CI for PR 1860", startedAt: 1 }, { id: "job-0", label: "Build runtime", startedAt: 1, status: "exited", endedAt: Date.now(), exitCode: 0 }]);
 		assert.match(jobs.render(60).join("\n"), /1 running · 1 finished/, "finished tails ride the same snapshot");
 		assert.match(jobs.render(60).join("\n"), /✓\s+Build runtime/);
+		// The compact count is running-only: a finished tail still paints the
+		// card, but the header's ⧗ N jobs derives from running entries alone.
+		publish("shell-session", [{ id: "job-2", label: "Fresh tail", startedAt: 1, status: "exited", endedAt: Date.now(), exitCode: 0 }]);
+		tui.terminal.columns = 80;
+		assert.match(jobs.render(46).join("\n"), /Fresh tail/, "the finished tail still paints the card");
+		assert.doesNotMatch(header.render(80).join("\n"), /⧗ 1 job/, "the compact count is running-only");
+		tui.terminal.columns = 160;
 		publish("shell-session", [{ id: "job-0", label: "Stale tail", startedAt: 1, status: "exited", endedAt: 5, exitCode: 0 }]);
 		assert.doesNotMatch(jobs.render(46).join("\n"), /Stale tail/, "a finished job past the TTL paints nothing");
 		assert.doesNotMatch(rail.render(46).join("\n"), /1 job/, "the jobs counter never joins the integration statuses while display data exists");
@@ -534,7 +541,8 @@ test("jobs snapshots feed their own rail card, keep one compact fallback, and re
 		assert.doesNotMatch(header.render(160).join("\n"), /1 job/, "the visible rail owns job details");
 		state.active = false;
 		tui.terminal.columns = 80;
-		assert.match(header.render(80).join("\n"), /1 job/, "mobile topbar preserves the count");
+		publish("shell-session", [{ id: "job-1", label: "CI for PR 1860", startedAt: 1 }]);
+		assert.match(header.render(80).join("\n"), /1 job/, "mobile topbar preserves the count of a running job");
 		const before = jobs.render(46).join("\n");
 		publish("foreign", []);
 		publish("shell-session", [{ label: "invalid" }]);

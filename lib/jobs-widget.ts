@@ -64,6 +64,7 @@ function clip(text: string, width: number): string {
 // overlay's outcome marks.
 function glyph(job: RunningJobDisplay): [string, string] {
 	if (job.status === "stopped") return ["–", "dim"];
+	if (job.status === "failed") return ["✗", "error"];
 	if (job.status === "exited") return job.exitCode === 0 ? ["✓", "success"] : ["✗", "error"];
 	return [JOBS_GLYPH, GLYPH_ROLE];
 }

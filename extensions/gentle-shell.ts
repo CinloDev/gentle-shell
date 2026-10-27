@@ -2159,7 +2159,9 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				pi, ctx, footerData,
 				usage: () => usage.get(ctx.model?.provider ?? ""),
 				profile: () => deps.activeProfile(),
-				jobs: () => runningJobs,
+				// The compact bar and header derive ⧗ N jobs from model.jobs.length,
+				// so this input is running-only: the snapshot carries the finished tail.
+				jobs: () => runningJobs?.filter((job) => job.status === undefined),
 				review: () => review,
 				tracker: () => tracker,
 				visualSettings: () => visualSettings,
@@ -2295,7 +2297,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			return { ...part,
 				render(width: number) {
 					if (visualSettings.statusPlacement === "hidden" && (tui as TUI & { mode?: string }).mode !== "fullscreen" && runningJobs?.length) {
-						return [truncateToWidth(theme.fg("muted", shellJobsCount(runningJobs.length)), width, "…")];
+						return [truncateToWidth(theme.fg("muted", shellJobsCount(runningJobs.filter((job) => job.status === undefined).length)), width, "…")];
 					}
 					const rows = part.render(width);
 					// Preserve a shrinkable exterior dock row, outside prompt/completion geometry.

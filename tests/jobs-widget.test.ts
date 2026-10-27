@@ -99,6 +99,14 @@ test("a nonzero exit paints ✗ and a stopped job paints –", () => {
 	assert.match(text, /2 finished/);
 });
 
+test("a failed job rides the tail with the ✗ glyph", () => {
+	const lines = renderJobsCard([{ ...exitedJob, status: "failed" as const }], plainTheme, 50, 100_000, { collapsed: false });
+	const text = lines.join("\n");
+	assert.match(text, /✗\s+Build runtime/);
+	assert.match(text, /1m 0s/, "elapsed freezes at endedAt like the other outcomes");
+	assert.match(text, /1 finished/);
+});
+
 test("finished jobs past the TTL paint nothing", () => {
 	// now - endedAt lands exactly on the TTL: not fresh anymore.
 	assert.deepEqual(renderJobsCard([{ ...exitedJob, endedAt: 40_000 }], plainTheme, 50, 100_000, { collapsed: false }), []);
