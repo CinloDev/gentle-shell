@@ -126,7 +126,7 @@ import { installSidebar, invalidateSidebar, narrowStatusOwner, SIDEBAR_BREAKPOIN
 import { sessionChangeRoots } from "../lib/session-changes.ts";
 import { REVIEW_SIDEBAR_EVENT, isReviewSidebarSnapshot, type ReviewSidebarSnapshot } from "../lib/review-sidebar-state.ts";
 import { JOBS_SIDEBAR_EVENT, JOBS_STATUS_KEY, isJobsSidebarSnapshot, jobsCollapseKey, type RunningJobDisplay } from "../lib/jobs-sidebar-state.ts";
-import { jobsCardTone, renderJobsCard } from "../lib/jobs-widget.ts";
+import { JOBS_FINISHED_TTL_MS, jobsCardTone, renderJobsCard } from "../lib/jobs-widget.ts";
 import { NativePointerRegion } from "../lib/native-pointer-region.ts";
 import { installSessionChangeCapture } from "../lib/session-change-capture.ts";
 import { SelectionEngine } from "../lib/selection-engine.ts";
@@ -2066,7 +2066,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const event = value as { sessionId?: unknown; snapshot?: unknown } | undefined;
 		if (!currentContext || event?.sessionId !== currentContext.sessionManager.getSessionId()) return;
 		if (!isJobsSidebarSnapshot(event.snapshot)) return;
-		runningJobs = event.snapshot.jobs.map(({ id, label, startedAt }) => ({ id, label, startedAt }));
+		runningJobs = event.snapshot.jobs.map(({ id, label, startedAt, status, endedAt, exitCode }) => ({ id, label, startedAt, status, endedAt, exitCode }));
 		redrawReview();
 	});
 	pi.on("session_tree", () => {
@@ -2202,13 +2202,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			// rail is natively scrollable, so it lists every running job; there is
 			// no above-editor copy — regular mode keeps the compact bar count.
 			let jobsHovered = false;
+			let jobsPainted = false;
 			let jobsHeaderRow = 0;
 			const jobsRailCard: Component = {
 				render(width: number) {
 					const jobs = runningJobs ?? [];
-					if (jobs.length === 0) return [];
-					jobsHeaderRow = panelHeaderRow(theme, width, jobsCardTone(jobs));
-					return renderJobsCard(jobs, theme, width, deps.now(), { collapsed: jobsCollapsed, collapseKey: jobsKey, collapseControl: true, hovered: jobsHovered });
+					if (jobs.length === 0) { jobsPainted = false; return []; }
+					const lines = renderJobsCard(jobs, theme, width, deps.now(), { collapsed: jobsCollapsed, collapseKey: jobsKey, collapseControl: true, hovered: jobsHovered });
+					jobsPainted = lines.length > 0;
+					jobsHeaderRow = jobsPainted ? panelHeaderRow(theme, width, jobsCardTone(jobs)) : 0;
+					return lines;
 				},
 				invalidate() {
 					jobsHovered = false;
@@ -2246,10 +2249,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			};
 			const jobsPart = sidebarPart(tui, "jobs", { render: () => [], invalidate() {}, dispose() {} }, jobsRail);
-			// Elapsed time moves while a job runs; one frame a second is enough,
-			// and the digest's second bucket is what revalidates the cached section.
+			// Elapsed time moves while a job runs, and a finished tail must clear
+			// itself once its TTL expires with nothing running behind it; one frame
+			// a second is enough, and the digest's second bucket revalidates the
+			// cached section.
 			const jobsTimer = setInterval(() => {
-				if (runningJobs?.length) tui.requestRender();
+				const now = deps.now();
+				const fresh = (runningJobs ?? []).some((job) => job.status === undefined || now - (job.endedAt ?? 0) < JOBS_FINISHED_TTL_MS);
+				if (jobsPainted || fresh) tui.requestRender();
 			}, 1_000);
 			jobsTimer.unref?.();
 			// The header row carries everything that ticks every frame (model,

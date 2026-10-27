@@ -65,7 +65,66 @@ test("the collapse control is opt-in and the sort never mutates the snapshot", (
 	const snapshot = [{ id: "job-1", label: "Build runtime", startedAt: 10_000 }];
 	const lines = renderJobsCard(snapshot, plainTheme, 50, 100_000, { collapsed: false });
 	assert.doesNotMatch(lines.join("\n"), /Collapse|Expand/);
-	const sorted = widgetJobs(snapshot);
+	const sorted = widgetJobs(snapshot, 100_000);
 	assert.deepEqual(snapshot, [{ id: "job-1", label: "Build runtime", startedAt: 10_000 }]);
 	assert.equal(sorted[0]?.id, "job-1");
+});
+
+// Finished tails mirror the Agents card's results: an exit lingers for a
+// minute with the /gentle:jobs outcome glyph, its elapsed frozen at the end.
+
+const exitedJob = { id: "job-1", label: "Build runtime", startedAt: 10_000, status: "exited" as const, endedAt: 70_000, exitCode: 0 as number | null };
+
+function finishedJobs(): Array<typeof exitedJob> {
+	return [1, 2, 3, 4].map((n) => ({ ...exitedJob, id: `job-${n}`, label: `Job ${n}`, startedAt: n * 1_000, endedAt: 100_000 + n * 1_000 }));
+}
+
+test("a finished job lingers with a ✓ row and its elapsed frozen at the end", () => {
+	const lines = renderJobsCard([exitedJob], plainTheme, 50, 100_000, { collapsed: false });
+	const text = lines.join("\n");
+	assert.match(text, /✓\s+Build runtime/);
+	assert.match(text, /1m 0s/, "elapsed freezes at endedAt instead of ticking to 1m 30s");
+	assert.match(text, /1 finished/);
+	for (const line of lines) assert.ok(visibleWidth(stripAnsi(line)) <= 50, `row fits: ${stripAnsi(line)}`);
+});
+
+test("a nonzero exit paints ✗ and a stopped job paints –", () => {
+	const lines = renderJobsCard([
+		{ ...exitedJob, exitCode: 1 },
+		{ id: "job-2", label: "Watcher CI", startedAt: 5_000, status: "stopped", endedAt: 60_000 },
+	], plainTheme, 50, 100_000, { collapsed: false });
+	const text = lines.join("\n");
+	assert.match(text, /✗\s+Build runtime/);
+	assert.match(text, /–\s+Watcher CI/);
+	assert.match(text, /2 finished/);
+});
+
+test("finished jobs past the TTL paint nothing", () => {
+	// now - endedAt lands exactly on the TTL: not fresh anymore.
+	assert.deepEqual(renderJobsCard([{ ...exitedJob, endedAt: 40_000 }], plainTheme, 50, 100_000, { collapsed: false }), []);
+});
+
+test("at most the three newest finished jobs survive", () => {
+	const jobs = finishedJobs();
+	const shown = widgetJobs(jobs, 105_000);
+	assert.deepEqual(shown.map((job) => job.id), ["job-4", "job-3", "job-2"]);
+	assert.deepEqual(jobs, finishedJobs(), "the TTL filter never mutates the snapshot");
+});
+
+test("running entries sort before the finished tail and never expire", () => {
+	const snapshot = [
+		{ ...exitedJob, id: "done", label: "Old build", startedAt: 1_000 },
+		{ id: "old", label: "Old run", startedAt: 1_000 },
+		{ id: "new", label: "New run", startedAt: 50_000 },
+	];
+	const shown = widgetJobs(snapshot, 100_000);
+	assert.deepEqual(shown.map((job) => job.id), ["new", "old", "done"]);
+});
+
+test("the subtitle mixes running and finished counts", () => {
+	const lines = renderJobsCard([
+		{ id: "job-1", label: "New run", startedAt: 50_000 },
+		{ id: "job-2", label: "Watcher CI", startedAt: 5_000, status: "stopped", endedAt: 60_000 },
+	], plainTheme, 50, 100_000, { collapsed: false });
+	assert.match(lines.join("\n"), /1 running · 1 finished/);
 });

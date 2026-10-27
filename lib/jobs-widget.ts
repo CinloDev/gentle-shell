@@ -14,6 +14,11 @@ import { sanitizeTerminalText } from "./terminal-theme.ts";
 
 export const JOBS_GLYPH = JOB_GLYPH;
 
+// Finished jobs linger like the Agents card's results: newest 3 for a minute,
+// so an exit is visible long enough to read before the card empties itself.
+export const JOBS_FINISHED_TTL_MS = 60_000;
+const MAX_FINISHED = 3;
+
 export interface JobsWidgetOptions {
 	collapsed: boolean;
 	collapseKey?: string;
@@ -29,10 +34,13 @@ const META_ROLE = "dim";
 const GLYPH_GAP = "  ";
 const ELLIPSIS = "…";
 
-// Newest first, matching the /gentle:jobs running group and the old Status
-// group this card replaces.
-export function widgetJobs(jobs: readonly RunningJobDisplay[]): RunningJobDisplay[] {
-	return [...jobs].sort((a, b) => b.startedAt - a.startedAt);
+// Running jobs newest first, matching the /gentle:jobs running group and the
+// old Status group this card replaces; finished tails follow, newest first.
+export function widgetJobs(jobs: readonly RunningJobDisplay[], now: number): RunningJobDisplay[] {
+	const running = jobs.filter((job) => job.status === undefined).sort((a, b) => b.startedAt - a.startedAt);
+	const finished = jobs.filter((job) => job.status !== undefined && now - (job.endedAt ?? 0) < JOBS_FINISHED_TTL_MS)
+		.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, MAX_FINISHED);
+	return [...running, ...finished];
 }
 
 function clean(text: string): string {
@@ -52,8 +60,21 @@ function clip(text: string, width: number): string {
 	return `${clipped}${ELLIPSIS}`;
 }
 
+// The /gentle:jobs glyph roles: running keeps the spinner, exits mirror the
+// overlay's outcome marks.
+function glyph(job: RunningJobDisplay): [string, string] {
+	if (job.status === "stopped") return ["–", "dim"];
+	if (job.status === "exited") return job.exitCode === 0 ? ["✓", "success"] : ["✗", "error"];
+	return [JOBS_GLYPH, GLYPH_ROLE];
+}
+
 function counts(jobs: readonly RunningJobDisplay[]): string {
-	return jobs.length === 1 ? "1 running" : `${jobs.length} running`;
+	const running = jobs.filter((job) => job.status === undefined).length;
+	const finished = jobs.length - running;
+	const parts: string[] = [];
+	if (running > 0) parts.push(running === 1 ? "1 running" : `${running} running`);
+	if (finished > 0) parts.push(finished === 1 ? "1 finished" : `${finished} finished`);
+	return parts.join(" · ");
 }
 
 /** The tone the card paints, so a host can locate its header row. */
@@ -62,15 +83,17 @@ export function jobsCardTone(_jobs: readonly RunningJobDisplay[]): CardTone {
 }
 
 export function renderJobsCard(jobs: readonly RunningJobDisplay[], theme: CardTheme, width: number, now: number, options: JobsWidgetOptions): string[] {
-	const shown = widgetJobs(jobs);
+	const shown = widgetJobs(jobs, now);
 	if (shown.length === 0) return [];
 	const tone = jobsCardTone(shown);
 	const inner = panelInnerWidth(theme, width, tone);
 	const listed = options.collapsed ? [shown[0]!] : shown;
 	const body = listed.map((job) => {
-		const elapsed = formatJobDuration(Math.max(0, now - job.startedAt));
+		// A finished row freezes its elapsed at the end; a running one ticks.
+		const [mark, role] = glyph(job);
+		const elapsed = formatJobDuration(Math.max(0, (job.status === undefined ? now : job.endedAt ?? now) - job.startedAt));
 		const label = clip(clean(job.label), Math.max(0, inner - visibleWidth(elapsed) - GLYPH_GAP.length - 1));
-		const head = `${theme.fg(GLYPH_ROLE, JOBS_GLYPH)}${GLYPH_GAP}${theme.fg(NAME_ROLE, label)}`;
+		const head = `${theme.fg(role, mark)}${GLYPH_GAP}${theme.fg(NAME_ROLE, label)}`;
 		const tail = theme.fg(META_ROLE, " ".repeat(Math.max(1, inner - visibleWidth(head) - visibleWidth(elapsed))) + elapsed);
 		return `${head}${tail}`;
 	});
