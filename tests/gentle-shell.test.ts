@@ -24,6 +24,7 @@ import type { ShellBarTheme } from "../lib/shell-bar.ts";
 import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import { decodeReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { REVIEW_SIDEBAR_EVENT } from "../lib/review-sidebar-state.ts";
+import { isJobsSidebarSnapshot } from "../lib/jobs-sidebar-state.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import { resolveVisualSettings, writeVisualSettings } from "../lib/visual-customization-policy.ts";
 import { resolveAnimationPolicy } from "../lib/animation-policy.ts";
@@ -559,6 +560,12 @@ test("jobs snapshots feed their own rail card, keep one compact fallback, and re
 	} finally { component.dispose(); }
 });
 
+test("the jobs snapshot validator admits the finished-tail statuses", () => {
+	assert.ok(isJobsSidebarSnapshot({ jobs: [{ id: "job-1", label: "Spawn failed", startedAt: 1, status: "failed", endedAt: 60_000, exitCode: null }] }));
+	assert.ok(isJobsSidebarSnapshot({ jobs: [{ id: "job-2", label: "Stopped", startedAt: 1, status: "stopped", endedAt: 2 }] }));
+	assert.equal(isJobsSidebarSnapshot({ jobs: [{ id: "job-3", label: "Bad", startedAt: 1, status: "exploded" }] }), false);
+});
+
 test("hidden Status leaves only a jobs count in regular bottom and fullscreen header chrome", async (t) => {
 	const home = scopedDoubleEscCancelConfigHome(t);
 	writeVisualSettings({ ...resolveVisualSettings({ gentlePiConfigHome: home }).settings, statusPlacement: "hidden" }, { gentlePiConfigHome: home });
@@ -574,6 +581,9 @@ test("hidden Status leaves only a jobs count in regular bottom and fullscreen he
 		pi.events.emit("gentle-ai:jobs-sidebar", { sessionId: "shell-session", snapshot: { jobs: [{ id: "job-1", label: "CI for PR 1860", startedAt: 1 }] } });
 		assert.equal(component.render(80).join("\n"), "⧗ 1 job");
 		assert.doesNotMatch(component.render(80).join("\n"), /CI for PR|gpt-5/);
+		pi.events.emit("gentle-ai:jobs-sidebar", { sessionId: "shell-session", snapshot: { jobs: [{ id: "job-1", label: "CI for PR 1860", startedAt: 1, status: "exited", endedAt: Date.now(), exitCode: 0 }] } });
+		assert.doesNotMatch(component.render(80).join("\n"), /⧗/, "a finished-only tail never paints a ⧗ 0 jobs row");
+		pi.events.emit("gentle-ai:jobs-sidebar", { sessionId: "shell-session", snapshot: { jobs: [{ id: "job-1", label: "CI for PR 1860", startedAt: 1 }] } });
 		tui.mode = "fullscreen";
 		const header = sidebarState(tui as unknown as TUI).parts.get("header")!;
 		assert.match(header.render(160).join("\n"), /⧗ 1 job/);

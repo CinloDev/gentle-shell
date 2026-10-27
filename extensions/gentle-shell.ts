@@ -2296,8 +2296,10 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			}), { placement: "belowEditor" });
 			return { ...part,
 				render(width: number) {
-					if (visualSettings.statusPlacement === "hidden" && (tui as TUI & { mode?: string }).mode !== "fullscreen" && runningJobs?.length) {
-						return [truncateToWidth(theme.fg("muted", shellJobsCount(runningJobs.filter((job) => job.status === undefined).length)), width, "…")];
+					// Running-only: a finished tail must never paint a ⧗ 0 jobs row.
+					const compactRunningJobs = runningJobs?.filter((job) => job.status === undefined);
+					if (visualSettings.statusPlacement === "hidden" && (tui as TUI & { mode?: string }).mode !== "fullscreen" && compactRunningJobs?.length) {
+						return [truncateToWidth(theme.fg("muted", shellJobsCount(compactRunningJobs.length)), width, "…")];
 					}
 					const rows = part.render(width);
 					// Preserve a shrinkable exterior dock row, outside prompt/completion geometry.
