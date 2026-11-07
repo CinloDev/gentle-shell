@@ -414,7 +414,7 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
   nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
   frame(); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
   assert.match(stripAnsi(frame().lines.join("\n")), /real history/);
-  assert.match(stripAnsi(frame().lines.join("\n")), /▾ DIFF/);
+  assert.match(stripAnsi(frame().lines.join("\n")), /▾ CHANGES/);
   let current = frame();
   const scroll = boxes(current.root).find(box => typeof box.component.getContentWidth === "function").component;
   const clickHeader = () => {
@@ -435,22 +435,161 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
-test("Git selector switches history and changes without hidden or frame Git calls", async t => {
+test("turn end during initial Diff load waits and refreshes the selected root", async t => {
  const home = scopedDoubleEscCancelConfigHome(t);
- writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
- const calls: Array<{ root: string; args: string[] }> = [];
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "off", diff: "on" }));
  const { pi, handlers } = fakePi();
+ let release!: () => void, held = false, changed = false;
  gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
   activeProfile: () => undefined, rootExists: () => true,
-  gitRunner: root => async args => {
-   calls.push({ root, args });
-   const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? (root === "/main" ? "main\n" : "feature\n") : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${root} history\x1e\n` : args[0] === "status" ? ` M ${root === "/main" ? "main" : "worktree"}.ts\0` : args[0] === "diff" ? `1\t0\t${root === "/main" ? "main" : "worktree"}.ts\n` : "";
-   return { code: 0, stdout: output };
+  gitRunner: () => async args => {
+   if (args[0] === "status" && !held) { held = true; await new Promise<void>(resolve => { release = resolve; }); return { code: 0, stdout: " M old.ts\0" }; }
+   return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0\0" : args[0] === "rev-parse" ? "/repo\n" : args[0] === "status" && changed ? " M new.ts\0" : "" };
   },
  });
  const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
  const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
  const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  frame(); for (let i = 0; i < 100 && !held; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(held); changed = true; await fire(handlers, "agent_end", ctx);
+  release(); await changesSettled();
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("new.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(stripAnsi(frame().lines.join("\n")), /new\.ts/);
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Git history checkbox controls reads and ignores stale results", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "off", diff: "on" }));
+ const calls: string[][] = []; let hold = false, release: (() => void) | undefined, renders = 0;
+ const { pi, handlers, commands } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: () => async args => { calls.push(args); if (hold && args[0] === "-c") { hold = false; await new Promise<void>(resolve => { release = resolve; }); return { code: 0, stdout: "* \x1eabc\x1f\x1fstale history\x1e\n" }; } return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0\0" : args[0] === "symbolic-ref" ? "main" : args[0] === "rev-parse" ? "abc" : args[0] === "-c" ? "* \x1eabc\x1f\x1ffresh history\x1e\n" : args[0] === "status" ? " M preserved.ts\0" : "" }; },
+ });
+ const { ctx, ui, overlayReady } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() { renders++; } };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData); let pending: Promise<unknown> | undefined;
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  for (let i = 0; i < 10; i++) { frame(); await new Promise(resolve => setImmediate(resolve)); }
+  assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /fresh history/);
+  assert.match(stripAnsi(frame().lines.join("\n")), /preserved\.ts/);
+  assert.equal(calls.filter(args => args[0] === "-c" || args[0] === "symbolic-ref").length, 0, "initially disabled history does not load");
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(calls.length, 0, "initially disabled history stays idle");
+  pending = commands.get("gentle:customize")!.handler("", ctx); await overlayReady;
+  assert.ok(findCustomizeRow(ui, "Configure tabs")); ui.overlayView!.handleInput("\r");
+  ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B");
+  const toggle = async () => { const before = JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).gitHistory; ui.overlayView!.handleInput(" "); await new Promise(resolve => setImmediate(resolve)); assert.notEqual(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).gitHistory, before); };
+  calls.length = 0; await toggle(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh history/, "enabling initially disabled history loads it");
+  assert.equal(calls.filter(args => args[0] === "-c").length, 1);
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(calls.length, 0, "initial load adds no idle or frame queries");
+  await toggle();
+  assert.equal(calls.length, 0, "disabling loaded history starts no reads");
+  assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /fresh history/);
+  assert.match(stripAnsi(frame().lines.join("\n")), /preserved\.ts/);
+  await fire(handlers, "agent_end", ctx); await changesSettled();
+  assert.equal(calls.filter(args => args[0] === "-c" || args[0] === "symbolic-ref").length, 0, "disabled history does not refresh at turn end");
+  calls.length = 0; await toggle(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh history/);
+  assert.equal(calls.filter(args => args[0] === "-c").length, 1);
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(calls.length, 0);
+  hold = true; await fire(handlers, "agent_end", ctx); for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(release);
+  calls.length = 0; await toggle(); assert.equal(calls.length, 0, "disabling pending history starts no reads");
+  await toggle(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(args => args[0] === "-c").length, 1, "re-enable starts exactly one fresh load before stale completion");
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh history/);
+  assert.match(stripAnsi(frame().lines.join("\n")), /preserved\.ts/);
+  calls.length = 0; const before = renders; release(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(renders, before, "stale completion does not publish"); assert.equal(calls.length, 0, "stale completion starts no further reads");
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh history/); assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /stale history/);
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(calls.length, 0, "overlapping lifecycle adds no idle or frame queries");
+ } finally { ui.closeOverlay?.(); if (pending) await pending; footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Diff toggle refreshes selected root without frame queries", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "on", diff: "off" }));
+ const calls: string[][] = [];
+ let hold = false, release: (() => void) | undefined, currentFile = "toggle.ts", renders = 0;
+ const { pi, handlers, commands } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "5" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: () => async args => { calls.push(args); if (hold && args[0] === "status") { hold = false; await new Promise<void>(resolve => { release = resolve; }); return { code: 0, stdout: " M stale.ts\0" }; } return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0\0" : args[0] === "rev-parse" ? "/repo\n" : args[0] === "status" ? ` M ${currentFile}\0` : "" }; },
+ });
+ const { ctx, ui, overlayReady } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() { renders++; } };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ let pending: Promise<unknown> | undefined;
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  frame(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  pending = commands.get("gentle:customize")!.handler("", ctx); await overlayReady;
+  assert.ok(findCustomizeRow(ui, "Configure tabs")); ui.overlayView!.handleInput("\r");
+  ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B");
+  const toggle = async () => {
+   const before = JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).diff;
+   ui.overlayView!.handleInput(" "); await new Promise(resolve => setImmediate(resolve));
+   assert.notEqual(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).diff, before, "toggle action applied");
+  };
+  calls.length = 0; await toggle();
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("toggle.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(stripAnsi(frame().lines.join("\n")), /toggle\.ts/);
+  assert.equal(calls.filter(args => args[0] === "status").length, 1);
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  await toggle(); assert.equal(calls.length, 0, "disable starts no Git read");
+  hold = true; await toggle();
+  for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(release); calls.length = 0; await toggle();
+  assert.equal(calls.length, 0, "disable while pending starts no Git read");
+  currentFile = "fresh.ts"; await toggle();
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("fresh.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh\.ts/, "new scan completes before the older scan");
+  assert.equal(calls.filter(args => args[0] === "status").length, 1, "re-enable starts exactly one scan");
+  calls.length = 0; const beforeStale = renders;
+  release(); for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(renders, beforeStale, "stale scan does not publish or request a render");
+  assert.match(stripAnsi(frame().lines.join("\n")), /fresh\.ts/);
+  assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /stale\.ts/);
+  assert.equal(calls.length, 0, "stale scan makes no further Git queries");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(calls.length, 0, "no background polling after toggle even with a 5ms watch setting");
+ } finally { ui.closeOverlay?.(); if (pending) await pending; footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Git selector switches history and changes without hidden or frame Git calls", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+ const calls: Array<{ root: string; args: string[] }> = [];
+ let extra = false, hold = false, releaseLate: (() => void) | undefined, renders = 0;
+ const { pi, handlers } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: (root, limit) => async args => {
+   calls.push({ root, args });
+   if (hold && limit && root === "/repo" && args[0] === "status") { hold = false; await new Promise<void>(resolve => { releaseLate = resolve; }); }
+   const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? (root === "/main" ? "main\n" : "feature\n") : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${root} history\x1e\n` : args[0] === "status" ? ` M ${root === "/main" ? "main" : "worktree"}.ts\0${extra && root === "/repo" ? "?? created.ts\0" : ""}` : args[0] === "diff" ? `${root === "/main" ? "7\t3\tmain" : "1\t0\tworktree"}.ts\n` : "";
+   return { code: 0, stdout: output };
+  },
+ });
+ const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() { renders++; } };
  const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
  try {
   const frame = () => renderLayoutFrame(root, 160, 24, () => {});
@@ -466,16 +605,93 @@ test("Git selector switches history and changes without hidden or frame Git call
   const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
   const rows = () => scroll.render(50).map(stripAnsi);
   assert.match(rows().join("\n"), /WORKTREE/); assert.match(rows().join("\n"), /worktree\.ts/); assert.match(rows().join("\n"), /\/repo history/);
+  assert.match(rows().join("\n"), /\+1 -0 · partial counts/, "worktree totals are labeled partial");
+  extra = true;
+  await fire(handlers, "agent_end", ctx); await changesSettled();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  frame(); assert.match(rows().join("\n"), /created\.ts/, "turn end refreshes the visible selected worktree");
+  await fire(handlers, "agent_end", ctx); await changesSettled();
+  const beforeUnchanged = renders;
+  await fire(handlers, "agent_end", ctx); await changesSettled();
+  assert.equal(renders, beforeUnchanged, "unchanged turn does not request a render");
+  hold = true; await fire(handlers, "agent_end", ctx);
+  for (let i = 0; i < 100 && !releaseLate; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(releaseLate);
+  frame();
   const selector = rows().findIndex((line: string) => line.includes("WORKTREE"));
   assert.doesNotMatch(rows()[selector], /[╭╮▾▸✿]/, "selector is a standalone row, not a card header");
+  const selectorRow = rows()[selector];
+  assert.equal(selectorRow.indexOf("MAIN"), 50 - (selectorRow.indexOf("WORKTREE") + "WORKTREE".length), "root labels have symmetric rail insets");
   const mainX = rows()[selector].indexOf("MAIN");
   scroll.handleMouse({ type: "click", button: "left", x: mainX, y: selector, screenX: 110 + mainX, screenY: selector, width: 50, height: 20, shift: false, alt: false, ctrl: false });
-  frame(); for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  frame(); for (let i = 0; i < 100 && !rows().join("\n").includes("main.ts"); i++) { await new Promise(resolve => setTimeout(resolve, 10)); frame(); }
   assert.match(rows().join("\n"), /main\.ts/, JSON.stringify(calls)); assert.match(rows().join("\n"), /\/main history/); assert.doesNotMatch(rows().join("\n"), /worktree\.ts|\/repo history/);
+  const mainSelectedRow = rows()[selector];
+  assert.equal(mainSelectedRow.indexOf("MAIN"), selectorRow.indexOf("MAIN"), "MAIN remains stationary on selection");
+  assert.equal(mainSelectedRow.indexOf("WORKTREE"), selectorRow.indexOf("WORKTREE"), "WORKTREE remains stationary on selection");
+  assert.match(rows().join("\n"), /\+7 -3 · partial counts/, "selected main root supplies totals");
+  const beforeLate = renders; releaseLate!(); await changesSettled();
+  assert.equal(renders, beforeLate, "stale root result does not render");
+  frame(); assert.doesNotMatch(rows().join("\n"), /created\.ts|worktree\.ts/);
   assert.equal(calls.some(call => call.root === "/sibling"), false);
   calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
   navClick("MAIN"); frame(); calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  await fire(handlers, "agent_end", ctx); await changesSettled();
+  assert.equal(calls.some(call => call.root === "/main"), false, "hidden Git does not query the selected root");
+  navClick("GIT"); frame();
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("worktree.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  hold = true; releaseLate = undefined; await fire(handlers, "agent_end", ctx);
+  for (let i = 0; i < 100 && !releaseLate; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(releaseLate); footer.dispose();
+  const afterDispose = renders; releaseLate!(); await changesSettled();
+  assert.equal(renders, afterDispose, "disposed sidebar discards late results");
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Git root selector aligns with adjacent card edges and keeps click bounds", async t => {
+ const previousStyle = cardStyle(); const previousSurface = chromeSurface();
+ t.after(() => { setCardStyle(previousStyle); setChromeSurface(previousSurface); });
+ for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
+  const home = scopedDoubleEscCancelConfigHome(t);
+  writeCardStyle(style, { gentlePiConfigHome: home });
+  writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+  writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface }, { gentlePiConfigHome: home });
+  const { pi, handlers } = fakePi();
+  gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => undefined, rootExists: () => true, gitRunner: () => async args => ({ code: 0, stdout: args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? "feature\n" : args[0] === "-c" ? "* \x1eabc\x1f\x1fhistory\x1e\n" : "" }) });
+  const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+  const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+  const host = { mode: "fullscreen", terminal: { rows: 24, columns: 140 }, layoutRoot: root, requestRender() {} };
+  const painted = { ...plainTheme, fg: (role: string, text: string) => `\x1b[${role === "accent" ? 31 : 37}m${text}\x1b[39m`, bg: (_role: string, text: string) => `\x1b[48;5;22m${text}\x1b[49m` };
+  const footer = (ui.footerFactory as any)(host, painted, footerData);
+  try {
+   const frame = () => renderLayoutFrame(root, host.terminal.columns, 24, () => {});
+   const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+   const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+   const navRow = stripAnsi(nav.component.render(nav.rect.width)[0]);
+   nav.component.handleMouse({ type: "click", button: "left", x: navRow.indexOf("GIT"), y: 0, screenX: 0, screenY: 0, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false });
+   for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("WORKTREE"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+   const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+   const rows = () => scroll.render(50).map(stripAnsi);
+   const y = rows().findIndex((row: string) => row.includes("WORKTREE")); assert.ok(y >= 0, `${surface}/${style}: ${JSON.stringify(rows())}`);
+   const click = (x: number) => scroll.handleMouse({ type: "click", button: "left", x, y, screenX: x, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+   const first = rows()[y]; const main = first.indexOf("MAIN"), wt = first.indexOf("WORKTREE");
+   // Neon exposes both borders; float exposes its right edge via the painted
+   // background reset. Tinted panels instead use their full rendered row.
+   const rawCard = scroll.render(50).slice(y + 1).find((row: string) => surface === "transparent" ? /[╭▎]/.test(stripAnsi(row)) : stripAnsi(row).includes("GIT"));
+   assert.ok(rawCard, `${surface}/${style}: adjacent card`);
+   const card = stripAnsi(rawCard);
+   const left = surface === "transparent" ? Math.max(card.indexOf("╭"), card.indexOf("▎")) : 0;
+   const floatEnd = rawCard.lastIndexOf("\x1b[49m");
+   const right = surface === "transparent" ? (card.includes("╮") ? card.indexOf("╮") : stripAnsi(rawCard.slice(0, floatEnd)).length - 1) : card.length - 1;
+   assert.ok(left >= 0 && right > left, `${surface}/${style}: actual card edges`);
+   assert.equal((main - 1) - left, right - (wt + 8), `${surface}/${style} border inset`);
+   assert.equal(click(main - 1), undefined); assert.equal(click(wt + 8), undefined);
+   assert.equal(click(main)?.handled, true); frame();
+   const second = rows()[y]; assert.equal(second.indexOf("MAIN"), main); assert.equal(second.indexOf("WORKTREE"), wt);
+   assert.match(second, /\[MAIN\]/); assert.equal(click(wt + 7)?.handled, true); frame(); assert.match(rows()[y], /\[WORKTREE\]/);
+   host.terminal.columns = 139; assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /\[WORKTREE\]/);
+  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+ }
 });
 
 test("Git heading folds after history scroll on tinted and transparent rails", async t => {
@@ -503,7 +719,7 @@ test("Git heading folds after history scroll on tinted and transparent rails", a
    const event = (type: string, y: number, delta = 0) => ({ type, button: type === "click" ? "left" : "none", x: 8, y, screenX: 118, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: delta });
    const geometryRows = scroll.render(50).map(stripAnsi);
    const gitRow = geometryRows.findIndex((line: string) => /▾ GIT/.test(line));
-   const diffRow = geometryRows.findIndex((line: string) => /▾ DIFF/.test(line));
+   const diffRow = geometryRows.findIndex((line: string) => /▾ CHANGES/.test(line));
    assert.ok(diffRow >= 0);
    const cardSpan = diffRow - gitRow;
    const available = scroll.viewportHeight;
@@ -548,6 +764,48 @@ test("Git heading folds after history scroll on tinted and transparent rails", a
  }
 });
 
+test("Changes reports unavailable counts and keeps small viewport fold and file targets aligned", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "off", diff: "on" }));
+ let release!: () => void;
+ const { pi, handlers } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: () => async args => {
+   if (args[0] === "status") { await new Promise<void>(resolve => { release = resolve; }); return { code: 0, stdout: " M binary.dat\0" }; }
+   if (args[0] === "diff") return { code: 1, stdout: "" };
+   return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0\0" : "abc" };
+  },
+ });
+ const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 12, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 12, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  frame(); for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(release);
+  const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+  const rows = () => scroll.render(50).map(stripAnsi);
+  const click = (y: number) => scroll.handleMouse({ type: "click", button: "left", x: 8, y, screenX: 118, screenY: y, width: 50, height: 8, shift: false, alt: false, ctrl: false });
+  assert.match(rows().join("\n"), /Counts unavailable/);
+  release();
+  for (let i = 0; i < 100 && !rows().join("\n").includes("binary.dat"); i++) { await new Promise(resolve => setTimeout(resolve, 5)); frame(); }
+  assert.match(rows().join("\n"), /\+0 -0 · partial counts/);
+  assert.match(rows().join("\n"), /binary\.dat.*\[diff\]/);
+  assert.equal(click(rows().findIndex((line: string) => line.includes("partial counts")))?.handled, true);
+  assert.equal(ui.overlayView, undefined);
+  assert.equal(click(rows().findIndex((line: string) => line.includes("▾ CHANGES")))?.handled, true); frame();
+  assert.doesNotMatch(rows().join("\n"), /binary\.dat|partial counts/);
+  assert.equal(click(rows().findIndex((line: string) => line.includes("▸ CHANGES")))?.handled, true); frame();
+  assert.equal(click(rows().findIndex((line: string) => line.includes("binary.dat")))?.handled, true);
+  assert.ok(ui.overlayView); ui.closeOverlay?.();
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
 test("Git and Diff share the viewport, route border wheels independently, and fold", async t => {
  const home = scopedDoubleEscCancelConfigHome(t);
  writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
@@ -566,13 +824,20 @@ test("Git and Diff share the viewport, route border wheels independently, and fo
   const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
   const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
   nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
-  frame(); await fire(handlers, "agent_end", ctx); await changesSettled(); frame();
+  frame(); await fire(handlers, "agent_end", ctx); await changesSettled();
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("f00.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
   const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
   const rows = () => scroll.render(50).map(stripAnsi);
-  const heading = () => rows().findIndex((line: string) => /▾ DIFF/.test(line));
+  const heading = () => rows().findIndex((line: string) => /▾ CHANGES/.test(line));
   const mouse = (type: string, x: number, y: number, wheelDelta = 0) => ({ type, button: type === "click" ? "left" : "none", x, y, screenX: 110 + x, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false, wheelDelta });
+  assert.match(rows().join("\n"), /▾ CHANGES/);
+  assert.match(rows().join("\n"), /\+60 -30 · partial counts/);
+  const summaryRow = rows().findIndex((line: string) => line.includes("partial counts"));
+  assert.equal(scroll.handleMouse(mouse("click", 8, summaryRow))?.handled, true);
+  assert.equal(ui.overlayView, undefined, "summary does not open a file");
   assert.match(rows().join("\n"), /A dir\/f00\.ts +\+2 -1 \[diff\]/);
   const colored = scroll.render(50).join("\n");
+  assert.match(colored, /\x1b\[32m\+60\x1b\[39m \x1b\[31m-30\x1b\[39m/);
   assert.match(colored, /\x1b\[34mdir\/\x1b\[39m\x1b\[37mf00\.ts/);
   assert.match(colored, /\x1b\[32m\+2\x1b\[39m \x1b\[31m-1\x1b\[39m \x1b\[35m\[diff\]/);
   const before = heading(); assert.ok(before >= 8 && before <= 11, `Diff starts near the viewport midpoint, got ${before}`);
@@ -580,8 +845,8 @@ test("Git and Diff share the viewport, route border wheels independently, and fo
   assert.match(rows().join("\n"), /f29\.ts/); assert.doesNotMatch(rows().join("\n"), /f00\.ts/);
   assert.equal(scroll.scrollTop, 0);
   assert.equal(scroll.handleMouse(mouse("click", 8, heading()))?.handled, true); frame();
-  assert.match(rows().join("\n"), /▸ DIFF/); assert.doesNotMatch(rows().join("\n"), /f29\.ts/);
-  const collapsed = rows().findIndex((line: string) => /▸ DIFF/.test(line));
+  assert.match(rows().join("\n"), /▸ CHANGES/); assert.doesNotMatch(rows().join("\n"), /f29\.ts/);
+  const collapsed = rows().findIndex((line: string) => /▸ CHANGES/.test(line));
   assert.equal(scroll.handleMouse(mouse("click", 8, collapsed))?.handled, true); frame();
   const fileRow = rows().findIndex((line: string) => /f29\.ts/.test(line));
   scroll.handleMouse(mouse("click", 0, fileRow));

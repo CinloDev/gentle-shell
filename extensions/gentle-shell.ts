@@ -20,7 +20,7 @@ import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
 import { windowsProcessTreeKiller, type ProcessTreeKiller } from "../lib/native-review-cli.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, worktreeGitEnvironment, type WorktreeResolver, type WorktreeIdentity } from "../lib/session-worktree-registry.ts";
-import { CARD_STYLE, CARD_TONE, cardStyle, panelHeaderRow, renderCard, setCardStyle, type Card, type CardTheme } from "../lib/shell-card.ts";
+import { CARD_STYLE, CARD_TONE, cardStyle, panelHeaderRow, panelInnerWidth, renderCard, setCardStyle, type Card, type CardTheme } from "../lib/shell-card.ts";
 import { resolveCardStyle, writeCardStyle } from "../lib/card-style-policy.ts";
 import { CARD_CONTENT, resolveCardContent, setCardContent, writeCardContent } from "../lib/card-content-policy.ts";
 import { CommandPalette, commandsKey, type CommandPaletteResult } from "../lib/command-palette.ts";
@@ -2492,6 +2492,9 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	let currentContext: ExtensionContext | undefined;
 	let disposeFooter: (() => void) | undefined;
 	let gitHistory: SidebarGitHistory | undefined;
+	let refreshSidebarDiff: (() => Promise<void>) | undefined;
+	let toggleSidebarDiff: (() => void) | undefined;
+	let toggleSidebarHistory: (() => void) | undefined;
 	let review: ReviewSidebarSnapshot | undefined;
 	let runningJobs: RunningJobDisplay[] | undefined;
 	let jobsCollapsed = false;
@@ -2601,7 +2604,41 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			let selectedRoot = ctx.cwd;
 			let selectedModel: ChangesModel | undefined;
 			let selectedTracker: ChangesTracker | undefined;
+			let selectedStart: Promise<void> | undefined;
+			let diffGeneration = 0;
 			let history: SidebarGitHistory;
+			let historyEpoch = 0;
+			const toggleHistory = () => {
+				const epoch = ++historyEpoch, version = generation, root = selectedRoot;
+				history.setActive(false);
+				if (!valid(version) || tabsSettings.gitHistory !== "on") return;
+				history = new SidebarGitHistory(async args => epoch === historyEpoch ? guardedGit(root, version)(args) : { code: 128, stdout: "" }, async () => selectedModel?.digest, () => { if (valid(version) && epoch === historyEpoch) { invalidateSidebar(tui); tui.requestRender(); } });
+				gitHistory = history;
+				historyFrame = new SidebarGitFrameCache();
+				history.setActive(true);
+			};
+			toggleSidebarHistory = toggleHistory;
+			const startDiff = () => {
+				const version = generation, epoch = ++diffGeneration, root = selectedRoot;
+				if (!valid(version) || tabsSettings.diff !== "on") return;
+				const direct = new ChangesTracker(async args => epoch === diffGeneration ? guardedGit(root, version)(args) : { code: 128, stdout: "" }, untrackedLines(root), fileRevision(root));
+				selectedTracker = direct;
+				selectedStart = direct.start().then(() => {
+					if (valid(version) && epoch === diffGeneration && tabsSettings.diff === "on") { selectedModel = direct.model; invalidateSidebar(tui); tui.requestRender(); }
+				}).catch(() => {});
+			};
+			toggleSidebarDiff = () => { diffGeneration++; if (tabsSettings.diff === "on") startDiff(); };
+			const refreshDiff = async () => {
+				const version = generation, epoch = diffGeneration, direct = selectedTracker;
+				if (!valid(version) || tabsSettings.diff !== "on" || !direct) return;
+				await selectedStart;
+				if (!valid(version) || epoch !== diffGeneration || tabsSettings.diff !== "on" || direct !== selectedTracker) return;
+				const model = await direct.refresh();
+				if (!valid(version) || epoch !== diffGeneration || tabsSettings.diff !== "on" || direct !== selectedTracker || model.digest === selectedModel?.digest) return;
+				selectedModel = model;
+				invalidateSidebar(tui); tui.requestRender();
+			};
+			refreshSidebarDiff = refreshDiff;
 			const valid = (version: number) => aliveGit && gitActive && generation === version && currentContext === ctx && changes === tracker;
 			const guardedGit = (root: string, version: number): GitRunner => async args => valid(version) ? deps.gitRunner(root, 1024 * 1024)(args) : { code: 128, stdout: "" };
 			const activateRoot = () => {
@@ -2609,12 +2646,11 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				history?.setActive(false);
 				selectedModel = undefined;
 				historyFrame = new SidebarGitFrameCache();
-				selectedTracker = new ChangesTracker(guardedGit(root, version), untrackedLines(root), fileRevision(root));
-				const direct = selectedTracker;
-				history = new SidebarGitHistory(guardedGit(root, version), async () => selectedModel?.digest, () => { if (valid(version)) { invalidateSidebar(tui); tui.requestRender(); } });
-				gitHistory = history;
-				history.setActive(tabsSettings.gitHistory === "on");
-				if (tabsSettings.diff === "on") void direct.start().then(() => { if (valid(version)) { selectedModel = direct.model; invalidateSidebar(tui); tui.requestRender(); } }).catch(() => {});
+				diffGeneration++;
+				selectedTracker = undefined;
+				selectedStart = undefined;
+				toggleHistory();
+				if (tabsSettings.diff === "on") startDiff();
 				invalidateSidebar(tui); tui.requestRender();
 			};
 			history = new SidebarGitHistory(async () => ({ code: 128, stdout: "" }), async () => undefined, () => {});
@@ -2659,11 +2695,15 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			let diffOffset = 0, diffCollapsed = false, diffHovered = false, diffStart = 0, diffLength = 0;
 			const files = () => selectedModel?.files ?? [];
 			const selectorVisible = () => roots?.state === "ready" && roots.main !== roots.wt;
+			// Transparent cards render loose rows at the card's inner width, from
+			// the rail's left edge. Match the right inset at that width locally.
+			const selectorInset = () => visualSettings.surface === "transparent" ? 50 - (panelInnerWidth(theme, 50) + 2) : 0;
 			const selector = (width: number) => {
-				if (!selectorVisible() || roots?.state !== "ready" || width < 16) return "";
+				const inset = selectorInset();
+				if (!selectorVisible() || roots?.state !== "ready" || width < 16 + inset) return "";
 				const left = selectedRoot === roots.main ? "[MAIN]" : " MAIN ";
 				const right = selectedRoot === roots.wt ? "[WORKTREE]" : " WORKTREE ";
-				return theme.fg(selectedRoot === roots.main ? "accent" : "muted", left) + " ".repeat(width - left.length - right.length) + theme.fg(selectedRoot === roots.wt ? "accent" : "muted", right);
+				return " ".repeat(inset) + theme.fg(selectedRoot === roots.main ? "accent" : "muted", left) + " ".repeat(width - inset - left.length - right.length) + theme.fg(selectedRoot === roots.wt ? "accent" : "muted", right);
 			};
 			const gitCards: SidebarRail = {
 				surface: "panel",
@@ -2681,11 +2721,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					diffStart = rows.length;
 					if (showDiff) {
 						const list = files();
-						diffOffset = Math.min(diffOffset, Math.max(0, list.length - Math.max(0, diffHeight - 1)));
-						rows.push(renderPanelHeader(theme, width, { title: "Diff", count: `${list.length}`, open: !diffCollapsed, hovered: diffHovered }));
+						diffOffset = Math.min(diffOffset, Math.max(0, list.length - Math.max(0, diffHeight - 2)));
+						rows.push(renderPanelHeader(theme, width, { title: "Changes", count: `${list.length}`, open: !diffCollapsed, hovered: diffHovered }));
 						if (!diffCollapsed && diffHeight > 1) {
-							if (!list.length) rows.push(theme.fg("muted", "No changes."));
-							else for (const file of list.slice(diffOffset, diffOffset + diffHeight - 1)) {
+							// The shared tracker does not distinguish failed numstat or binary
+							// counts from zero, so its sums are necessarily provisional.
+							rows.push(selectedModel && selectedTracker?.statusRead
+								? truncateToWidth(`${theme.fg("success", `+${selectedModel.added}`)} ${theme.fg("error", `-${selectedModel.deleted}`)} ${theme.fg("muted", "· partial counts")}`, width, "…")
+								: theme.fg("muted", "Counts unavailable"));
+							if (diffHeight > 2 && !list.length && selectedTracker?.statusRead) rows.push(theme.fg("muted", "No changes."));
+							else for (const file of list.slice(diffOffset, diffOffset + Math.max(0, diffHeight - 2))) {
 								const status = { modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U" }[file.status];
 								const path = sanitizeTerminalText(file.path).replace(/[\r\n\t]/g, " ");
 								const suffix = `${file.countsUnavailable ? "" : `+${file.added} -${file.deleted} `}[diff]`;
@@ -2708,7 +2753,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				handleMouse(event) {
 					if (selectorVisible() && event.y === 0) {
 						if (event.type !== "click" || event.button !== "left" || roots?.state !== "ready") return undefined;
-						const main = 1, wt = event.width - 9;
+						if (event.width < 16 + selectorInset()) return undefined;
+						const main = selectorInset() + 1, wt = event.width - 9;
 						const root = event.x >= main && event.x < main + 4 ? roots.main : event.x >= wt && event.x < wt + 8 ? roots.wt : undefined;
 						if (!root) return undefined;
 						if (root !== selectedRoot) { selectedRoot = root; historyOffset = 0; diffOffset = 0; activateRoot(); }
@@ -2717,10 +2763,10 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					if (tabsSettings.diff !== "on" || event.y < diffStart) return gitRail.handleMouse?.({ ...event, y: event.y - Number(selectorVisible()) });
 					const row = event.y - diffStart;
 					if (event.type === "move" && event.button === "none") { diffHovered = row === 0; setSidebarHover(tui, diffHovered ? gitCards : undefined, diffHovered ? () => { diffHovered = false; tui.requestRender(); } : undefined); return { handled: true, render: true }; }
-					if (event.type === "wheel") { if (!diffCollapsed) diffOffset = Math.max(0, Math.min(Math.max(0, files().length - Math.max(0, diffLength - 1)), diffOffset + (event.wheelDelta ?? 0))); return { handled: true, render: true }; }
+					if (event.type === "wheel") { if (!diffCollapsed) diffOffset = Math.max(0, Math.min(Math.max(0, files().length - Math.max(0, diffLength - 2)), diffOffset + (event.wheelDelta ?? 0))); return { handled: true, render: true }; }
 					if (event.type !== "click" || event.button !== "left") return undefined;
 					if (row === 0) { diffCollapsed = !diffCollapsed; invalidateSidebar(tui); return { handled: true, render: true }; }
-					const file = files()[diffOffset + row - 1];
+					const file = row >= 2 ? files()[diffOffset + row - 2] : undefined;
 					if (file && !diffCollapsed && !diffOpening) {
 						diffOpening = true;
 						const root = selectedRoot, version = generation;
@@ -3063,6 +3109,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				statusRegion.dispose();
 				uninstall();
 				if (gitHistory === history) gitHistory = undefined;
+				if (refreshSidebarDiff === refreshDiff) { refreshSidebarDiff = undefined; toggleSidebarDiff = undefined; toggleSidebarHistory = undefined; }
 				unpaintPage();
 				part.dispose();
 				if (sidebarTui === tui) { sidebarTui = undefined; renderHost = undefined; groupedChangesOwner = () => false; }
@@ -3574,6 +3621,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				const current = resolveSidebarTabs(animationOptions);
 				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff });
 				tabsSettings = resolveSidebarTabs(animationOptions);
+				if (destination === "diff" && current.diff !== tabsSettings.diff) toggleSidebarDiff?.();
+				if (destination === "gitHistory" && current.gitHistory !== tabsSettings.gitHistory) toggleSidebarHistory?.();
 				if (sidebarTui) { invalidateSidebar(sidebarTui); sidebarTui.requestRender(); }
 			};
 			for (const [label, policy] of [["shown", "on"], ["hidden", "off"]] as const) add(
@@ -3901,6 +3950,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	pi.on("agent_end", async (_event, ctx) => {
 		// A slow or failing Git never holds the turn end.
 		trackChangeRefresh(refreshChanges(ctx));
+		if (currentContext === ctx) trackChangeRefresh(refreshSidebarDiff?.() ?? Promise.resolve());
 		void refreshUsage(ctx, false);
 	});
 	pi.on("model_select", (event, ctx) => {
