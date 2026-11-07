@@ -1204,6 +1204,65 @@ test("child parent-message tooling admits notifications and the active parent pr
 	assert.deepEqual(runtime.children[0].sent, [{ id: "n1", kind: "ack", accepted: true }, { id: "n2", kind: "ack", accepted: false, error: "task parent is not the active host session" }]);
 	await parent.fire("session_shutdown", ctx);
 });
+
+// #2266: a child with the forwarded job capability and owned IPC registers the
+// background job tools for its own session; the monitor stays parent-only.
+function childJobsChild(env: NodeJS.ProcessEnv, overrides: Partial<AgentsDeps> = {}) {
+	const child = fakePi();
+	const listeners = new Map<string, Array<(value: Record<string, unknown>) => void>>();
+	const frames: Array<Record<string, unknown>> = [];
+	gentleAgents(child.pi, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: "fixture", ...env }, {
+		childIpc: {
+			send: (frame: Record<string, unknown>) => { frames.push(frame); return true; },
+			on: (event: string, listener: (value: Record<string, unknown>) => void) => listeners.set(event, [...(listeners.get(event) ?? []), listener]),
+		},
+		...overrides,
+	});
+	return { child, frames, listeners };
+}
+
+test("a child with the forwarded job capability registers bash_background/job_list/job_stop privately, never the monitor", () => {
+	const jobs = fakeJobShell();
+	const { child } = childJobsChild({ GENTLE_PI_AGENTS_CHILD_JOBS: "1" }, { jobShell: jobs.shell, jobOutputDir: () => jobs.dir, now: () => 1_000 });
+	try {
+		assert.deepEqual([...child.tools.keys()].sort(), ["bash_background", "job_list", "job_stop", "subagent_parent_message"]);
+		assert.equal(child.tools.has("monitor"), false, "the monitor stays parent-only");
+	} finally { jobs.cleanup(); }
+});
+
+test("a child without the forwarded job capability keeps only parent messaging", () => {
+	const child = fakePi();
+	gentleAgents(child.pi, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_OWNED_IPC: "fixture" }, {
+		childIpc: { send: () => true, on: () => undefined },
+	});
+	assert.deepEqual([...child.tools.keys()], ["subagent_parent_message"]);
+});
+
+test("a child without owned IPC never registers background job tools even with the forwarded capability", () => {
+	const child = fakePi();
+	gentleAgents(child.pi, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_CHILD_JOBS: "1" });
+	assert.deepEqual([...child.tools.keys()], []);
+});
+
+test("a child reports its background job state to the parent and delivers the exit notice to its own session", async () => {
+	const jobs = fakeJobShell();
+	const { child, frames } = childJobsChild({ GENTLE_PI_AGENTS_CHILD_JOBS: "1" }, { jobShell: jobs.shell, jobOutputDir: () => jobs.dir, now: () => 1_000 });
+	const { ctx } = fakeContext();
+	try {
+		await child.tools.get("bash_background")!.execute("b1", { command: "gh run watch 1 --exit-status", label: "CI" }, undefined, undefined, ctx);
+		assert.deepEqual(frames.at(-1), { id: "j1", kind: "job", message: JSON.stringify({ running: 1, pending: true }) });
+		await child.fire("agent_settled", ctx);
+		assert.deepEqual(frames.at(-1), { id: "j2", kind: "job", message: JSON.stringify({ running: 1, pending: true }) }, "settlement reports the still-running job");
+		jobs.runs[0]!.exit(0);
+		await eventually(() => child.sent.some((entry) => entry.message.customType === "gentle-jobs.notice"), "the child delivers its own job exit notice");
+		assert.deepEqual(frames.at(-1), { id: "j3", kind: "job", message: JSON.stringify({ running: 0, pending: false }) }, "the settlement report clears the running count");
+		const notice = child.sent.find((entry) => entry.message.customType === "gentle-jobs.notice")!;
+		assert.deepEqual(notice.options, { deliverAs: "steer", triggerTurn: true });
+		assert.equal(notice.message.display, true);
+		assert.match(String(notice.message.content), /Background job job-1/);
+	} finally { jobs.cleanup(); }
+});
+
 for (const boundary of ["allowed", "env", "session", "replacement", "bus-throws", "no-spawn", "long-running"] as const) {
 	test(`local child composition through real extensions and RPC runner: ${boundary}`, async (t) => {
 		const discarded: number[] = [];
@@ -5021,6 +5080,179 @@ test("session transport startup failure cleans the constructed Windows-capable t
 	assert.equal(listenerCloses, 1);
 	assert.equal(registryCloses, 1);
 	assert.match((await h.tools.get("orchestrator_session_id")!.execute("id", {}, undefined, undefined, ctx)).content[0].text, /not ready/);
+});
+
+test("session transport startup failure re-arms exactly once on a later session event", async (t) => {
+	for (const mode of ["recovers", "fails-again", "first-succeeds", "agent-start"] as const) {
+		await t.test(mode, async () => {
+			const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+			const notices: Array<{ message: string; level: unknown }> = [];
+			ctx.ui.notify = (message, level) => { notices.push({ message, level }); };
+			let registries = 0, starts = 0, closes = 0;
+			const registry = { list: async () => [], listActivations: async () => [] };
+			runtime.deps.sessionTransport = {
+				createRegistry: async () => { registries++; return registry; },
+				createListener: () => ({ registry, start: async () => {
+					starts++;
+					if (mode !== "first-succeeds" && (starts === 1 || mode === "fails-again")) throw new Error("SECRET path token");
+				}, close: async () => { closes++; } }),
+				createClient: inertSessionTransport.createClient,
+			};
+			gentleAgents(h.pi, {}, runtime.deps);
+			await h.fire("session_start", ctx);
+			const id = async () => (await h.tools.get("orchestrator_session_id")!.execute("id", {}, undefined, undefined, ctx)).content[0].text;
+			const warning = { message: "Session transport startup failed: phase=listener diagnostics=unavailable.", level: "warning" };
+			if (mode === "first-succeeds") {
+				await eventually(() => starts === 1, "first startup");
+				await h.fire("turn_end", ctx);
+				await h.fire("agent_start", ctx);
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				assert.equal(registries, 1, "a live transport is never re-armed");
+				assert.deepEqual(notices, []);
+				await h.fire("session_shutdown", ctx);
+				return;
+			}
+			await eventually(() => notices.length === 1 && closes === 1, "first startup failure and cleanup");
+			assert.match(await id(), /not ready/);
+			await h.fire(mode === "agent-start" ? "agent_start" : "turn_end", ctx);
+			await eventually(() => starts === 2, "one re-arm attempt");
+			if (mode === "fails-again") {
+				await eventually(() => notices.length === 2 && closes === 2, "second failure warns again");
+				for (const event of ["turn_end", "agent_start", "turn_end"]) await h.fire(event, ctx);
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				assert.equal(registries, 2, "no further retries after the bounded re-arm");
+				assert.deepEqual(notices, [warning, warning]);
+				assert.match(await id(), /not ready/);
+			} else {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				assert.doesNotMatch(await id(), /not ready/, "re-armed transport is active");
+				await h.fire("turn_end", ctx);
+				assert.equal(registries, 2);
+				assert.deepEqual(notices, [warning]);
+			}
+			await h.fire("session_shutdown", ctx);
+		});
+	}
+});
+
+test("session transport re-arm stays bounded across shutdown, pending close, and session replacement races", async (t) => {
+	for (const mode of ["shutdown", "close-pending", "session-switch", "changed-id"] as const) {
+		await t.test(mode, async () => {
+			const h = fakePi(), runtime = deps(), { ctx } = fakeContext(), { ctx: other } = fakeContext();
+			Object.assign(other.sessionManager, { getSessionId: () => "s2" });
+			const notices: string[] = [];
+			ctx.ui.notify = (message) => { notices.push(message); };
+			other.ui.notify = (message) => { notices.push(message); };
+			const starts = new Map<string, number>();
+			let registries = 0, closes = 0;
+			let releaseClose: (() => void) | undefined;
+			const closeGate = mode === "close-pending" ? new Promise<void>((resolve) => { releaseClose = resolve; }) : undefined;
+			const registry = { list: async () => [], listActivations: async () => [] };
+			runtime.deps.sessionTransport = {
+				createRegistry: async () => { registries++; return registry; },
+				createListener: (_registry, sessionId) => ({ registry, start: async () => {
+					starts.set(sessionId, (starts.get(sessionId) ?? 0) + 1);
+					throw new Error("SECRET");
+				}, close: async () => { closes++; if (closes === 1) await closeGate; } }),
+				createClient: inertSessionTransport.createClient,
+			};
+			gentleAgents(h.pi, {}, runtime.deps);
+			await h.fire("session_start", ctx);
+			await eventually(() => notices.length === 1, "first startup failure");
+			const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+			if (mode === "shutdown") {
+				await Promise.all([h.fire("session_shutdown", ctx), h.fire("agent_start", ctx), h.fire("turn_end", ctx)]);
+				const after = registries;
+				for (const event of ["agent_start", "turn_end"]) await h.fire(event, ctx);
+				await settle();
+				assert.equal(starts.get("s1"), 1, "no listener starts after shutdown");
+				assert.equal(registries, after, "no startup begins after shutdown completed");
+				return;
+			}
+			if (mode === "close-pending") {
+				try {
+					await h.fire("turn_end", ctx);
+					await h.fire("agent_start", ctx);
+					await settle();
+					assert.equal(registries, 1, "no re-arm while the failed startup is still closing");
+				} finally {
+					// A failed assertion must not leave shutdown waiting on the gated close.
+					releaseClose!();
+				}
+				await settle();
+				await h.fire("turn_end", ctx);
+				await eventually(() => starts.get("s1") === 2, "exactly one re-arm after close resolves");
+				await eventually(() => notices.length === 2, "re-arm failure warns");
+				for (const event of ["turn_end", "agent_start"]) await h.fire(event, ctx);
+				await settle();
+				assert.equal(registries, 2);
+			}
+			if (mode === "session-switch") {
+				await settle();
+				await h.fire("session_start", other);
+				await eventually(() => notices.length === 2, "replacement session startup failure");
+				await settle();
+				await h.fire("turn_end", ctx);
+				await h.fire("agent_start", ctx);
+				await settle();
+				assert.equal(starts.get("s1"), 1, "the retired session is never re-armed");
+				assert.equal(starts.get("s2"), 1);
+				await h.fire("turn_end", other);
+				await eventually(() => starts.get("s2") === 2, "the replacement session gets its own single re-arm");
+				await eventually(() => notices.length === 3, "replacement re-arm failure warns");
+				for (const event of ["turn_end", "agent_start"]) await h.fire(event, other);
+				await settle();
+				assert.equal(starts.get("s2"), 2);
+				assert.equal(starts.get("s1"), 1);
+				await h.fire("session_shutdown", other);
+				return;
+			}
+			if (mode === "changed-id") {
+				await settle();
+				Object.assign(ctx.sessionManager, { getSessionId: () => "replacement" });
+				for (const event of ["turn_end", "agent_start"]) await h.fire(event, ctx);
+				await settle();
+				assert.equal(registries, 1, "a changed session id on the same manager is never re-armed");
+				assert.equal(notices.length, 1);
+			}
+			await h.fire("session_shutdown", ctx);
+		});
+	}
+});
+
+test("a failed presence start at session_start warns with a fixed code and clears presence", async (t) => {
+	const start = t.mock.method(PresencePublisher, "start", () => { throw new Error("SECRET C:\\Users\\private token"); });
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const notices: Array<{ message: string; level: unknown }> = [];
+	ctx.ui.notify = (message, level) => { notices.push({ message, level }); };
+	gentleAgents(h.pi, {}, runtime.deps);
+	await h.fire("session_start", ctx);
+	assert.ok(start.mock.callCount() >= 1);
+	assert.deepEqual(notices.filter((notice) => notice.message.includes("presence")), [{ message: "Session presence unavailable: phase=presence class=transport code=presence-cleared.", level: "warning" }]);
+	assert.ok(notices.every((notice) => !notice.message.includes("SECRET")));
+	await h.fire("session_shutdown", ctx);
+});
+
+test("Windows bootstrap stderr codes reach the startup warning without raw stderr", async () => {
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const notices: Array<{ message: string; level: unknown }> = [];
+	ctx.ui.notify = (message, level) => { notices.push({ message, level }); };
+	runtime.deps.sessionTransport = {
+		...inertSessionTransport,
+		createRegistry: async (_home, observe, observeBootstrap) => {
+			observeBootstrap?.("rejection-transport-assert-owned");
+			observeBootstrap?.("SECRET stderr" as never);
+			observe?.({ phase: "start", status: "succeeded", error: null, lastStartupMarker: "native-ready" });
+			observe?.({ phase: "initialize", status: "failed", error: { class: "rejected", code: "protocol" }, lastStartupMarker: "native-ready" });
+			observe?.({ phase: "cleanup", status: "succeeded", error: null, lastStartupMarker: "native-ready" });
+			throw new Error("SECRET");
+		},
+	};
+	gentleAgents(h.pi, {}, runtime.deps);
+	await h.fire("session_start", ctx);
+	await eventually(() => notices.length === 1, "startup warning");
+	await h.fire("session_shutdown", ctx);
+	assert.deepEqual(notices, [{ message: "Session transport startup failed: phase=initialize class=rejected code=protocol lastStartupMarker=native-ready bootstrap=rejection-transport-assert-owned.", level: "warning" }]);
 });
 
 test("registered task aliases persist independently of human names and curated state", async () => {
