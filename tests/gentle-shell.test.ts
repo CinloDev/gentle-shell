@@ -414,6 +414,7 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
   nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
   frame(); await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
   assert.match(stripAnsi(frame().lines.join("\n")), /real history/);
+  assert.match(stripAnsi(frame().lines.join("\n")), /▾ DIFF/);
   let current = frame();
   const scroll = boxes(current.root).find(box => typeof box.component.getContentWidth === "function").component;
   const clickHeader = () => {
@@ -431,6 +432,49 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
   assert.match(stripAnsi(current.lines.join("\n")), /real history/);
   const log = calls.find(c => c.args[0] === "-c")!;
   assert.equal(log.cwd, ctx.cwd); assert.equal(log.limit, 1024 * 1024); assert.equal(log.args.at(-1), "HEAD");
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Git selector switches history and changes without hidden or frame Git calls", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+ const calls: Array<{ root: string; args: string[] }> = [];
+ const { pi, handlers } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: root => async args => {
+   calls.push({ root, args });
+   const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? (root === "/main" ? "main\n" : "feature\n") : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${root} history\x1e\n` : args[0] === "status" ? ` M ${root === "/main" ? "main" : "worktree"}.ts\0` : args[0] === "diff" ? `1\t0\t${root === "/main" ? "main" : "worktree"}.ts\n` : "";
+   return { code: 0, stdout: output };
+  },
+ });
+ const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const navClick = (label: string) => {
+   const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes(label) && stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("GIT"));
+   const row = stripAnsi(nav.component.render(nav.rect.width)[0]);
+   return nav.component.handleMouse({ type: "click", button: "left", x: row.indexOf(label), y: 0, screenX: nav.rect.x + row.indexOf(label), screenY: nav.rect.y, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false });
+  };
+  calls.length = 0; for (let i = 0; i < 4; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  assert.equal(navClick("GIT")?.handled, true); frame(); for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(stripAnsi(frame().lines.join("\n")), /\[GIT\]/, "navigation must select Git before checking its contents");
+  const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+  const rows = () => scroll.render(50).map(stripAnsi);
+  assert.match(rows().join("\n"), /WORKTREE/); assert.match(rows().join("\n"), /worktree\.ts/); assert.match(rows().join("\n"), /\/repo history/);
+  const selector = rows().findIndex((line: string) => line.includes("WORKTREE"));
+  assert.doesNotMatch(rows()[selector], /[╭╮▾▸✿]/, "selector is a standalone row, not a card header");
+  const mainX = rows()[selector].indexOf("MAIN");
+  scroll.handleMouse({ type: "click", button: "left", x: mainX, y: selector, screenX: 110 + mainX, screenY: selector, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+  frame(); for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(rows().join("\n"), /main\.ts/, JSON.stringify(calls)); assert.match(rows().join("\n"), /\/main history/); assert.doesNotMatch(rows().join("\n"), /worktree\.ts|\/repo history/);
+  assert.equal(calls.some(call => call.root === "/sibling"), false);
+  calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  navClick("MAIN"); frame(); calls.length = 0; for (let i = 0; i < 5; i++) frame(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
@@ -457,6 +501,15 @@ test("Git heading folds after history scroll on tinted and transparent rails", a
    const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
    const heading = () => scroll.render(50).map(stripAnsi).findIndex((row: string) => /GIT[^\n]*feature/.test(row));
    const event = (type: string, y: number, delta = 0) => ({ type, button: type === "click" ? "left" : "none", x: 8, y, screenX: 118, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: delta });
+   const geometryRows = scroll.render(50).map(stripAnsi);
+   const gitRow = geometryRows.findIndex((line: string) => /▾ GIT/.test(line));
+   const diffRow = geometryRows.findIndex((line: string) => /▾ DIFF/.test(line));
+   assert.ok(diffRow >= 0);
+   const cardSpan = diffRow - gitRow;
+   const available = scroll.viewportHeight;
+   const separator = surface === "transparent" ? 1 : 0;
+   assert.ok(Math.abs(cardSpan - separator - (available - cardSpan)) <= 1, `${surface}/${style}: unequal card spans ${cardSpan - separator}/${available - cardSpan}`);
+   assert.ok(geometryRows.length <= 19, `${surface}/${style}: no viewport overflow`);
    assert.match(stripAnsi(frame().lines.join("\n")), /history 0/, surface);
    assert.doesNotMatch(frame().lines.join("\n"), /\x1b\[33mGIT/, surface);
    assert.equal(scroll.handleMouse(event("move", heading()))?.handled, true);
@@ -493,6 +546,100 @@ test("Git heading folds after history scroll on tinted and transparent rails", a
    assert.match(text, /▾ GIT[^\n]*feature/, surface); assert.match(text, /history 3/, surface);
   } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
  }
+});
+
+test("Git and Diff share the viewport, route border wheels independently, and fold", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+ const snapshots = [{ numstat: Array.from({ length: 30 }, (_, i) => `2\t1\tdir/f${String(i).padStart(2, "0")}.ts`).join("\n"), porcelain: Array.from({ length: 30 }, (_, i) => `${i === 0 ? "A " : " M"} dir/f${String(i).padStart(2, "0")}.ts\0`).join("") }];
+ const { pi, handlers } = fakePi(snapshots);
+ const calls: string[] = [];
+ let holdStatus = false, releaseStatus: (() => void) | undefined;
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => undefined, rootExists: () => true, resolveWorktree: () => ({ root: "/repo", commonDir: "/repo/.git" }) as never, gitRunner: root => async args => { calls.push(`${root}:${args[0]}`); const porcelain = snapshots[0]!.porcelain; if (holdStatus && args[0] === "status") { holdStatus = false; await new Promise<void>(resolve => { releaseStatus = resolve; }); } return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0branch refs/heads/main\0\0worktree /other\0branch refs/heads/other\0\0" : args[0] === "status" ? porcelain : args[0] === "diff" ? snapshots[0]!.numstat : args[0] === "symbolic-ref" ? "main" : "abc" }; } });
+ const { ctx, ui } = fakeContext({ entries: [{ type: "custom", customType: "gentle-pi.session-worktree/v1", data: { sessionId: "shell-session", root: "/other", evidence: "test" } }] }); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const colorTheme = { ...plainTheme, fg: (role: string, text: string) => `\x1b[${({ muted: 34, text: 37, success: 32, error: 31, accent: 35 } as Record<string, number>)[role] ?? 36}m${text}\x1b[39m` };
+ const footer = (ui.footerFactory as any)(host, colorTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  frame(); await fire(handlers, "agent_end", ctx); await changesSettled(); frame();
+  const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+  const rows = () => scroll.render(50).map(stripAnsi);
+  const heading = () => rows().findIndex((line: string) => /▾ DIFF/.test(line));
+  const mouse = (type: string, x: number, y: number, wheelDelta = 0) => ({ type, button: type === "click" ? "left" : "none", x, y, screenX: 110 + x, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false, wheelDelta });
+  assert.match(rows().join("\n"), /A dir\/f00\.ts +\+2 -1 \[diff\]/);
+  const colored = scroll.render(50).join("\n");
+  assert.match(colored, /\x1b\[34mdir\/\x1b\[39m\x1b\[37mf00\.ts/);
+  assert.match(colored, /\x1b\[32m\+2\x1b\[39m \x1b\[31m-1\x1b\[39m \x1b\[35m\[diff\]/);
+  const before = heading(); assert.ok(before >= 8 && before <= 11, `Diff starts near the viewport midpoint, got ${before}`);
+  assert.equal(scroll.handleMouse(mouse("wheel", 0, before + 1, 999))?.handled, true); frame();
+  assert.match(rows().join("\n"), /f29\.ts/); assert.doesNotMatch(rows().join("\n"), /f00\.ts/);
+  assert.equal(scroll.scrollTop, 0);
+  assert.equal(scroll.handleMouse(mouse("click", 8, heading()))?.handled, true); frame();
+  assert.match(rows().join("\n"), /▸ DIFF/); assert.doesNotMatch(rows().join("\n"), /f29\.ts/);
+  const collapsed = rows().findIndex((line: string) => /▸ DIFF/.test(line));
+  assert.equal(scroll.handleMouse(mouse("click", 8, collapsed))?.handled, true); frame();
+  const fileRow = rows().findIndex((line: string) => /f29\.ts/.test(line));
+  scroll.handleMouse(mouse("click", 0, fileRow));
+  assert.equal(ui.overlayView, undefined, "card border cannot open a file");
+  assert.equal(scroll.handleMouse(mouse("click", 8, fileRow))?.handled, true);
+  assert.ok(ui.overlayView, "a file opens the Changes overlay");
+  const overlayText = stripAnsi(ui.overlayView!.render(80).join("\n"));
+  assert.match(overlayText, /dir\/f29\.ts/);
+  assert.doesNotMatch(overlayText, /other/, "sidebar overlay excludes other registered roots");
+  holdStatus = true;
+  ui.overlayView!.handleInput("r"); await new Promise(resolve => setImmediate(resolve));
+  assert.ok(releaseStatus);
+  snapshots[0]!.porcelain += " M newer.ts\0";
+  ui.overlayView!.handleInput("r"); await new Promise(resolve => setImmediate(resolve));
+  releaseStatus!();
+  for (let attempt = 0; attempt < 100 && !stripAnsi(ui.overlayView!.render(80).join("\n")).includes("newer.ts"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(stripAnsi(ui.overlayView!.render(80).join("\n")), /newer\.ts/, "overlapping refreshes retain the newer result");
+  calls.length = 0;
+  ui.overlayView!.handleInput("r"); await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.some(call => call === "/repo:status"));
+  assert.equal(calls.some(call => call.startsWith("/other:")), false, "overlay refresh does not scan other roots");
+  const closedOverlay = ui.overlayView;
+  scroll.handleMouse(mouse("click", 8, fileRow));
+  assert.equal(ui.overlayView, closedOverlay, "repeated clicks cannot stack overlays");
+  holdStatus = true; releaseStatus = undefined;
+  closedOverlay!.handleInput("r");
+  for (let attempt = 0; attempt < 100 && !releaseStatus; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(releaseStatus);
+  closedOverlay!.handleInput("r");
+  closedOverlay!.handleInput("q");
+  await new Promise(resolve => setImmediate(resolve));
+  const closedText = stripAnsi(closedOverlay!.render(80).join("\n"));
+  calls.length = 0;
+  releaseStatus!(); await new Promise(resolve => setTimeout(resolve, 50));
+  closedOverlay!.handleInput("r"); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [], "ordinary close cancels queued and future refreshes");
+  assert.equal(stripAnsi(closedOverlay!.render(80).join("\n")), closedText, "ordinary close discards late results");
+  scroll.handleMouse(mouse("click", 8, fileRow));
+  const firstOverlay = ui.overlayView;
+  assert.notEqual(firstOverlay, closedOverlay, "a closed overlay can be reopened");
+  holdStatus = true; releaseStatus = undefined;
+  firstOverlay!.handleInput("r");
+  for (let attempt = 0; attempt < 100 && !releaseStatus; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(releaseStatus, "refresh is in flight");
+  firstOverlay!.handleInput("r");
+  const replacement = fakeContext();
+  await fire(handlers, "session_start", replacement.ctx);
+  const beforeLate = stripAnsi(firstOverlay!.render(80).join("\n"));
+  calls.length = 0;
+  releaseStatus!(); await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(stripAnsi(firstOverlay!.render(80).join("\n")), beforeLate, "late refresh cannot update a replaced session");
+  assert.deepEqual(calls, [], "session replacement cancels queued refreshes");
+  const previousCalls = ui.widgetSets; calls.length = 0;
+  firstOverlay!.handleInput("r"); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [], "closed session cannot start a refresh");
+  assert.equal(ui.widgetSets, previousCalls, "closed session cannot update its widgets from an open overlay");
+  ui.closeOverlay?.();
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
 test("disabled destinations fall back to MAIN without changing saved preferences", async t => {
@@ -3798,15 +3945,25 @@ test("customize Layout persists global Tabs and preserves Task summary", async (
 	for (const name of ["MAIN", "GIT", "TREE", "PROFILE", "MEMORY", "STATS"]) assert.match(frame, new RegExp(name));
 	assert.match(frame, /MAIN\s+● on\s+○ off/);
 	assert.match(frame, /GIT\s+● on\s+○ off/);
-	assert.match(frame, /Git history · active/);
-	assert.doesNotMatch(frame, /\[.\] Git history|Diff/);
+	assert.match(frame, /\[x\] Git history/);
+	assert.match(frame, /\[x\] Diff/);
+	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput(" ");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).gitHistory, "off");
+	assert.match(ui.overlayView!.render(90).join("\n"), /\[ \] Git history/);
+	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput(" ");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).diff, "off");
+	ui.overlayView!.handleInput("\x1b[A"); ui.overlayView!.handleInput(" "); await new Promise(resolve => setImmediate(resolve));
+	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput(" "); await new Promise(resolve => setImmediate(resolve));
+	ui.overlayView!.handleInput("\x1b[A"); ui.overlayView!.handleInput("\x1b[A"); ui.overlayView!.handleInput("\x1b[A");
 	ui.overlayView!.handleInput("\x1b[C");
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).main, "off");
 	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[C");
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).git, "off");
-	assert.doesNotMatch(ui.overlayView!.render(90).join("\n"), /Git history · active/);
+	assert.doesNotMatch(ui.overlayView!.render(90).join("\n"), /\[x\] Git history|\[x\] Diff/);
 	ui.overlayView!.handleInput("\x1b");
 	assert.match(ui.overlayView!.render(90).join("\n"), /▸\s+Configure tabs/);
 	await customizeAction(ui, "Tabs: hidden");
@@ -5672,6 +5829,26 @@ test("explicit registration validates the clone, and a clean registered root sho
 	assert.match(ui.notices.join("\n"), /No uncommitted changes/);
 	assert.equal(ui.overlay, undefined);
 	await fire(handlers, "session_shutdown", ctx);
+});
+
+test("native Changes preserves overlapping refresh coalescing", async () => {
+ const { pi, handlers, commands } = fakePi();
+ let hold = false, release: (() => void) | undefined, count = 0;
+ gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => undefined, rootExists: () => true, resolveWorktree: () => ({ root: "/repo", commonDir: "/repo/.git" }) as never, gitRunner: () => async args => {
+  if (args[0] === "status") { count++; if (hold) { hold = false; await new Promise<void>(resolve => { release = resolve; }); } return { code: 0, stdout: " M file.ts\0" }; }
+  return { code: 0, stdout: args[0] === "worktree" ? "worktree /repo\0branch refs/heads/main\0\0" : args[0] === "diff" ? "" : "main" };
+ } });
+ const { ctx, ui, overlayReady } = fakeContext();
+ await fire(handlers, "session_start", ctx);
+ const opened = commands.get("gentle:changes")!.handler("", ctx); await overlayReady;
+ try {
+  const view = ui.overlayView!; view.handleInput("\r"); await new Promise(resolve => setTimeout(resolve, 20));
+  hold = true; view.handleInput("r");
+  for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(release); view.handleInput("r"); const before = count; release!();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(count, before, "native tracker preserves baseline overlap behavior");
+ } finally { ui.closeOverlay?.(); await opened; await fire(handlers, "session_shutdown", ctx); }
 });
 
 test("a registered worktree opens Changes as its own group", async () => {

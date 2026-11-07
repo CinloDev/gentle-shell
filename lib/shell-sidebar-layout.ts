@@ -302,7 +302,7 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 		const contentY = scroll.scrollTop + event.y;
 		const hit = current.hits.find((candidate) => contentY >= candidate.startY && contentY < candidate.startY + candidate.height);
 		if (!hit || (hit.key === "$destination" ? items.find(item => item.id === current.destination)?.rail : state.parts.get(hit.key)) !== hit.component) return undefined;
-		if (!hit.wholeRow && (event.x < hit.x || event.x >= hit.x + hit.width)) return undefined;
+		if (!hit.wholeRow && !(hit.key === "$destination" && event.type === "wheel") && (event.x < hit.x || event.x >= hit.x + hit.width)) return undefined;
 		// The part sees the event in the frame it rendered: its own width and all its rows.
 		return hit.component.handleMouse?.({
 			...event,
@@ -458,20 +458,31 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 					const layout = (section.component as SidebarRail).cardGroups?.(renderWidth) ?? { groups: [{ start: 0, end: section.lines.length }] };
 					const geometry = cardGeometry(theme, contentWidth, style);
 					const indent = " ".repeat(PANEL_ROW_INDENT);
+					const looseRows = new Set(layout.loose ?? []);
+					let nextRow = 0;
+					const appendLoose = (until: number) => {
+						for (; nextRow < until; nextRow++) {
+							if (!looseRows.has(nextRow)) continue;
+							const line = section.lines[nextRow] ?? "";
+							const top = railLines.length;
+							railLines.push(truncateToWidth(line, contentWidth, "…"));
+							hits.push({ key: section.key, component: section.component, startY: top, height: 1, width: renderWidth, x: 0, row: nextRow, frameWidth: renderWidth, frameHeight: section.lines.length });
+						}
+					};
 					layout.groups.forEach((group, index) => {
+						appendLoose(group.start);
 						if (index > 0 && cardGap()) railLines.push("");
 						const body = section.lines.slice(group.start + 1, group.end).map((row) => row.startsWith(indent) ? row.slice(PANEL_ROW_INDENT) : row);
-						while (body.length && body[body.length - 1]?.trim() === "") body.pop();
+						if (section.key !== "$destination") while (body.length && body[body.length - 1]?.trim() === "") body.pop();
 						const top = railLines.length;
 						railLines.push(...sectionCardRows(headerParts(section.lines[group.start] ?? ""), body, theme, contentWidth));
 						// The title row folds the section like its header; body rows keep their own rows.
 						const frame = { frameWidth: renderWidth, frameHeight: section.lines.length };
 						hits.push({ key: section.key, component: section.component, startY: top + geometry.headerRow, height: 1, width: renderWidth, x: geometry.headerX, row: group.start, wholeRow: true, ...frame });
-						if (body.length) hits.push({ key: section.key, component: section.component, startY: top + geometry.bodyRow, height: body.length, width: renderWidth - PANEL_ROW_INDENT, x: geometry.bodyX - PANEL_ROW_INDENT, row: group.start + 1, ...frame });
+						if (body.length) hits.push({ key: section.key, component: section.component, startY: top + geometry.bodyRow, height: body.length, width: renderWidth - PANEL_ROW_INDENT, x: geometry.bodyX - (section.key === "$destination" ? 0 : PANEL_ROW_INDENT), row: group.start + 1, ...frame });
+						nextRow = group.end;
 					});
-					const loose = (layout.loose ?? []).map((row) => section.lines[row] ?? "").filter((row) => row.trim() !== "");
-					if (loose.length && sectionGap(density())) railLines.push("");
-					railLines.push(...loose.map((row) => truncateToWidth(row.trimEnd(), contentWidth, "…")));
+					appendLoose(section.lines.length);
 					continue;
 				}
 				const startY = railLines.length;

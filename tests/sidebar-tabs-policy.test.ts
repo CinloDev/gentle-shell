@@ -19,6 +19,22 @@ test("destination preferences persist independently of global Tabs and legacy fi
  assert.deepEqual([resolveSidebarTabs(options).policy, resolveSidebarTabs(options).main, resolveSidebarTabs(options).git], ["on", "off", "on"]);
 });
 
+test("Git card choices persist independently and legacy preferences enable both", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-cards-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ const path = join(home, "sidebar-tabs.json");
+ for (const raw of ['{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"off","git":"on"}']) {
+  writeFileSync(path, raw);
+  const result = resolveSidebarTabs(options);
+  assert.deepEqual([result.malformed, result.gitHistory, result.diff], [false, "on", "on"]);
+ }
+ writeSidebarTabs("on", options, { main: "off", git: "on", gitHistory: "off", diff: "on" });
+ writeSidebarTabs("off", options);
+ const result = resolveSidebarTabs(options);
+ assert.deepEqual([result.policy, result.main, result.git, result.gitHistory, result.diff], ["off", "off", "on", "off", "on"]);
+});
+
 test("global Tabs defaults off, persists both choices, and refuses malformed files", (t) => {
  const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-"));
  t.after(() => rmSync(home, { recursive: true, force: true }));

@@ -477,6 +477,26 @@ test("rail dispatches a clipped, scroll-translated left click to only the matchi
 	assert.equal(scroll.handleMouse(mouse("click", "left", headerY)), undefined, "disposed rails are inert");
 });
 
+test("transparent ordinary card body retains its original mouse coordinates and bounds", (t) => {
+	const previous = chromeSurface();
+	setChromeSurface("transparent");
+	t.after(() => setChromeSurface(previous));
+	const f = fixture();
+	const received: TuiMouseEvent[] = [];
+	sidebarPart(f.tui, "todo", { render: () => ["TODO", "body"], invalidate() {}, cardGroups: () => ({ groups: [{ start: 0, end: 2 }] }), handleMouse(event: TuiMouseEvent) { received.push(event); return { handled: true }; } });
+	t.after(installSidebar(f.tui, theme));
+	const scroll = rail(f);
+	const lines = scroll.render(50);
+	scroll.updateLayout(lines.length + 20, lines.length, () => {});
+	const y = lines.findIndex(line => line.includes("body"));
+	const event = (type: "click" | "wheel", x: number): TuiMouseEvent => ({ type, button: type === "click" ? "left" : "none", wheelDelta: 1, x, y, screenX: x, screenY: y, width: 50, height: lines.length, shift: false, alt: false, ctrl: false });
+	scroll.handleMouse(event("click", 0));
+	assert.equal(received.at(-1)?.x, 0);
+	const count = received.length;
+	scroll.handleMouse(event("wheel", 49));
+	assert.equal(received.length, count, "wheel outside the body falls back to the rail");
+});
+
 test("rail rejects removed or replaced parts before cached geometry is prepared again", (t) => {
 	const f = fixture();
 	let originalClicks = 0;
