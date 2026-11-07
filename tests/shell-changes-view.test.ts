@@ -87,6 +87,16 @@ test("WorktreeChangesView paints the shared hover role over an unselected row, n
 	assert.doesNotMatch(component.render(80)[2]!, /<warning>/, "leaving the other row clears its hover");
 });
 
+test("worktree overlay opens the requested file and loads only its preview", async () => {
+ const trees = [{ root: "/repo", branch: "main", model: changesModel([file("a.ts", 1, 0), file("b.ts", 2, 0)]) }];
+ const loaded: string[] = [];
+ const component = new WorktreeChangesView(trees, { theme: plainTheme, rows: 10, initial: { root: "/repo", path: "b.ts" }, loadDiff: async (_root, target) => { loaded.push(target.path); return "+chosen"; }, onOpen() {}, onClose() {}, onRefresh() {}, requestRender() {} });
+ await settle();
+ assert.deepEqual(loaded, ["b.ts"]);
+ assert.match(component.render(80).join("\n"), /\+chosen/);
+ component.dispose();
+});
+
 test("worktree accordion keeps groups and nested files beside a framed lazy diff", async () => {
 	const trees = ["/main", "/linked"].map((root) => ({ root, branch: root === "/main" ? "main" : undefined, model: changesModel([file("same.ts", 1, 0)]) }));
 	const loaded: string[] = [];
@@ -759,6 +769,74 @@ test("ChangesView.update keeps the selected file, reloads moved diffs, and survi
 	component.handleInput("o");
 });
 
+test("long Unicode diff content wraps into scrollable visual rows and reflows on resize", async () => {
+	const content = `+    ${"界abc".repeat(60)}END`;
+	const theme = { fg: (role: string, text: string) => role === "toolDiffAdded" ? `\x1b[32m${text}\x1b[39m` : text };
+	const component = new WorktreeChangesView([{ root: "/repo", branch: "main", model: changesModel([file("a.ts", 1, 0)]) }], {
+		initial: { root: "/repo", path: "a.ts" }, theme, rows: 8, loadDiff: async () => content,
+		onOpen() {}, onClose() {}, onRefresh() {}, requestRender() {},
+	});
+	await settle();
+	const first = component.render(80);
+	assert.match(first[1]!, /M a\.ts/);
+	assert.match(first[2]!, /\x1b\[32m\+    /);
+	assert.doesNotMatch(first.slice(2, 6).join("\n"), /…/);
+	assert.deepEqual(component.handleMouse(mouse("wheel", 50, 2, 1, 8)), { handled: true, render: true });
+	assert.match(component.render(80)[1]!, /M a\.ts/);
+	component.handleInput("F");
+	component.render(100);
+	component.handleInput("\x0b");
+	const wide = component.render(100).map(stripAnsi);
+	assert.match(wide.join("\n"), /END/);
+	assert.match(wide[2]!, /\+    /);
+	for (const line of wide) assert.equal(visibleWidth(line), 100);
+});
+
+test("wrapped diff preserves every colored character and space across visual rows", async () => {
+	const content = `+   ${"abc 界  xyz ".repeat(30)}tail  `;
+	const theme = { fg: (role: string, text: string) => role === "toolDiffAdded" ? `\x1b[32m${text}\x1b[39m` : text };
+	const { view: component } = view({ theme, rows: 5, loadDiff: async () => content }, [file("a.ts", 1, 0)]);
+	await settle();
+	let recovered = "";
+	for (let index = 0; index < 100; index++) {
+		const screen = component.render(80);
+		assert.match(screen[1]!, /M a\.ts/);
+		const row = screen[2]!;
+		const colored = row.match(/\x1b\[32m([^\x1b]*)/);
+		assert.ok(colored, "every continuation keeps the addition theme");
+		recovered += colored[1];
+		const moved = component.handleMouse(mouse("wheel", 50, 2, 1, 5));
+		if (!moved?.render) break;
+	}
+	assert.equal(recovered, content);
+});
+
+test("repeated preview renders reuse wrapping until width or content changes", async () => {
+	const content = `+${"界 cache ".repeat(100)}end`;
+	let loads = 0;
+	const { view: component } = view({ rows: 8, loadDiff: async () => { loads++; return content; } }, [file("a.ts", 1, 0)]);
+	await settle();
+	const original = Intl.Segmenter.prototype.segment;
+	let fullLineSegments = 0;
+	Intl.Segmenter.prototype.segment = function(input: string) {
+		if (input.includes(content)) fullLineSegments++;
+		return original.call(this, input);
+	};
+	try {
+		component.render(80);
+		const first = fullLineSegments;
+		assert.ok(first > 0, "the first render measures the complete diff line");
+		component.render(80);
+		assert.equal(fullLineSegments, first, "unchanged frames do not rewrap the full line");
+		component.render(100);
+		assert.ok(fullLineSegments > first, "a new width rewraps the line");
+		assert.equal(loads, 1, "resizing does not reload the diff");
+	} finally {
+		Intl.Segmenter.prototype.segment = original;
+		component.dispose();
+	}
+});
+
 // Diff-only mode (F): the file column and its separator leave so the diff
 // spans the whole inner width; j/k still walk files, esc returns first.
 function diffOnlyView(overrides: { rows?: number; loadDiff?: (root: string, target: ChangedFile) => Promise<string> } = {}) {
@@ -785,7 +863,8 @@ test("F hides the file list and its separator so the diff spans the full inner w
 	await settle();
 	const normal = component.render(100);
 	assert.match(normal[1]!, /^│ +▾ main · main +│ M a\.ts +│$/, "the normal view keeps the two-pane layout");
-	assert.match(stripAnsi(normal[2]!), /^│ ▸   M a\.ts .*│ \+\/main:a\.ts x+…│$/, "the narrow diff pane clips a long line");
+	assert.match(stripAnsi(normal[2]!), /^│ ▸   M a\.ts .*│ \+\/main:a\.ts x+│$/, "the narrow diff pane wraps a long line");
+	assert.match(stripAnsi(normal[3]!), /│ x+ +│$/, "the continuation remains visible");
 	assert.match(normal[8]!, /F diff only/);
 	component.handleInput("F");
 	await settle();

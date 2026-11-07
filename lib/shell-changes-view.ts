@@ -1,4 +1,4 @@
-import { Key, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { Key, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { basename, posix } from "node:path";
 import { CHANGE_STATUS, DIFF_TOO_LARGE, changesSummary, type ChangedFile, type ChangesModel, type WorktreeChanges } from "./shell-changes.ts";
@@ -182,6 +182,7 @@ function fingerprint(file: ChangedFile): string {
 }
 
 export interface WorktreeChangesViewDeps {
+	initial?: { root: string; path: string };
 	theme: ChangesViewTheme;
 	rows: number | (() => number);
 	loadDiff(root: string, file: ChangedFile): Promise<string>;
@@ -218,6 +219,13 @@ export class WorktreeChangesView {
 	constructor(trees: WorktreeChanges[], deps: WorktreeChangesViewDeps) {
 		this.trees = trees;
 		this.deps = deps;
+		const initial = deps.initial;
+		if (initial && trees.some(tree => tree.root === initial.root && tree.model.files.some(file => file.path === initial.path))) {
+			this.expanded.add(initial.root);
+			this.selected = this.visibleRows().findIndex(row => row.tree.root === initial.root && row.file?.path === initial.path);
+			this.ensureSelectedVisible();
+			this.ensurePreview();
+		}
 	}
 
 	private visibleRows(): WorktreeRow[] {
@@ -340,7 +348,7 @@ export class WorktreeChangesView {
 		const height = this.bodyRows();
 		this.listOffset = Math.max(0, Math.min(this.listOffset, Math.max(0, rows.length - height)));
 		const selected = rows[this.selected];
-		const preview = selected?.file ? this.previews.get(rowKey(selected))?.view.previewLines() ?? [] : [selected ? displayText(selected.tree.root) : "No dirty worktrees.", selected ? changesSummary(selected.tree.model) : "", selected ? "Expand a group and select a file." : ""];
+		const preview = selected?.file ? this.previews.get(rowKey(selected))?.view.previewLines(paneLayout(width, this.diffOnly).diffWidth) ?? [] : [selected ? displayText(selected.tree.root) : "No dirty worktrees.", selected ? changesSummary(selected.tree.model) : "", selected ? "Expand a group and select a file." : ""];
 		const leftLine = (index: number) => {
 			const row = rows[index + this.listOffset];
 			if (!row) return "";
@@ -449,6 +457,8 @@ export class ChangesView {
 	private leftPressActive = false;
 	private hoveredIndex: number | undefined;
 	private readonly diffs = new Map<string, string[]>();
+	private wrapped: { lines: string[]; width: number; rows: string[] } | undefined;
+	private diffWidth = 1;
 
 	constructor(model: ChangesModel, deps: ChangesViewDeps) {
 		this.model = model;
@@ -556,7 +566,7 @@ export class ChangesView {
 		this.fileScroll = this.clampFileScroll(this.fileScroll, rows);
 		const keys = KEYS.map(([key, label]) => `${theme.fg(ROLE.KEY, key)} ${theme.fg(ROLE.KEY_TEXT, key === "esc" ? (this.deps.backLabel ?? label) : label)}`).join("   ");
 		this.pointerLayout = pointerLayout(width, rows);
-		return renderPanes(width, rows, theme, `✎ Changes · ${changesSummary(this.model)}`, (row) => this.fileLine(row), this.visibleDiff(rows), keys, this.model.files[this.selected]);
+		return renderPanes(width, rows, theme, `✎ Changes · ${changesSummary(this.model)}`, (row) => this.fileLine(row), this.visibleDiff(rows, paneLayout(width, false).diffWidth), keys, this.model.files[this.selected]);
 	}
 
 	invalidate(): void {
@@ -565,8 +575,8 @@ export class ChangesView {
 		this.pointerLayout = undefined;
 	}
 
-	previewLines(): string[] {
-		return this.visibleDiff(this.bodyRows());
+	previewLines(width: number): string[] {
+		return this.visibleDiff(this.bodyRows(), width);
 	}
 
 	private bodyRows(): number {
@@ -586,15 +596,40 @@ export class ChangesView {
 		return `${marker} ${fileLabel(file, theme, hovered, idleRole)}`;
 	}
 
-	private visibleDiff(rows: number): string[] {
+	private wrappedDiff(lines: string[], width: number): string[] {
+		width = Math.max(2, width);
+		if (this.wrapped?.lines === lines && this.wrapped.width === width) return this.wrapped.rows;
+		const wrapped = lines.flatMap((line) => {
+			const length = visibleWidth(line);
+			if (length <= width) return [line];
+			const result: string[] = [];
+			let column = 0;
+			while (column < length) {
+				const part = sliceByColumn(line, column, width, true);
+				const used = visibleWidth(part);
+				if (!used) break;
+				// Column slices may retain an opening style without its closing reset.
+				// Terminate it before the frame and padding are painted.
+				result.push(part.includes("\x1b[") ? `${part}\x1b[0m` : part);
+				column += used;
+			}
+			return result;
+		});
+		this.wrapped = { lines, width, rows: wrapped };
+		return wrapped;
+	}
+
+	private visibleDiff(rows: number, width: number): string[] {
+		this.diffWidth = width;
 		const file = this.model.files[this.selected];
 		if (!file) return [this.deps.theme.fg(ROLE.EMPTY, CLEAN_TREE)];
 		const lines = this.diffs.get(file.path);
 		if (!lines) return [];
 		if (lines.length === 0) return [this.deps.theme.fg(ROLE.EMPTY, EMPTY_DIFF)];
+		const visual = this.wrappedDiff(lines, width);
 		const visible = diffRows(rows);
-		this.diffScroll = Math.min(this.diffScroll, Math.max(0, lines.length - visible));
-		return lines.slice(this.diffScroll, this.diffScroll + visible);
+		this.diffScroll = Math.min(this.diffScroll, Math.max(0, visual.length - visible));
+		return visual.slice(this.diffScroll, this.diffScroll + visible);
 	}
 
 	private select(index: number): void {
@@ -627,7 +662,8 @@ export class ChangesView {
 		const file = this.model.files[this.selected];
 		const lines = file ? this.diffs.get(file.path) : undefined;
 		if (!lines) return false;
-		const next = Math.max(0, Math.min(Math.max(0, lines.length - diffRows(rows)), this.diffScroll + Math.trunc(delta)));
+		const visual = this.wrappedDiff(lines, this.diffWidth);
+		const next = Math.max(0, Math.min(Math.max(0, visual.length - diffRows(rows)), this.diffScroll + Math.trunc(delta)));
 		if (next === this.diffScroll) return false;
 		this.diffScroll = next;
 		return true;
