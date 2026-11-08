@@ -9385,3 +9385,46 @@ test("on a transparent rail hovering a section card's title paints it in the hov
 		await fire(handlers, "session_shutdown", ctx);
 	}
 });
+test("Git and TREE selectors and cards share geometry", async t => {
+ const priorStyle = cardStyle(), priorSurface = chromeSurface(); t.after(() => { setCardStyle(priorStyle); setChromeSurface(priorSurface); });
+ for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
+  const home = scopedDoubleEscCancelConfigHome(t); writeCardStyle(style, {gentlePiConfigHome:home});
+  writeVisualSettings({...DEFAULT_VISUAL_SETTINGS, surface}, {gentlePiConfigHome:home});
+  writeFileSync(join(home,"sidebar-tabs.json"), JSON.stringify({schema:"gentle-pi.sidebar-tabs/v1",policy:"on",main:"on",git:"on",gitHistory:"on",diff:"off",tree:"on"}));
+  const base = mkdtempSync(join(tmpdir(), "tree-geometry-")); t.after(() => rmSync(base, { recursive: true, force: true }));
+  const main = join(base, "main"), wt = join(base, "worktree"); mkdirSync(main); mkdirSync(wt);
+  for (const dir of [main, wt]) { writeFileSync(join(dir, `00-${dir === main ? "main" : "worktree"}-only.ts`), "x"); for (let i = 0; i < 40; i++) writeFileSync(join(dir, `file-${String(i).padStart(2, "0")}.ts`), "x"); }
+  const {pi, handlers} = fakePi(); gentleShell(pi,{GENTLE_PI_CONFIG_HOME:home,GENTLE_PI_SHELL_CHANGES_WATCH_MS:"off"},{activeProfile:()=>undefined,rootExists:()=>true,resolveWorktree:()=>({root:wt,commonDir:base}),gitRunner:()=>async args=>({code:0,stdout:args[0]==="worktree"?`worktree ${main}\0\0worktree ${wt}\0\0`:args[0]==="rev-parse"?`${wt}\n`:args[0]==="-c"?"* \x1eabc\x1f\x1fhistory\x1e\n":""})});
+  const {ctx,ui}=fakeContext(); (ctx.sessionManager as unknown as {getCwd():string}).getCwd=()=>wt; await fire(handlers,"session_start",ctx);
+  const layout=new VStack([{component:{render:()=>["TRANSCRIPT"],invalidate(){}},basis:0,grow:1}]);
+  const host={mode:"fullscreen",terminal:{rows:24,columns:160},layoutRoot:layout,requestRender(){}};
+  const painted={...plainTheme,fg:(_role:string,text:string)=>text,bg:(_role:string,text:string)=>`\x1b[48;5;22m${text}\x1b[49m`}; const footer=(ui.footerFactory as any)(host,painted,footerData);
+  try {
+   const frame=()=>renderLayoutFrame(layout,160,24,()=>{}); const boxes=(box:any):any[]=>[box,...box.children.flatMap(boxes)];
+   const navigate=(label:string)=>{const nav=boxes(frame().root).find(box=>stripAnsi(box.component.render(box.rect.width)[0]??"").includes("TREE")); const row=stripAnsi(nav.component.render(nav.rect.width)[0]); nav.component.handleMouse({type:"click",button:"left",x:row.indexOf(label),y:0,screenX:0,screenY:0,width:nav.rect.width,height:nav.rect.height,shift:false,alt:false,ctrl:false});};
+   const geometry=async(label:string)=>{
+    navigate(label);
+    const ready = label === "TREE" ? "file-00.ts" : "WORKTREE";
+    for(let i=0;i<100&&!stripAnsi(frame().lines.join("\n")).includes(ready);i++) await new Promise(resolve=>setTimeout(resolve,5));
+    const scroll=boxes(frame().root).find(box=>typeof box.component.getContentWidth==="function").component;
+    const rows=()=>scroll.render(50).map(stripAnsi);
+    const click=(x:number,y:number)=>scroll.handleMouse({type:"click",button:"left",x,y,screenX:x,screenY:y,width:50,height:scroll.viewportHeight,shift:false,alt:false,ctrl:false});
+    const results=[];
+    for (const root of ["MAIN", "WORKTREE"]) {
+     let y=rows().findIndex((row:string)=>row.includes("WORKTREE")); assert.ok(y>=0);
+     let row=rows()[y]; const mainX=row.indexOf("MAIN"), wtX=row.indexOf("WORKTREE");
+     assert.equal(click(mainX-1,y),undefined); assert.equal(click(wtX+8,y),undefined);
+     assert.equal(click(root === "MAIN" ? mainX : wtX+7,y)?.handled,true);
+     for(let i=0;i<100;i++){frame(); row=rows()[y]; if(row.includes(`[${root}]`) && (label !== "TREE" || rows().join("\n").includes(`00-${root.toLowerCase()}-only.ts`))) break; await new Promise(resolve=>setTimeout(resolve,5));}
+     assert.ok(row.includes(`[${root}]`),`${label}/${root}: ${row}`);
+     if(label === "TREE") assert.ok(rows().join("\n").includes(`00-${root.toLowerCase()}-only.ts`), `${root}: selected root content visible`);
+     const rawRows=scroll.render(50); const rawCard=rawRows.slice(y+1).find((value:string)=>/[╭▎]/.test(stripAnsi(value)) || (surface === "tinted" && stripAnsi(value).includes("GIT"))); assert.ok(rawCard,JSON.stringify(rows()));
+     const card=stripAnsi(rawCard); const left=surface === "tinted" ? 0 : Math.max(card.indexOf("╭"),card.indexOf("▎")); const right=surface === "tinted" ? card.length-1 : card.includes("╮") ? card.indexOf("╮") : stripAnsi(rawCard.slice(0,rawCard.lastIndexOf("\x1b[49m"))).length-1;
+     assert.ok(left>=0 && right>left); results.push({main:mainX,wt:wtX,cardLeft:left,cardRight:right,cardWidth:right-left+1});
+    }
+    return results;
+   };
+   const git=await geometry("GIT"), tree=await geometry("TREE"); assert.deepEqual(tree,git,`${surface}/${style} TREE versus GIT`);
+  } finally {footer.dispose(); await fire(handlers,"session_shutdown",ctx);}
+ }
+});
