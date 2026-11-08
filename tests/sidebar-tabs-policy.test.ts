@@ -5,6 +5,21 @@ import { join } from "node:path";
 import test from "node:test";
 import { resolveSidebarTabs, writeSidebarTabs } from "../lib/sidebar-tabs-policy.ts";
 
+test("TREE defaults off for legacy preferences and persists independently", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-tree-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ const path = join(home, "sidebar-tabs.json");
+ for (const raw of ['{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"off","git":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"off","diff":"on"}']) {
+  writeFileSync(path, raw);
+  assert.equal(resolveSidebarTabs(options).tree, "off");
+  assert.equal(resolveSidebarTabs(options).malformed, false);
+ }
+ writeSidebarTabs("on", options, { main: "on", git: "on", tree: "on" });
+ writeSidebarTabs("off", options);
+ assert.equal(resolveSidebarTabs(options).tree, "on");
+});
+
 test("destination preferences persist independently of global Tabs and legacy files remain enabled", t => {
  const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-destinations-"));
  t.after(() => rmSync(home, { recursive: true, force: true }));
