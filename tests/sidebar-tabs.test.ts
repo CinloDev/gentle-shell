@@ -6,6 +6,7 @@ import { installSidebar, invalidateSidebar } from "../lib/shell-sidebar-layout.t
 import { sidebarHeader, sidebarPart, sidebarStatusBar, type SidebarRail } from "../lib/shell-sidebar.ts";
 import { chromeSurface, setChromeSurface } from "../lib/shell-panel.ts";
 import { CARD_STYLE, cardStyle, setCardStyle } from "../lib/shell-card.ts";
+import { SidebarTree } from "../lib/sidebar-tree.ts";
 
 const theme = {
 	fg: (role: string, text: string) => `\x1b[${role === "accent" ? 35 : role === "border" ? 34 : 37}m${text}\x1b[39m`,
@@ -44,6 +45,70 @@ function fixture(t: TestContext, enabled = true, header: "top" | "split" | "belo
 	const click = (component: Component, x: number, y = 0) => component.handleMouse?.({ type: "click", button: "left", x, y, screenX: 110 + x, screenY: y, width: 50, height: 16, shift: false, alt: false, ctrl: false });
 	return { frame, scroll, navigation, click, received, host, mainRenders: () => mainRenders, removeGit: () => { git = undefined; } };
 }
+
+test("TREE selection preserves transparent card clicks and resize lifecycle", async t => {
+ const previous = [chromeSurface(), cardStyle()] as const;
+ t.after(() => { setChromeSurface(previous[0]); setCardStyle(previous[1]); });
+ setChromeSurface("transparent"); setCardStyle(CARD_STYLE.NEON);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { columns: 160 }, layoutRoot: root, requestRender() {} };
+ const tui = host as unknown as TUI;
+ let viewport = 10, active = false; const reads: string[] = []; const selected: Array<string | undefined> = [];
+ const tree = new SidebarTree("/repo", theme, () => invalidateSidebar(tui), async path => { reads.push(path); return path === "/repo" ? [{ name: "folder", isDirectory: () => true, isSymbolicLink: () => false }] : []; });
+ const rail: SidebarRail = { render: width => tree.renderSidebar(width, viewport), invalidate: () => tree.invalidate(), handleMouse: event => tree.handleMouse(event) };
+ sidebarPart(tui, "todo", { render: () => ["▾ MAIN"], invalidate() {} });
+ t.after(installSidebar(tui, theme, () => "auto", () => "split", () => "comfortable", () => [{ id: "main", label: "MAIN" }, { id: "tree", label: "TREE", rail }], id => { selected.push(id); const next = id === "tree"; if (next !== active) { active = next; if (active) tree.activate(); else tree.deactivate(); } }, (id, height) => { if (id === "tree" && viewport !== height) { viewport = height; invalidateSidebar(tui); } }));
+ t.after(() => tree.dispose());
+ const boxes = (box: LayoutBox): LayoutBox[] => [box, ...box.children.flatMap(boxes)];
+ const frame = () => renderLayoutFrame(root, host.terminal.columns, 20, () => {});
+ let current = frame(); assert.deepEqual(reads, []);
+ const nav = boxes(current.root).find(box => strip(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"))!;
+ nav.component.handleMouse?.({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+ frame(); await new Promise(resolve => setImmediate(resolve)); current = frame();
+ const scroll = boxes(current.root).find(box => box.component instanceof ScrollView)!.component as ScrollView;
+ const y = scroll.render(50).map(strip).findIndex(row => row.includes("folder")); assert.ok(y >= 0);
+ scroll.handleMouse({ type: "click", button: "left", x: 8, y, screenX: 118, screenY: y, width: 50, height: 16, shift: false, alt: false, ctrl: false });
+ await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(reads, ["/repo", "/repo/folder"]);
+ host.terminal.columns = 139; frame(); assert.equal(selected.at(-1), undefined);
+});
+
+test("tabs reclaim one viewport row for MAIN, GIT and TREE without changing no-tabs geometry", t => {
+ const previous = [chromeSurface(), cardStyle()] as const;
+ t.after(() => { setChromeSurface(previous[0]); setCardStyle(previous[1]); });
+ setChromeSurface("tinted");
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { columns: 160 }, layoutRoot: root, requestRender() {} };
+ const tui = host as unknown as TUI;
+ const hits: string[] = []; const viewports: Array<[string, number]> = [];
+ const rail = (name: string): SidebarRail => ({ surface: "panel", render: () => [`▾ ${name} CONTENT`], invalidate() {}, handleMouse: () => { hits.push(name); return { handled: true }; } });
+ sidebarPart(tui, "todo", rail("MAIN"));
+ const git = rail("GIT"), tree = rail("TREE");
+ let items: Array<{ id: string; label: string; rail?: SidebarRail }> = [];
+ t.after(installSidebar(tui, theme, () => "auto", () => "split", () => "comfortable", () => items, () => {}, (id, height) => viewports.push([id, height])));
+ const boxes = (box: LayoutBox): LayoutBox[] => [box, ...box.children.flatMap(boxes)];
+ const frame = () => renderLayoutFrame(root, 160, 20, () => {});
+ const untabbed = frame();
+ const noTabs = boxes(untabbed.root).find(box => box.component instanceof ScrollView)!;
+ assert.equal(noTabs.rect.y, 0); assert.equal(noTabs.rect.height, 20);
+ assert.match(untabbed.lines.map(strip).join("\n"), /MAIN CONTENT/);
+ items = [{ id: "main", label: "MAIN" }, { id: "git", label: "GIT", rail: git }, { id: "tree", label: "TREE", rail: tree }];
+ for (const [name, x] of [["MAIN", 2], ["GIT", 10], ["TREE", 18]] as const) {
+  let current = frame();
+  const nav = boxes(current.root).find(box => box.children.length === 0 && strip(box.component.render(box.rect.width)[0] ?? "").includes("MAIN"))!;
+  assert.equal(nav.component.handleMouse?.({ type: "click", button: "left", x, y: 0, screenX: nav.rect.x + x, screenY: nav.rect.y, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false })?.handled, true);
+  current = frame();
+  const scroll = boxes(current.root).find(box => box.component instanceof ScrollView)!;
+  assert.equal(scroll.rect.y, 2); assert.equal(scroll.rect.height, 18);
+  assert.match(strip(current.lines[2]!), new RegExp(`${name} CONTENT`));
+  assert.equal(scroll.component.handleMouse?.({ type: "click", button: "left", x: 2, y: 0, screenX: scroll.rect.x + 2, screenY: scroll.rect.y, width: scroll.rect.width, height: scroll.rect.height, shift: false, alt: false, ctrl: false })?.handled, true);
+  assert.equal(hits.at(-1), name);
+  if (name !== "MAIN") assert.deepEqual(viewports.at(-1), [name.toLowerCase(), 18]);
+ }
+ items = []; const restored = frame();
+ const restoredScroll = boxes(restored.root).find(box => box.component instanceof ScrollView)!;
+ assert.deepEqual(restoredScroll.rect, noTabs.rect);
+ assert.deepEqual(restored.lines.slice(0, 3), untabbed.lines.slice(0, 3));
+});
 
 test("card title hits follow float geometry when themes share foregrounds but differ in background support", t => {
  const previous = [chromeSurface(), cardStyle()] as const;
@@ -172,7 +237,7 @@ test("six compact destination labels fit the rail and every tab remains selectab
 		assert.equal(nav.component.handleMouse?.({ type: "click", button: "left", x: position, y: 0, screenX: nav.rect.x + position, screenY: nav.rect.y, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false })?.handled, true);
 		const next = frame(); const nextNav = boxes(next.root).find(box => box.children.length === 0 && strip(box.component.render(box.rect.width)[0] ?? "").includes(`[${label}]`));
 		assert.ok(nextNav); const selected = nextNav.component.render(50);
-		assert.equal(selected.length, 3, "navigation occupies one label row, divider, and gap");
+		assert.equal(selected.length, 2, "navigation occupies one label row and divider");
 		const start = strip(selected[0]!).indexOf(`[${label}]`);
 		const accent = selected[1]!.indexOf(`\x1b[35m${"─".repeat(label.length + 2)}\x1b[39m`);
 		assert.ok(accent >= 0);
@@ -182,11 +247,11 @@ test("six compact destination labels fit the rail and every tab remains selectab
 	}
 });
 
-test("internal navigation paints prior tab spacing, selected accent, divider and breathing row on the panel", t => {
+test("internal navigation paints prior tab spacing, selected accent and divider on the panel", t => {
 	const previous = chromeSurface(); t.after(() => setChromeSurface(previous)); setChromeSurface("tinted");
 	const f = fixture(t);
 	const rows = f.navigation().render(50);
-	assert.deepEqual(rows.map(strip), ["[MAIN]    GIT ".padEnd(50), "─".repeat(50), " ".repeat(50)]);
+	assert.deepEqual(rows.map(strip), ["[MAIN]    GIT ".padEnd(50), "─".repeat(50)]);
 	assert.match(rows[0]!, /\x1b\[35m\[MAIN\]/);
 	assert.match(rows[1]!, /\x1b\[35m──────\x1b\[39m/);
 	for (const row of rows) assert.match(row, /\x1b\[48;5;22m/);
@@ -262,8 +327,7 @@ test("navigation leaves cardGroups, whole-row folding and float gaps intact acro
 		const frame = f.frame(); const text = frame.lines.map(strip);
 		const navY = text.findIndex(row => row.includes("[MAIN]"));
 		assert.equal(navY, header === "below-input" ? 0 : 1);
-		assert.equal(text[navY + 2]!.slice(110).trim(), "", "navigation keeps a breathing row");
-		assert.match(text[navY + 4]!, /TODOS/, "first float title follows the navigation and its card padding");
+		assert.match(text[navY + 3]!, /TODOS/, "first float title follows the divider and its card padding");
 		if (header === "top") assert.match(text[0]!, /^TITLE/, "the existing full-width top header remains above the rail");
 		const scroll = f.scroll(); const rows = scroll.render(50); const plain = rows.map(strip);
 		for (const [title, local] of [["TODOS", 0], ["STATS", 2]] as const) {
