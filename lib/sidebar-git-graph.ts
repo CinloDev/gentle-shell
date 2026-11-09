@@ -3,8 +3,8 @@ import type { GitRunner } from "./shell-changes.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
 import { renderPanelHeader } from "./shell-panel.ts";
 
-export type SidebarGitGraph = { state: "ready"; branch: string; lines: string[] } | { state: "unborn"; branch: string } | { state: "error" };
-type GraphTheme = { fg(role: string, text: string): string; bold?(text: string): string };
+export type SidebarGitGraph = { state: "ready"; branch: string; lines: string[] } | { state: "unborn"; branch: string } | { state: "error" } | { state: "pending" };
+export type GraphTheme = { fg(role: string, text: string): string; bold?(text: string): string };
 const clean = (text: string) => sanitizeTerminalText(text).replace(/[\r\n\t]/g, " ");
 
 /** Read a bounded snapshot outside the render path. The caller bounds the runner's buffer. */
@@ -40,7 +40,7 @@ function renderLine(line: string, theme: GraphTheme): string {
 /** Only format rows that can be displayed, and clip every output line. */
 export function renderSidebarGitGraph(graph: SidebarGitGraph, theme: GraphTheme, width: number, viewport: number, offset = 0, collapsed = false, hovered = false): string[] {
  if (width <= 0 || viewport <= 0) return [];
- const detail = graph.state === "error" ? "history unavailable" : graph.branch;
+ const detail = graph.state === "error" ? "history unavailable" : graph.state === "pending" ? "Loading history…" : graph.branch;
  const rows = [renderPanelHeader(theme, width, { title: "Git", count: detail, open: !collapsed, hovered })];
  if (collapsed) return rows.map(row => truncateToWidth(row, width, "…"));
  if (graph.state === "unborn" && viewport > 1) rows.push(theme.fg("muted", "No commits yet"));
@@ -79,11 +79,13 @@ export class SidebarGitHistory {
    if (!this.active || generation !== this.generation) continue;
    if (JSON.stringify(graph) !== JSON.stringify(this.graph) || status !== this.statusFingerprint) {
     this.graph = graph; this.statusFingerprint = status; this.revision++;
-    // A repaint can fail once the terminal has stopped. capture() must never
-    // reject for it: setActive() refreshes fire and forget, so a rejection here
-    // would be unhandled. The next frame repaints from the new revision.
-    try { this.publish(); } catch { /* repaint failures cannot change the graph. */ }
    }
+   // Every completed capture publishes, even when nothing moved: the reader
+   // that holds a frame needs the settled signal, and its consumer dedupes by
+   // what is actually painted instead of by revision. A repaint can fail once
+   // the terminal has stopped: capture() must never reject for it, because
+   // setActive() refreshes fire and forget and a rejection would be unhandled.
+   try { this.publish(); } catch { /* repaint failures cannot change the graph. */ }
   } while (this.active && this.queued);
  }
 }

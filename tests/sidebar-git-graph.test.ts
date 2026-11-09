@@ -39,6 +39,22 @@ test("graph rendering sanitizes input, clips widths, bounds viewport and caches 
  assert.deepEqual(renderSidebarGitGraph(graph, theme, 0, 5), []);
 });
 
+test("identical completed history captures signal settlement without increasing revision", async () => {
+ let publishes = 0;
+ const history = new SidebarGitHistory(async args => ({ code: 0, stdout: args[0] === "symbolic-ref" ? "main" : args[0] === "rev-parse" ? "abc" : "* history\n" }), async () => "clean", () => { publishes++; });
+ history.setActive(true);
+ // Drain the automatic entry capture before requesting an independent capture.
+ await new Promise(resolve => setImmediate(resolve));
+ assert.equal(publishes, 1);
+ const graph = history.graph, revision = history.revision;
+ assert.equal(revision, 1);
+ await history.refresh();
+ assert.equal(publishes, 2, "an identical completed capture still signals settlement");
+ assert.equal(history.revision, revision);
+ assert.strictEqual(history.graph, graph);
+ history.setActive(false);
+});
+
 test("history is inactive until enabled and discards work after deactivation", async () => {
  let calls = 0, publishes = 0, release!: () => void;
  const history = new SidebarGitHistory(async args => {
