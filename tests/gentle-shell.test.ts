@@ -795,13 +795,13 @@ test("Git selector switches history and changes without hidden or frame Git call
  const home = scopedDoubleEscCancelConfigHome(t);
  writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
  const calls: Array<{ root: string; args: string[] }> = [];
- let extra = false, hold = false, releaseLate: (() => void) | undefined, renders = 0;
+ let extra = false, hold = false, releaseLate: (() => void) | undefined, renders = 0, holdRoot = "/repo";
  const { pi, handlers } = fakePi();
  gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
   activeProfile: () => undefined, rootExists: () => true,
   gitRunner: (root, limit) => async args => {
    calls.push({ root, args });
-   if (hold && limit && root === "/repo" && args[0] === "status") { hold = false; await new Promise<void>(resolve => { releaseLate = resolve; }); }
+   if (hold && limit && root === holdRoot && args[0] === "status") { hold = false; await new Promise<void>(resolve => { releaseLate = resolve; }); }
    const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? (root === "/main" ? "main\n" : "feature\n") : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${root} history\x1e\n` : args[0] === "status" ? ` M ${root === "/main" ? "main" : "worktree"}.ts\0${extra && root === "/repo" ? "?? created.ts\0" : ""}` : args[0] === "diff" ? `${root === "/main" ? "7\t3\tmain" : "1\t0\tworktree"}.ts\n` : "";
    return { code: 0, stdout: output };
   },
@@ -858,12 +858,176 @@ test("Git selector switches history and changes without hidden or frame Git call
   await fire(handlers, "agent_end", ctx); await changesSettled();
   assert.equal(calls.some(call => call.root === "/main"), false, "hidden Git does not query the selected root");
   navClick("GIT"); frame();
-  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("worktree.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  // Re-entry keeps the selected root (MAIN) and its painted cards.
+  holdRoot = "/main";
+  for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("main.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(stripAnsi(frame().lines.join("\n")), /\[MAIN\]/);
   hold = true; releaseLate = undefined; await fire(handlers, "agent_end", ctx);
   for (let i = 0; i < 100 && !releaseLate; i++) await new Promise(resolve => setTimeout(resolve, 5));
   assert.ok(releaseLate); footer.dispose();
   const afterDispose = renders; releaseLate!(); await changesSettled();
   assert.equal(renders, afterDispose, "disposed sidebar discards late results");
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("GIT tab re-entry reconciles roots without resetting a surviving selection", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+ const calls: Array<{ root: string; args: string[] }> = [];
+ let discoveredMain = "/main", discoveredWt = "/repo";
+ let failedMain = false;
+ const name = (root: string) => root === "/main" ? "main" : "worktree";
+ const { pi, handlers } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: root => async args => {
+   calls.push({ root, args });
+   if (failedMain && root === "/main") return { code: 128, stdout: "" };
+   const output = args[0] === "worktree" ? `worktree ${discoveredMain}\0\0worktree ${discoveredWt}\0\0`
+    : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? `${discoveredWt}\n` : "abc\n")
+    : args[0] === "symbolic-ref" ? `${name(root)}\n`
+    : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${name(root)} history\x1e\n`
+    : args[0] === "status" ? ` M ${name(root)}.ts\0`
+    : args[0] === "diff" ? `2\t1\t${name(root)}.ts\n` : "";
+   return { code: 0, stdout: output };
+  },
+ });
+ const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const navClick = (label: string) => {
+   const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes(label) && stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("GIT"));
+   const row = stripAnsi(nav.component.render(nav.rect.width)[0]);
+   return nav.component.handleMouse({ type: "click", button: "left", x: row.indexOf(label), y: 0, screenX: nav.rect.x + row.indexOf(label), screenY: nav.rect.y, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false });
+  };
+  const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function")!.component;
+  const rows = () => scroll().render(50).map(stripAnsi);
+  const waitFor = async (needle: string) => { for (let i = 0; i < 100 && !rows().join("\n").includes(needle); i++) { frame(); await new Promise(resolve => setTimeout(resolve, 5)); } assert.ok(rows().join("\n").includes(needle), needle); };
+  const clickSelector = (label: string) => {
+   const y = rows().findIndex((row: string) => row.includes("WORKTREE")); assert.ok(y >= 0);
+   const x = rows()[y]!.indexOf(label);
+   return scroll().handleMouse({ type: "click", button: "left", x, y, screenX: x, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+  };
+  navClick("GIT");
+  await waitFor("worktree.ts");
+  assert.equal(clickSelector("MAIN")?.handled, true);
+  await waitFor("main.ts");
+  const discoveries = calls.filter(call => call.args[0] === "worktree").length;
+  navClick("MAIN"); frame();
+  navClick("GIT"); frame();
+  await waitFor("main.ts");
+  // Let any re-entry discovery and reload settle before proving it never ran.
+  for (let i = 0; i < 10; i++) { frame(); await new Promise(resolve => setTimeout(resolve, 5)); }
+  const text = rows().join("\n");
+  assert.match(text, /\[MAIN\]/, "re-entry preserves the selected root");
+  assert.match(text, /main history/);
+  assert.doesNotMatch(text, /worktree\.ts|worktree history/);
+  assert.equal(calls.filter(call => call.args[0] === "worktree").length, discoveries + 1, "re-entry reconciles root metadata");
+  // A removed selection falls back to the surviving worktree; the cached frame
+  // stays painted until the fallback root answers.
+  failedMain = true;
+  discoveredMain = "/replacement-main"; discoveredWt = "/replacement";
+  navClick("MAIN"); frame(); navClick("GIT"); frame();
+  await waitFor("worktree.ts");
+  assert.doesNotMatch(rows().join("\n"), /main\.ts|main history/, "removed MAIN selection falls back to the surviving worktree");
+  // A surviving selection keeps painting; its real read failures stay visible.
+  failedMain = false; discoveredMain = "/main";
+  navClick("MAIN"); frame(); navClick("GIT"); frame();
+  for (let i = 0; i < 10; i++) { frame(); await new Promise(resolve => setImmediate(resolve)); }
+  clickSelector("MAIN"); await waitFor("main.ts");
+  failedMain = true;
+  navClick("MAIN"); frame(); navClick("GIT"); frame();
+  await waitFor("history unavailable");
+  await waitFor("Counts unavailable");
+  assert.match(rows().join("\n"), /\[MAIN\]/);
+ } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Git root switch paints the last good cards until the other root answers", async t => {
+ const home = scopedDoubleEscCancelConfigHome(t);
+ writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
+ let gate: Promise<void> | undefined, open: (() => void) | undefined, holding = false;
+ const fileReads: Array<{ root: string; args: string[] }> = [];
+ const name = (root: string) => root === "/main" ? "main" : "worktree";
+ const { pi, handlers } = fakePi();
+ gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+  activeProfile: () => undefined, rootExists: () => true,
+  gitRunner: (root, limit) => async args => {
+   fileReads.push({ root, args });
+   const pending = gate;
+   if (holding && root === "/main" && limit && pending) await pending;
+   if (args[0] === "-c") return { code: 0, stdout: Array.from({ length: 30 }, (_, i) => `* \x1eabc\x1f\x1ffeat: ${name(root)} history ${i}\x1e\n`).join("") };
+   if (args[0] === "status") return { code: 0, stdout: ` M ${name(root)}.ts\0` + Array.from({ length: 15 }, (_, i) => ` M z${name(root)}${String(i).padStart(2, "0")}.ts\0`).join("") };
+   const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0"
+    : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n")
+    : args[0] === "symbolic-ref" ? `${name(root)}\n`
+    : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${name(root)} history\x1e\n`
+    : args[0] === "status" ? ` M ${name(root)}.ts\0`
+    : args[0] === "diff" ? `2\t1\t${name(root)}.ts\n` : "";
+   return { code: 0, stdout: output };
+  },
+ });
+ const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+ const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+ const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+ const footer = (ui.footerFactory as any)(host, plainTheme, footerData);
+ try {
+  const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+  const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+  const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function")!.component;
+  const rows = () => scroll().render(50).map(stripAnsi);
+  const waitFor = async (needle: string) => { for (let i = 0; i < 100 && !rows().join("\n").includes(needle); i++) { frame(); await new Promise(resolve => setTimeout(resolve, 5)); } assert.ok(rows().join("\n").includes(needle), needle); };
+  const clickSelector = (label: string) => {
+   const y = rows().findIndex((row: string) => row.includes("WORKTREE")); assert.ok(y >= 0);
+   const x = rows()[y]!.indexOf(label);
+   return scroll().handleMouse({ type: "click", button: "left", x, y, screenX: x, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+  };
+  const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+  nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+  await waitFor("worktree.ts");
+  const wheel = (y: number) => scroll().handleMouse({ type: "wheel", button: "none", wheelDelta: 3, x: 5, y, screenX: 5, screenY: y, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+  wheel(rows().findIndex((row: string) => row.includes("worktree history")));
+  wheel(rows().findIndex((row: string) => row.includes("worktree.ts")));
+  frame();
+  const scrolled = rows().join("\n");
+  assert.match(scrolled, /worktree history 3/);
+  assert.doesNotMatch(scrolled, /M worktree\.ts/);
+  gate = new Promise<void>(resolve => { open = resolve; }); holding = true;
+  assert.equal(clickSelector("MAIN")?.handled, true);
+  const intermediate: string[] = [];
+  for (let i = 0; i < 6; i++) { frame(); intermediate.push(rows().join("\n")); await new Promise(resolve => setImmediate(resolve)); }
+  for (const text of intermediate) {
+   assert.match(text, /\[WORKTREE\]/, "selector names the painted root, not the pending request");
+   assert.doesNotMatch(text, /history unavailable|Counts unavailable/, text);
+   assert.match(text, /worktree history/, "the last good history frame keeps painting");
+   assert.equal(text, scrolled, "selector and both scroll offsets stay with the painted frame");
+   assert.doesNotMatch(text, /main\.ts/);
+  }
+  const fileY = rows().findIndex((row: string) => /zworktree\d+\.ts/.test(row));
+  const clickedFile = rows()[fileY]!.match(/zworktree\d+\.ts/)![0];
+  const fileX = rows()[fileY]!.indexOf(clickedFile);
+  scroll().handleMouse({ type: "click", button: "left", x: fileX, y: fileY, screenX: fileX, screenY: fileY, width: 50, height: 20, shift: false, alt: false, ctrl: false });
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(fileReads.some(read => read.root === "/repo" && read.args.includes(clickedFile)), "pending-root file clicks load the painted worktree diff");
+  ui.closeOverlay?.();
+  holding = false; const resolve = open; gate = undefined; open = undefined; resolve?.();
+  await waitFor("main.ts");
+  const text = rows().join("\n");
+  assert.match(text, /main history/);
+  assert.doesNotMatch(text, /worktree history|worktree\.ts|unavailable/);
+  // A root already painted swaps at once, without a loading frame.
+  gate = new Promise<void>(resolve => { open = resolve; }); holding = true;
+  assert.equal(clickSelector("WORKTREE")?.handled, true);
+  const cached = rows().join("\n");
+  assert.match(cached, /worktree history/);
+  assert.doesNotMatch(cached, /history unavailable|Counts unavailable/);
+  frame(); assert.match(rows().join("\n"), /worktree history/);
+  holding = false; const late = open; gate = undefined; open = undefined; late?.();
+  assert.equal(rows().join("\n"), scrolled, "returning to a cached root restores both offsets");
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
@@ -950,6 +1114,8 @@ test("Git root selector aligns with adjacent card edges and keeps click bounds",
    assert.equal((main - 1) - left, right - (wt + 8), `${surface}/${style} border inset`);
    assert.equal(click(main - 1), undefined); assert.equal(click(wt + 8), undefined);
    assert.equal(click(main)?.handled, true); frame();
+   for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+   frame();
    const second = rows()[y]; assert.equal(second.indexOf("MAIN"), main); assert.equal(second.indexOf("WORKTREE"), wt);
    assert.match(second, /\[MAIN\]/); assert.equal(click(wt + 7)?.handled, true); frame(); assert.match(rows()[y], /\[WORKTREE\]/);
    host.terminal.columns = 139; assert.doesNotMatch(stripAnsi(frame().lines.join("\n")), /\[WORKTREE\]/);
@@ -1054,7 +1220,8 @@ test("Changes reports unavailable counts and keeps small viewport fold and file 
   const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
   const rows = () => scroll.render(50).map(stripAnsi);
   const click = (y: number) => scroll.handleMouse({ type: "click", button: "left", x: 8, y, screenX: 118, screenY: y, width: 50, height: 8, shift: false, alt: false, ctrl: false });
-  assert.match(rows().join("\n"), /Counts unavailable/);
+  assert.match(rows().join("\n"), /Loading changes…/);
+  assert.doesNotMatch(rows().join("\n"), /Counts unavailable/);
   release();
   for (let i = 0; i < 100 && !rows().join("\n").includes("binary.dat"); i++) { await new Promise(resolve => setTimeout(resolve, 5)); frame(); }
   assert.match(rows().join("\n"), /\+0 -0 · partial counts/);
