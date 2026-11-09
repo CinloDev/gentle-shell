@@ -25,7 +25,7 @@ function fixture(entries: any[] = [], options: { root?: string; sessionId?: stri
 	const root = options.root ?? "/repo";
 	const sessionId = options.sessionId ?? "session";
 	const overlay: { view?: any; close?: () => void } = {};
-	const ctx: any = { hasUI:true, cwd:root, sessionManager:{getSessionId:()=>sessionId,getEntries:()=>entries},
+	const ctx: any = { hasUI:true, cwd:root, sessionManager:{getCwd:()=>root,getSessionId:()=>sessionId,getEntries:()=>entries},
 		ui: { setFooter() {}, getEditorComponent:()=>({}), setWorkingVisible() {}, setWidget:(key,value)=>value===undefined?widgets.delete(key):widgets.set(key,value), notify:(text,level)=>{ notices.push(text); levels.push(level); },
 			custom:(factory:any)=>new Promise(resolve=>{ overlay.close=()=>resolve(null); overlay.view=factory({terminal:{rows:40,columns:200},requestRender(){}},{fg:(_c:string,t:string)=>t,bold:(t:string)=>t},{},resolve); }) } };
 	shell(pi,{GENTLE_PI_SHELL_CHANGES_POLL_MS:String(options.pollMs ?? 60_000)}, {resolveWorktree:()=>({root,commonDir:root+"/.git"}),devBinary:()=>undefined,
