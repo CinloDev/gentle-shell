@@ -26,7 +26,7 @@ test("profile card frames align headers and groups for every collapse combinatio
 		const frame = buildProfileCards(snapshot, theme, width, density, { collapsed });
 		assert.deepEqual(renderProfileCards(snapshot, theme, width, density, { collapsed }), frame.rows);
 		assert.deepEqual(profileCardGroups(snapshot, density, { collapsed }, width).groups, frame.groups);
-		if (width < 16) { assert.deepEqual(frame, { rows: [], groups: [], headers: [] }); continue; }
+		if (width < 16) { assert.deepEqual(frame, { rows: [], groups: [], headers: [], actions: [] }); continue; }
 		assert.deepEqual(frame.headers.map(header => header.id), ids);
 		frame.groups.forEach((group, index) => {
 			assert.equal(frame.headers[index].row, group.start);
@@ -187,6 +187,18 @@ test("PROFILE routing rows append the effort letter in a distinct color at the r
 
 
 
+test("PROFILE quota hint exposes a fetch action only while the hint row is rendered", () => {
+	const now = 1_788_600_000_000;
+	const empty = buildProfileCards({ routing: [] }, theme, 50);
+	const hintRow = empty.rows.findIndex(row => plain([row])[0].includes("Run /gentle:usage to fetch"));
+	assert.ok(hintRow > 0);
+	assert.deepEqual(empty.actions, [{ id: "fetch-quotas", row: hintRow }]);
+	const codex = { provider: "openai-codex", plan: "Plus", fetchedAt: now, limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 30, windowSeconds: null, resetAt: null }] }] };
+	const populated = buildProfileCards({ routing: [], quotas: [codex], now }, theme, 50);
+	assert.equal(populated.actions.length, 0);
+	const collapsed = buildProfileCards({ routing: [] }, theme, 50, "compact", { collapsed: new Set(["quotas"]) });
+	assert.equal(collapsed.actions.length, 0);
+});
 test("PROFILE quotas render normalized cached providers, caps and resets without nonfinite percentages", () => {
 	const now = 1_788_600_000_000;
 	const codex = parseCodexUsage({ plan_type: "Plus", rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_after_seconds: 3600 }, secondary_window: { used_percent: 80, limit_window_seconds: 604800 } } }, now);

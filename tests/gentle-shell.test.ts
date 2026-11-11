@@ -575,6 +575,48 @@ test("PROFILE quotas repaint cached providers at identical timestamps without fe
 
 
 
+test("PROFILE quota hint click fetches the scoped providers and a profile change refreshes the new scope", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+	writeProfilesStore(home, { team: { worker: { model: "nan/glm5" } } }, "team");
+	const { pi, handlers } = fakePi();
+	let fetches = 0, now = 1_788_600_000_000;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { now: () => now, fetch: (async () => { fetches++; return { ok: false } as Response; }) as typeof fetch });
+	const { ctx, ui } = fakeContext({ token: JWT }); await fire(handlers, "session_start", ctx); await settle();
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const footer = (ui.footerFactory as any)(host, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+	try {
+		const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+		const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+		const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+		const rows = (): string[] => scroll().render(50);
+		const text = () => rows().map(stripAnsi).join("\n");
+		const select = (x: number) => {
+			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+			nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
+		};
+		const click = (y: number) => scroll().handleMouse({ type: "click", button: "left", x: 4, y, width: 50, height: 55 });
+		select(10);
+		assert.match(text(), /Run \/gentle:usage to fetch/);
+		const baseline = fetches;
+		now += 5 * 60_000 + 1_000;
+		const hintY = rows().findIndex(row => stripAnsi(row).includes("Run /gentle:usage to fetch"));
+		click(hintY);
+		await settle();
+		assert.ok(fetches > baseline, "hint click dispatches the scoped refresh through the existing owner");
+		const afterClick = fetches;
+		click(hintY);
+		await settle();
+		assert.equal(fetches, afterClick, "hint click honors the shared per-provider throttle");
+		const afterProfile = fetches;
+		now += 5 * 60_000 + 1_000;
+		writeProfilesStore(home, { team: { worker: { model: "openai-codex/model-x" } } }, "team");
+		await new Promise(resolve => setTimeout(resolve, 2_300));
+		assert.ok(fetches > afterProfile, "a changed profile refreshes the new scope through the existing poller");
+	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
 test("PROFILE long routes fill the useful composed frame width without consuming border padding", async t => {
 	const previousSurface = chromeSurface(), previousStyle = cardStyle();
 	t.after(() => { setChromeSurface(previousSurface); setCardStyle(previousStyle); });

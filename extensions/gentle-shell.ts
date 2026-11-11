@@ -2646,9 +2646,20 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		if (!overrides.activeProfile) {
 			profileReader.bind(ctx.cwd, deps.resolveWorktree, ctx.sessionManager.getSessionId());
 			const sessionId = ctx.sessionManager.getSessionId();
+			let profileRoutesKey = profileReader.routes().map(entry => `${entry.role}:${entry.model}:${entry.effort ?? ""}`).join(";");
 			profilePoll = setInterval(() => {
 				if (currentContext !== ctx || ctx.sessionManager.getSessionId() !== sessionId) return;
-				if (!profileReader.refresh()) return;
+				if (!profileReader.refresh()) {
+					// The scope is resolved per refresh from the routing snapshot; a
+					// routing-only change (same profile name) still names new providers.
+					const routesKey = profileReader.routes().map(entry => `${entry.role}:${entry.model}:${entry.effort ?? ""}`).join(";");
+					if (routesKey === profileRoutesKey) return;
+					profileRoutesKey = routesKey;
+				}
+				// A changed profile/routing snapshot means the usage scope may name new
+				// providers; refresh them through the same throttled owner instead of
+				// waiting for the next turn, without ever fetching from the render path.
+				void refreshUsage(ctx, false);
 				renderHost?.invalidateSidebar?.();
 				renderHost?.requestRender();
 			}, 2_000);
@@ -3165,6 +3176,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				invalidate() {},
 			};
 			const profileTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.headers.find(header => header.row === y)?.id : undefined;
+			const profileActionTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.actions.find(action => action.row === y)?.id : undefined;
 			const profileRegion = new NativePointerRegion(profileCard, {
 				onHover(event) {
 					const next = profileTarget(event.y, event.width);
@@ -3182,6 +3194,12 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 				onClick(event) {
 					if (event.button !== "left") return undefined;
+					// The quota hint is a shortcut onto the same refresh owner /gentle:usage
+					// uses, honoring the same per-provider throttle; it never bypasses it.
+					if (profileActionTarget(event.y, event.width) === "fetch-quotas") {
+						void refreshUsage(ctx, false);
+						return { handled: true, render: true };
+					}
 					const id = profileTarget(event.y, event.width);
 					if (!id) return undefined;
 					if (profileCollapsed.has(id)) profileCollapsed.delete(id);

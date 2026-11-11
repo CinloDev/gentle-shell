@@ -47,6 +47,8 @@ export type ProfileCardsFrame = {
 	rows: string[];
 	groups: Array<{ start: number; end: number }>;
 	headers: Array<{ id: ProfileCardId; row: number }>;
+	/** Click targets that are not card headers, in the same logical row space. */
+	actions: Array<{ id: "fetch-quotas"; row: number }>;
 };
 
 /** One-letter effort marker for the routing rows' right edge; empty when the role defines no effort. */
@@ -154,7 +156,7 @@ export function buildProfileCards(snapshot: ProfileCardsSnapshot, theme: Profile
 	// Like MAIN Status, keep density gaps outside the card ranges. Transparent
 	// chrome consumes the groups and owns its own neon/float spacing instead.
 	const gap = sectionGap(density) ? [" ".repeat(Math.max(0, width))] : [];
-	const frame: ProfileCardsFrame = { rows: [], groups: [], headers: [] };
+	const frame: ProfileCardsFrame = { rows: [], groups: [], headers: [], actions: [] };
 	if (width < 16) return frame;
 	const card = (id: ProfileCardId, title: string, count: string, body: string[]) => {
 		if (frame.groups.length) frame.rows.push(...gap);
@@ -169,6 +171,9 @@ export function buildProfileCards(snapshot: ProfileCardsSnapshot, theme: Profile
 	card("profile", "Profile", profile?.tier ? TIER_LABEL[profile.tier] ?? profile.tier : "", profileBody);
 	card("model", "Model", "", modelBody);
 	card("quotas", "Quotas", "", quotaBody);
+	// The hint row is the one non-header click target: clicking it asks the
+	// existing usage refresh owner for the scoped providers.
+	if (quotaHint && !state.collapsed?.has("quotas")) frame.actions.push({ id: "fetch-quotas", row: frame.headers[frame.headers.length - 1].row + 1 });
 	card("routing", "Routing", `${snapshot.routing.length}`, routingBody);
 	return frame;
 }
