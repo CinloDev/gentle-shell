@@ -6,6 +6,7 @@ import { createChatViewport } from "../node_modules/@earendil-works/pi-coding-ag
 import { installSidebar, type SidebarDestination } from "../lib/shell-sidebar-layout.ts";
 import { sidebarHeader, sidebarPart, type SidebarRail } from "../lib/shell-sidebar.ts";
 import { SidebarGitFrameCache, SidebarGitHistory } from "../lib/sidebar-git-graph.ts";
+import { buildProfileCards, type ProfileCardId, type ProfileCardsFrame, type ProfileCardsSnapshot } from "../lib/profile-cards.ts";
 
 // Diagnostic baseline, not a speed gate. Keep the document settled: the same
 // prebuilt lines and component survive every native fullscreen scroll frame.
@@ -30,9 +31,9 @@ const markdownTheme = Object.fromEntries([
 	"hr", "listBullet", "bold", "italic", "strikethrough", "underline",
 ].map((key) => [key, (text: string) => `\x1b[36m${text}\x1b[39m`])) as unknown as MarkdownTheme;
 
-function createFixture(columns: number, rowCount: number, sidebar: boolean, workload: Workload = "plain", tabs = false) {
+function createFixture(columns: number, rowCount: number, sidebar: boolean, workload: Workload = "plain", tabs = false, profile = false) {
 	const rows = Array.from({ length: rowCount }, (_, index) => `ROW-${String(index).padStart(5, "0")} settled transcript`);
-	const counts = { transcript: 0, header: 0, rail: 0, railDigest: 0, git: 0, publish: 0, markdownMiss: 0, widthBuild: 0, lastWidth: 0 };
+	const counts = { transcript: 0, header: 0, rail: 0, railDigest: 0, git: 0, profile: 0, publish: 0, markdownMiss: 0, widthBuild: 0, lastWidth: 0 };
 	// The repository the GIT destination reads; a test mutates it to simulate a refresh.
 	const repository = { branch: "main", lines: historyLines("HEAD -> main, origin/main") };
 	const markdown = workload === "markdown" ? new Markdown(
@@ -82,6 +83,7 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 	let onDestination: (id: string | undefined) => void = () => {};
 	let onViewport: (id: string, height: number) => void = () => {};
 	let history: SidebarGitHistory | undefined;
+	const destinations: SidebarDestination[] = sidebar && tabs ? [{ id: "main", label: "MAIN" }] : [];
 	if (sidebar && tabs) {
 		const frame = new SidebarGitFrameCache();
 		let viewport = 1, offset = 0;
@@ -98,7 +100,8 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 			return { code: 0, stdout: `${repository.lines.join("\n")}\n` };
 		}, async () => "clean", () => { counts.publish++; tui.requestRender(); });
 		history = gitHistory;
-		navigation = () => [{ id: "main", label: "MAIN" }, { id: "git", label: "GIT", rail: gitRail }];
+		destinations.push({ id: "git", label: "GIT", rail: gitRail });
+		navigation = () => destinations;
 		// The extension activates Git history only while its destination is shown,
 		// and republishes the rail viewport the frame it measured.
 		onDestination = (id) => gitHistory.setActive(id === "git");
@@ -108,6 +111,40 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 			offset = Math.min(offset, maxOffset());
 			queueMicrotask(() => tui.requestRender());
 		};
+	}
+	// The production PROFILE destination mirrors its extension wiring in miniature:
+	// one plain snapshot per render, a digest keyed on the snapshot identity and
+	// cached frames by width, never a fetch or a filesystem read inside a frame.
+	if (sidebar && tabs && profile) {
+		const collapsed = new Set<ProfileCardId>();
+		let hover: ProfileCardId | undefined;
+		let profileFrame: { width: number; frame: ProfileCardsFrame } | undefined;
+		const quota = {
+			provider: "openai-codex", plan: "Plus", fetchedAt: 1_788_600_000_000 - 60_000, limits: [
+				{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: 1_788_600_000_000 + 3_600_000, used: 62, budget: 100 }] },
+				{ name: "codex", limitReached: false, windows: [{ label: "week", usedPercent: 12, windowSeconds: 604_800, resetAt: null }] },
+			] as never,
+		} as never as import("../lib/shell-usage.ts").ProviderUsage;
+		const snapshot = (): ProfileCardsSnapshot => ({
+			profile: { label: "team (session)", tier: "standard" },
+			model: { id: "nan/glm5", provider: "nan", effort: "high", contextPercent: 42, costTotal: 0.25 },
+			routing: [{ role: "explore", model: "nan/qwen" }, { role: "worker", model: "openai-codex/gpt-5.5", effort: "high" }],
+			quotas: [quota],
+			now: 1_788_600_000_000,
+		});
+		const profileRail: SidebarRail = {
+			surface: "panel",
+			digest: () => JSON.stringify([[...collapsed], hover]),
+			render: (width) => {
+				counts.profile++;
+				const frame = buildProfileCards(snapshot(), theme, width, "comfortable", { collapsed, hovered: hover });
+				profileFrame = { width, frame };
+				return frame.rows;
+			},
+			invalidate() {},
+		};
+		destinations.push({ id: "profile", label: "PROFILE", rail: profileRail });
+		navigation = () => destinations;
 	}
 	if (sidebar) footer.addChild(sidebarPart(tui, "footer", {
 		digest: () => { counts.railDigest++; return "status"; },
@@ -132,7 +169,7 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 }
 
 function measure(fixture: Fixture, invalidate = false, anchors?: number[]) {
-	const { transcript, header, rail, railDigest, git, markdownMiss, widthBuild } = fixture.counts;
+	const { transcript, header, rail, railDigest, git, profile, markdownMiss, widthBuild } = fixture.counts;
 	fixture.viewport.transcript.scrollToEnd();
 	const maxTop = fixture.viewport.transcript.scrollTop;
 	const positions = anchors ?? [0, Math.floor(maxTop / 4), Math.floor(maxTop / 2), Math.floor(maxTop * 3 / 4), maxTop];
@@ -158,7 +195,7 @@ function measure(fixture: Fixture, invalidate = false, anchors?: number[]) {
 		positions, screens, rawScreens, samplesMs: samples.map((time) => Number(time.toFixed(3))),
 		medianMs: Number(median(samples).toFixed(3)), medianCpuMs: Number(median(cpuSamples).toFixed(3)),
 		renderCalls: { transcript: fixture.counts.transcript - transcript, header: fixture.counts.header - header, rail: fixture.counts.rail - rail,
-			railDigest: fixture.counts.railDigest - railDigest, git: fixture.counts.git - git,
+			railDigest: fixture.counts.railDigest - railDigest, git: fixture.counts.git - git, profile: fixture.counts.profile - profile,
 			markdownMiss: fixture.counts.markdownMiss - markdownMiss, widthBuild: fixture.counts.widthBuild - widthBuild },
 		contentWidth: fixture.counts.lastWidth,
 		viewportHeight: fixture.viewport.transcript.viewportHeight,
@@ -306,17 +343,20 @@ test("wrapped ANSI and native Markdown distinguish width composition from settle
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 // The navigation row is a leaf of the native layout tree, so the real
 // alt-screen mouse dispatch is the only public route into the GIT tab.
-function openGit(fixture: Fixture) {
+function openTab(fixture: Fixture, label: string) {
 	const screen = fixture.render();
-	const row = screen.findIndex((line) => /(^|\s)GIT(\s|$)/.test(strip(line)));
-	assert.ok(row >= 0, "the GIT tab is painted in the rail");
-	const x = strip(screen[row]!).indexOf("GIT");
+	const row = screen.findIndex((line) => new RegExp(`(^|\\s)${label}(\\s|$)`).test(strip(line)));
+	assert.ok(row >= 0, `the ${label} tab is painted in the rail`);
+	const x = strip(screen[row]!).indexOf(label);
 	const result = (fixture.tui as unknown as { dispatchMouseToLayout(event: object): unknown }).dispatchMouseToLayout({
 		type: "click", button: "left", x, y: row, screenX: x, screenY: row, width: fixture.columns, height: 24,
 		shift: false, alt: false, ctrl: false,
 	});
-	assert.ok(result, "the GIT tab accepts the click");
+	assert.ok(result, `the ${label} tab accepts the click`);
 	return fixture.render();
+}
+function openGit(fixture: Fixture) {
+	return openTab(fixture, "GIT");
 }
 const sectionCounts = (counts: Fixture["counts"]) => ({ header: counts.header, rail: counts.rail, railDigest: counts.railDigest, git: counts.git });
 
@@ -436,5 +476,54 @@ test("a very long branch and ref name clip inside the rail and keep it painted",
 		console.log("long branch", JSON.stringify({ rail: railColumn.map((row) => row.trimEnd()).filter(Boolean).slice(0, 8), width: railColumn.map(visibleWidth).slice(0, 4) }));
 	} finally {
 		fixture.stop();
+	}
+});
+
+test("the PROFILE destination keeps the transcript and header byte-identical to the disabled destination", () => {
+	// Control: the PROFILE key off (no PROFILE destination in the navigation).
+	const disabled = createFixture(140, 120, true);
+	const enabled = createFixture(140, 120, true, "plain", true, true);
+	try {
+		disabled.render();
+		const selected = openTab(enabled, "PROFILE");
+		assert.match(selected.join("\n"), /\[PROFILE\]/, "the click selects the PROFILE destination");
+		const activated = enabled.render();
+		assert.match(activated.join("\n"), /PROFILE/, "the PROFILE cards are painted");
+		assert.match(activated.join("\n"), /team \(session\)/, "the profile card shows the active profile");
+		assert.match(activated.join("\n"), /team \(session\)[\s\S]*explore → nan\/qwen/, "routing rows are painted");
+		assert.match(activated.join("\n"), /codex 5h/, "the scoped cached quota rows are painted without any fetch");
+		const off = measure(disabled);
+		const on = measure(enabled, false, off.positions);
+		console.log("profile destination", JSON.stringify({ off: off.renderCalls, on: on.renderCalls, contentWidth: on.contentWidth, viewportHeight: on.viewportHeight, medianMs: { off: off.medianMs, on: on.medianMs } }));
+		// Both destinations do the same transcript work, and a settled frame
+		// never re-renders the shared header.
+		assert.equal(on.renderCalls.transcript, off.renderCalls.transcript);
+		assert.equal(on.renderCalls.header, off.renderCalls.header);
+		assert.equal(on.renderCalls.transcript, off.positions.length * 3);
+		// Unrelated sections are not even digested while PROFILE is the tab.
+		assert.equal(on.renderCalls.railDigest, 0, "PROFILE never reads a MAIN section digest");
+		assert.equal(on.renderCalls.rail, 0, "PROFILE never renders a MAIN section");
+		assert.equal(on.renderCalls.git, 0, "PROFILE never renders GIT");
+		assert.equal(on.renderCalls.profile, 0, "a settled PROFILE frame reuses its cached rows");
+		// Visible output of the unrelated sections is identical frame by frame.
+		assert.deepEqual(on.positions, off.positions);
+		for (let frame = 0; frame < off.screens.length; frame++) {
+			const reference = off.screens[frame]!;
+			const screen = on.screens[frame]!;
+			assert.equal(screen.length, reference.length, "the PROFILE destination keeps the terminal height");
+			assert.equal(screen[0], reference[0], "the header row is unchanged");
+			assert.equal(screen[0], "HEADER 140");
+			assert.deepEqual(transcriptRows(screen), transcriptRows(reference), "the transcript is unchanged");
+			const column = (lines: string[], width: number) => lines.map((line) => line.slice(0, width).trimEnd());
+			assert.deepEqual(column(screen, on.contentWidth), column(reference, off.contentWidth), "the conversation column is byte-identical");
+			assert.ok(!screen.some((line) => line.includes("Status card")), "the PROFILE destination does not paint the MAIN footer");
+			assert.ok(!reference.some((line) => line.includes("PROFILE")), "the control has no PROFILE destination");
+		}
+		// Frame building is bounded: one reached, cached frame repaints from the
+		// cache on the next digest change with no extra render calls.
+		assert.ok(enabled.counts.profile <= 1, "activation built the frame at most once");
+	} finally {
+		disabled.stop();
+		enabled.stop();
 	}
 });
