@@ -26,7 +26,7 @@ test("profile card frames align headers and groups for every collapse combinatio
 		const frame = buildProfileCards(snapshot, theme, width, density, { collapsed });
 		assert.deepEqual(renderProfileCards(snapshot, theme, width, density, { collapsed }), frame.rows);
 		assert.deepEqual(profileCardGroups(snapshot, density, { collapsed }, width).groups, frame.groups);
-		if (width < 16) { assert.deepEqual(frame, { rows: [], groups: [], headers: [], actions: [] }); continue; }
+		if (width < 16) { assert.deepEqual(frame, { rows: [], groups: [], headers: [], actions: [], entries: [], roles: [] }); continue; }
 		assert.deepEqual(frame.headers.map(header => header.id), ids);
 		frame.groups.forEach((group, index) => {
 			assert.equal(frame.headers[index].row, group.start);
@@ -135,6 +135,24 @@ test("PROFILE quotas render only providers and models the profile routing names"
 	assert.match(empty, /nan · Pro/);
 });
 
+test("PROFILE profile card body rows publish open-profiles entries, headers do not", () => {
+	const now = 1_788_600_000_000;
+	const populated = buildProfileCards({ profile: { label: "team (session)", tier: "standard" }, routing: [], now }, theme, 50);
+	const profileGroup = populated.groups.find((_group, index) => populated.headers[index]?.id === "profile");
+	assert.ok(profileGroup);
+	const rowsWith = populated.entries.map(entry => entry.row);
+	assert.ok(rowsWith.length >= 1, "populated profile body has entry rows");
+	for (const row of rowsWith) {
+		assert.ok(row > populated.headers[0].row, "inside the profile card");
+		assert.ok(!populated.headers.some(header => header.row === row), "never a header row");
+	}
+	const absent = buildProfileCards({ routing: [], now }, theme, 50);
+	assert.equal(absent.entries.length, 0, "no profile, no entry");
+	const folded = buildProfileCards({ profile: { label: "team (session)" }, routing: [], now }, theme, 50, "compact", { collapsed: new Set(["profile"]) });
+	assert.equal(folded.entries.length, 0, "folded card has no body entries");
+	const modelRows = buildProfileCards({ profile: { label: "team (session)" }, routing: [], now }, theme, 50).entries;
+	assert.ok(modelRows.every(entry => entry.id === "open-profiles"), "scoped entry ids only");
+});
 
 test("PROFILE routing rows append the effort letter in a distinct color at the right edge", () => {
 	const now = 1_788_600_000_000;
@@ -185,7 +203,27 @@ test("PROFILE routing rows append the effort letter in a distinct color at the r
 	assert.ok(plainLine && !/[a-z]$/.test(plainLine.trimEnd()), "an undefined effort paints a blank marker");
 });
 
-
+test("PROFILE model and routing rows publish their role targets for the focused modal open", () => {
+	const now = 1_788_600_000_000;
+	const snapshot: ProfileCardsSnapshot = {
+		profile: { label: "team (session)" },
+		model: { id: "glm5", provider: "nan", effort: "high", contextPercent: 40, costTotal: 0.25 },
+		routing: [{ role: "worker", model: "nan/glm5" }, { role: "explore", model: "nan/qwen" }],
+		quotas: [{ provider: "nan", plan: "Pro", fetchedAt: now, limits: [{ name: "glm5", limitReached: false, windows: [{ label: "", usedPercent: 20, windowSeconds: null, resetAt: null }] }] }],
+		now,
+	};
+	const frame = buildProfileCards(snapshot, theme, 60);
+	const modelGroup = frame.groups[frame.headers.findIndex(header => header.id === "model")];
+	const modelRole = frame.roles.find(role => role.row > modelGroup.start && role.row < modelGroup.end);
+	assert.equal(modelRole?.role, "orchestrator", "the model card's first row focuses the orchestrator");
+	const routingGroup = frame.groups[frame.headers.findIndex(header => header.id === "routing")];
+	const routingRoles = frame.roles.filter(role => role.row > routingGroup.start && role.row < routingGroup.end).map(role => role.role);
+	assert.deepEqual(routingRoles, ["worker", "explore"], "each routing row carries its own agent");
+	const folded = buildProfileCards(snapshot, theme, 60, "compact", { collapsed: new Set(["routing"]) });
+	assert.equal(folded.roles.filter(role => role.role === "worker").length, 0, "folded routing has no role targets");
+	const empty = buildProfileCards({ routing: [], now }, theme, 60);
+	assert.equal(empty.roles.length, 0, "no model, no role targets");
+});
 
 test("PROFILE quota hint exposes a fetch action only while the hint row is rendered", () => {
 	const now = 1_788_600_000_000;
@@ -199,6 +237,7 @@ test("PROFILE quota hint exposes a fetch action only while the hint row is rende
 	const collapsed = buildProfileCards({ routing: [] }, theme, 50, "compact", { collapsed: new Set(["quotas"]) });
 	assert.equal(collapsed.actions.length, 0);
 });
+
 test("PROFILE quotas render normalized cached providers, caps and resets without nonfinite percentages", () => {
 	const now = 1_788_600_000_000;
 	const codex = parseCodexUsage({ plan_type: "Plus", rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_after_seconds: 3600 }, secondary_window: { used_percent: 80, limit_window_seconds: 604800 } } }, now);

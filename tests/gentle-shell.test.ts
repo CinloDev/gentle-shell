@@ -9,6 +9,7 @@ import { initTheme, type ExtensionAPI, type ExtensionContext, type SlashCommandI
 import { CURSOR_MARKER, matchesKey, stripTerminalSequences as stripAnsi, TuiAltScreen, TuiMainScreen, VStack, visibleWidth, type Terminal, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { renderLayoutFrame, type LayoutBox } from "@earendil-works/pi-tui/dist/layout.js";
 import installGentleShell, { backgroundChangeRefreshesSettled, buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, extractQueuedText, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, GentlePromptEditor } from "../extensions/gentle-shell.ts";
+import { PROFILES_OPEN_EVENT } from "../lib/profiles-open-request.ts";
 import { CODEX_USAGE_URL, NAN_QUOTA_URL, USAGE_SOURCE_EVENT, USAGE_SOURCE_SCHEMA } from "../lib/shell-usage.ts";
 import { bindSessionProfile, clearSessionProfileBinding, resetSessionProfileBindingsForTesting } from "../lib/session-profile-binding.ts";
 import { createVimEditorAdapter, isAuditedPiEditorVersion } from "../lib/vim-editor-adapter.ts";
@@ -615,6 +616,58 @@ test("PROFILE quota hint click fetches the scoped providers and a profile change
 		writeProfilesStore(home, { team: { worker: { model: "openai-codex/model-x" } } }, "team");
 		await new Promise(resolve => setTimeout(resolve, 2_300));
 		assert.ok(fetches > afterProfile, "a changed profile refreshes the new scope through the existing poller");
+	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+test("PROFILE profile-card body clicks request the profiles modal, header clicks do not", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+	writeProfilesStore(home, { team: { worker: { model: "nan/glm5" } } }, "team");
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: (async () => ({ ok: false }) as Response) as typeof fetch, now: () => 1_788_600_000_000 });
+	const { ctx, ui } = fakeContext({ token: JWT }); await fire(handlers, "session_start", ctx); await settle();
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const footer = (ui.footerFactory as any)(host, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+	try {
+		const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+		const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+		const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+		const rows = (): string[] => scroll().render(50);
+		const text = () => rows().map(stripAnsi).join("\n");
+		const select = (x: number) => {
+			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+			nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
+		};
+		const click = (y: number) => scroll().handleMouse({ type: "click", button: "left", x: 4, y, width: 50, height: 55 });
+		select(10);
+		assert.match(text(), /PROFILE/);
+		const emitted: string[] = [];
+		let lastProfilesPayload: { role?: string } | undefined;
+		const originalEmit = pi.events.emit.bind(pi.events);
+		(pi.events as { emit(name: string, data?: unknown): void }).emit = (name: string, data?: unknown) => { emitted.push(name); if (name === PROFILES_OPEN_EVENT) lastProfilesPayload = data as { role?: string } | undefined; };
+		const headerY = rows().findIndex(row => /PROFILE/.test(stripAnsi(row)) && /[▾▸]/.test(stripAnsi(row)));
+		assert.ok(headerY >= 0, "profile card header is rendered");
+		click(headerY + 1);
+		assert.deepEqual(emitted, [PROFILES_OPEN_EVENT], "a profile-card body row requests the modal");
+		click(headerY);
+		assert.deepEqual(emitted, [PROFILES_OPEN_EVENT], "the header keeps collapsing without requesting the modal");
+		// The model card's first body row focuses the orchestrator; routing rows
+		// carry their own agent. Payloads ride the same single channel.
+		emitted.length = 0;
+		const modelHeaderY = rows().findIndex(row => stripAnsi(row).includes("MODEL") && /[\u25be\u25b8]/.test(stripAnsi(row)));
+		assert.ok(modelHeaderY >= 0, "model card header is rendered");
+		click(modelHeaderY + 1);
+		assert.deepEqual(emitted, [PROFILES_OPEN_EVENT], "the model row requests the modal");
+		assert.equal(lastProfilesPayload?.role, "orchestrator", "the model row focuses the orchestrator");
+		emitted.length = 0;
+		const routingHeaderY = rows().findIndex(row => stripAnsi(row).includes("ROUTING") && /[\u25be\u25b8]/.test(stripAnsi(row)));
+		const workerRowY = rows().findIndex(row => stripAnsi(row).includes("worker") && !stripAnsi(row).includes("MODEL"));
+		assert.ok(routingHeaderY >= 0 && workerRowY > routingHeaderY, "routing rows are rendered");
+		click(workerRowY);
+		assert.deepEqual(emitted, [PROFILES_OPEN_EVENT], "a routing row requests the modal");
+		assert.equal(lastProfilesPayload?.role, "worker", "the routing row carries its agent");
+		(pi.events as { emit(name: string, data?: unknown): void }).emit = originalEmit as never;
 	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 test("PROFILE long routes fill the useful composed frame width without consuming border padding", async t => {

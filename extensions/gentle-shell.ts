@@ -146,6 +146,7 @@ import { layoutSchematic } from "../lib/visual-layout-preview.ts";
 import { collectSessionStats, type SessionStats } from "../lib/shell-stats.ts";
 import { sessionChangeRoots } from "../lib/session-changes.ts";
 import { REVIEW_SIDEBAR_EVENT, isReviewSidebarSnapshot, type ReviewSidebarSnapshot } from "../lib/review-sidebar-state.ts";
+import { requestProfilesOpen } from "../lib/profiles-open-request.ts";
 import { JOBS_SIDEBAR_EVENT, JOBS_STATUS_KEY, isJobsSidebarSnapshot, jobsCollapseKey, type RunningJobDisplay } from "../lib/jobs-sidebar-state.ts";
 import { JOBS_FINISHED_TTL_MS, renderJobsSection } from "../lib/jobs-widget.ts";
 import { todoCollapseKey } from "../lib/shell-todo.ts";
@@ -3176,6 +3177,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				invalidate() {},
 			};
 			const profileTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.headers.find(header => header.row === y)?.id : undefined;
+			const profileEntryTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.entries.find(entry => entry.row === y)?.id : undefined;
+			const profileRoleTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.roles.find(role => role.row === y) : undefined;
 			const profileActionTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.actions.find(action => action.row === y)?.id : undefined;
 			const profileRegion = new NativePointerRegion(profileCard, {
 				onHover(event) {
@@ -3194,6 +3197,20 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 				onClick(event) {
 					if (event.button !== "left") return undefined;
+					// T5 scoped entry: a profile-card body row asks the models/profiles
+					// owner to open the existing modal with its own preselection; the
+					// card applies no change itself. A model/routing row names its role
+					// so the modal lands the cursor on that row. The quota hint is the
+					// fetch shortcut.
+					const roleTarget = profileRoleTarget(event.y, event.width);
+					if (roleTarget?.id === "open-profiles-role") {
+						requestProfilesOpen(pi, { role: roleTarget.role });
+						return { handled: true, render: true };
+					}
+					if (profileEntryTarget(event.y, event.width) === "open-profiles") {
+						requestProfilesOpen(pi);
+						return { handled: true, render: true };
+					}
 					// The quota hint is a shortcut onto the same refresh owner /gentle:usage
 					// uses, honoring the same per-provider throttle; it never bypasses it.
 					if (profileActionTarget(event.y, event.width) === "fetch-quotas") {

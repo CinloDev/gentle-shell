@@ -19,6 +19,7 @@ import { rejectUnriskedVerifierLaunch } from "../lib/verifier-admission.ts";
 import { VERIFIER_SETTLE_REMINDER_TYPE, createVerifierSettleReminders, finalAssistantText } from "../lib/verifier-settle-reminder.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
+import { onProfilesOpenRequest } from "../lib/profiles-open-request.ts";
 import { snapshotReviewStartContext } from "../lib/review-start-context.ts";
 import { asNativeReviewCliError, readReviewFailureFacts } from "../lib/review-failure-facts.ts";
 import { REVIEW_BLOCKER_GUIDANCE, withReviewBlocker } from "../lib/review-blocker.ts";
@@ -4088,6 +4089,8 @@ class RoutingTablePanel implements OverlayComponent {
 			switchProfile?: RoutingProfileSwitcher;
 			fallbacks?: RoutingFallbacks;
 			modeDraft?: OrchestratorMode;
+			/** Initial cursor row (orchestrator key or agent name); an unknown role keeps the default. */
+			focusRole?: string;
 		} = {},
 	) {
 		this.switchProfile = options.switchProfile;
@@ -4105,6 +4108,10 @@ class RoutingTablePanel implements OverlayComponent {
 		this.modeDraft = options.modeDraft ?? this.committedMode;
 		this.agents = [...agents];
 		this.rows = [PROFILE_ORCHESTRATOR_KEY, ROUTING_ALL_ROW, ...agents];
+		// A click-through entry point can land the cursor directly on the row it
+		// names; an unknown or unnamed role keeps the default top-of-table focus.
+		const focusIndex = options.focusRole === undefined ? -1 : this.rows.indexOf(options.focusRole);
+		this.cursor = focusIndex >= 0 ? focusIndex : 0;
 		// The control entries of the old panel (keep current, custom id) are not
 		// models; this screen offers inherit and custom as its own options.
 		this.catalog = modelOptions.filter((option) => !(MODEL_CONTROL_OPTIONS as readonly string[]).includes(option));
@@ -5431,6 +5438,8 @@ interface RoutingTablePanelRequest {
 	name: string;
 	config: AgentModelConfig;
 	file: AgentProfilesFile;
+	/** Initial cursor row for click-through opens; an unknown role is ignored. */
+	focusRole?: string;
 	/** An unsaved orchestrator mode draft carried across a reopen (custom prompt). */
 	modeDraft?: OrchestratorMode;
 	sessionBoundName?: string;
@@ -5543,6 +5552,7 @@ async function showRoutingTablePanel(
 					thinkingSupport,
 					fastModels,
 					notices: request.notices,
+					focusRole: request.focusRole,
 					switchProfile: request.switchProfile,
 					fallbacks: fileRoutingFallbacks(gentleAiConfigHome()),
 					modeDraft: request.modeDraft,
@@ -5573,7 +5583,7 @@ async function showRoutingTablePanel(
  * migrate and a pinned repository is named before any edit. An unreadable
  * saved routing file does not block the screen; Make default discloses it.
  */
-async function openModelsScreen(ctx: ExtensionContext, live: LiveSession): Promise<void> {
+async function openModelsScreen(ctx: ExtensionContext, live: LiveSession, focusRole?: string): Promise<void> {
 	migrateLegacyProjectModelOverrides(ctx.cwd);
 	// A pinned repository resolves its subagent routing from the profile at launch,
 	// so global routing written elsewhere will not reach its subagents. Saying it
@@ -5591,7 +5601,7 @@ async function openModelsScreen(ctx: ExtensionContext, live: LiveSession): Promi
 	const authorityAvailable = sessionProfileAuthorityAvailable(ctx);
 	const launchName = sessionLaunchProfile(ctx, authorityAvailable)?.name;
 	const opensOnLaunch = read.status === "valid" && launchName !== undefined && hasOwnProfile(read.file.profiles, launchName);
-	await openProfilesPanelLoop(ctx, live, opensOnLaunch ? launchName : target?.name, authorityAvailable);
+	await openProfilesPanelLoop(ctx, live, opensOnLaunch ? launchName : target?.name, authorityAvailable, focusRole);
 }
 
 /** `/gentle:profiles export-routing`: write the saved global routing to models.export.json. */
@@ -6533,10 +6543,10 @@ const PROFILES_COMMAND_USAGE = "Usage: /gentle:profiles [export <name> | import 
  * `models.export.json`. The routing verbs carry their own names so a profile
  * can never be mistaken for them.
  */
-async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession, args = ""): Promise<void> {
+async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession, args = "", focusRole?: string): Promise<void> {
 	const [verb = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 	if (verb === "") {
-		await openModelsScreen(ctx, live);
+		await openModelsScreen(ctx, live, focusRole);
 		return;
 	}
 	if (verb === "export-routing" || verb === "restore-routing" || verb === "clear") {
@@ -6618,6 +6628,7 @@ async function openProfilesPanelLoop(
 	live: LiveSession,
 	initialSelectedName?: string,
 	openingAuthority?: boolean,
+	focusRole?: string,
 ): Promise<void> {
 	const store = await loadProfilesStore(ctx);
 	if (!store) return;
@@ -6709,6 +6720,7 @@ async function openProfilesPanelLoop(
 			const launch = sessionLaunchProfile(ctx, authorityAvailable);
 			const result = await step(() => showRoutingTablePanel(ctx, {
 				name: shown,
+				focusRole: focusRole,
 				config: draftOverride ?? stored,
 				file,
 				modeDraft: modeDraftOverride,
@@ -6718,6 +6730,9 @@ async function openProfilesPanelLoop(
 				notices: routingScreenNotices(ctx, file, shown, launch?.name, launch?.modelProfiles, authorityAvailable),
 				switchProfile,
 			}));
+			// The click-through focus belongs to the first visit only; later
+			// iterations are user navigation inside the modal.
+			focusRole = undefined;
 			draftOverride = undefined;
 			feedback = undefined;
 			modeDraftOverride = undefined;
@@ -11841,6 +11856,18 @@ function createGentleAiExtensionForTesting(
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 	const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
+	// The PROFILE rail's profile-card body asks for the existing modal through
+	// this shared event; the bare command's own preselection rules decide what
+	// opens, and the modal stays the only mutation actor. The owning session's
+	// context lives only between its session_start and shutdown.
+	let profilesOpenContext: ExtensionContext | undefined;
+	onProfilesOpenRequest(pi, (request) => {
+		const ctx = profilesOpenContext;
+		if (!ctx?.hasUI) return;
+		// The bare command's preselection still decides the profile; a role from
+		// the rail only lands the cursor on that routing row.
+		void handleProfilesCommand(ctx, pi, "", request.role);
+	});
 	const permissionEnvironment = dependencies.processEnv ?? process.env;
 	let autoPermissions: AutoPermissionRuntime | undefined;
 	const yolo = registerYoloSessionPolicy(pi, permissionEnvironment, { onChange: () => autoPermissions?.cancelPending() });
@@ -11976,6 +12003,7 @@ function createGentleAiExtensionForTesting(
 		reminderSessionActive = false;
 		reminderEpoch += 1;
 		activeRddContext = undefined;
+		profilesOpenContext = undefined;
 		unbindPreparation?.();
 		unbindPreparation = undefined;
 		reminderManager = undefined;
@@ -12472,6 +12500,7 @@ function createGentleAiExtensionForTesting(
 		unbindPreparation?.();
 		reminderManager = ctx.sessionManager;
 		activeRddContext = ctx;
+		profilesOpenContext = ctx;
 		// gentle-shell#1690: a delegated child runs in the parent's resolved
 		// worktree. Repository preparation, review negotiation, asset install and
 		// model config belong to the parent session and write shared state. The

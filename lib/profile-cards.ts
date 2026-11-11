@@ -49,6 +49,10 @@ export type ProfileCardsFrame = {
 	headers: Array<{ id: ProfileCardId; row: number }>;
 	/** Click targets that are not card headers, in the same logical row space. */
 	actions: Array<{ id: "fetch-quotas"; row: number }>;
+	/** Body rows that open the existing /gentle:profiles modal with the default preselection. */
+	entries: Array<{ id: "open-profiles"; row: number }>;
+	/** Role rows that open the modal focused on that routing row (orchestrator or agent). */
+	roles: Array<{ id: "open-profiles-role"; row: number; role: string }>;
 };
 
 /** One-letter effort marker for the routing rows' right edge; empty when the role defines no effort. */
@@ -156,7 +160,7 @@ export function buildProfileCards(snapshot: ProfileCardsSnapshot, theme: Profile
 	// Like MAIN Status, keep density gaps outside the card ranges. Transparent
 	// chrome consumes the groups and owns its own neon/float spacing instead.
 	const gap = sectionGap(density) ? [" ".repeat(Math.max(0, width))] : [];
-	const frame: ProfileCardsFrame = { rows: [], groups: [], headers: [], actions: [] };
+	const frame: ProfileCardsFrame = { rows: [], groups: [], headers: [], actions: [], entries: [], roles: [] };
 	if (width < 16) return frame;
 	const card = (id: ProfileCardId, title: string, count: string, body: string[]) => {
 		if (frame.groups.length) frame.rows.push(...gap);
@@ -164,11 +168,25 @@ export function buildProfileCards(snapshot: ProfileCardsSnapshot, theme: Profile
 		frame.headers.push({ id, row: start });
 		frame.rows.push(renderPanelHeader(theme as never, width, { title, count, open: !state.collapsed?.has(id), hovered: state.hovered === id }));
 		if (!state.collapsed?.has(id)) {
+		const bodyStart = frame.rows.length;
 		frame.rows.push(...body.map(row => truncateToWidth(row, width, "…")));
+		// Role rows carry their routing target: the model card's first row is the
+		// orchestrator; each routing row is its own agent. The panel's open-time
+		// state decides whether the named row still exists.
+		if (id === "model" && model) frame.roles.push({ id: "open-profiles-role", row: bodyStart, role: "orchestrator" });
+		if (id === "routing") {
+			snapshot.routing.forEach((entry, index) => frame.roles.push({ id: "open-profiles-role", row: bodyStart + index, role: entry.role }));
+		}
 	}
 		frame.groups.push({ start, end: frame.rows.length });
 	};
 	card("profile", "Profile", profile?.tier ? TIER_LABEL[profile.tier] ?? profile.tier : "", profileBody);
+	// T5 scoped entry: the profile card's body rows open the existing modal; the
+	// header row keeps collapsing. Absent profile has nothing to preselect.
+	if (profile && !state.collapsed?.has("profile")) {
+		const profileHeader = frame.headers[frame.headers.length - 1].row;
+		for (let row = profileHeader + 1; row < frame.rows.length; row++) frame.entries.push({ id: "open-profiles", row });
+	}
 	card("model", "Model", "", modelBody);
 	card("quotas", "Quotas", "", quotaBody);
 	// The hint row is the one non-header click target: clicking it asks the

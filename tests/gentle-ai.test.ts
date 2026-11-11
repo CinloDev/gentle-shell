@@ -18,6 +18,7 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { __testing, applyModelConfig, applyModelConfigAsync, createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import { PROFILES_OPEN_EVENT } from "../lib/profiles-open-request.ts";
 import { PROFILES_KIND, PROFILES_VERSION, bootstrapProfilesFile, readProfilesFileResult, type AgentProfilesFile } from "../lib/agent-profiles.ts";
 import { bindSessionProfile, readSessionProfileBinding, resetSessionProfileBindingsForTesting } from "../lib/session-profile-binding.ts";
 import { freezeSessionProfileAtOwnStart, freezeSessionProfileAtStartup, resetFrozenInheritedProfilesForTesting } from "../lib/session-profile-freeze.ts";
@@ -434,8 +435,11 @@ function routingConsumerFixture(t: test.TestContext, agents = ["worker"]) {
 	let setModelResult = true;
 	let thinkingRejects = false;
 	let liveThinking = "medium";
+	const eventHandlers = new Map<string, (payload: unknown) => void>();
+	const lifecycleHandlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
 	createGentleAiExtension({ nativeReviewCli: null })({
-		on() {},
+		on(name: string, handler: (event: unknown, ctx: unknown) => Promise<void>) { lifecycleHandlers.set(name, handler); },
+		events: { on(name: string, handler: (payload: unknown) => void) { eventHandlers.set(name, handler); return () => eventHandlers.delete(name); }, emit(name: string, payload?: unknown) { eventHandlers.get(name)?.(payload); } },
 		registerTool() {},
 		registerCommand(name, command) { commands.set(name, command); },
 		setModel: async (model: { provider: string; id: string }) => { liveSwitches.push({ kind: "model", provider: model.provider, id: model.id }); return setModelResult; },
@@ -526,8 +530,69 @@ function routingConsumerFixture(t: test.TestContext, agents = ["worker"]) {
 		inputPrompts,
 		setSessionId(next: string | undefined) { sessionId = next; },
 		run: (name: string, args = "") => commands.get(name)!.handler(args, ctx),
+		emitEvent: (name: string, payload?: unknown) => eventHandlers.get(name)?.(payload),
+		startSession: async (sessionContext: unknown) => lifecycleHandlers.get("session_start")!({}, sessionContext),
+		ctx,
 	};
 }
+
+test("a profiles-open request opens the existing models screen without arguments", async (t) => {
+	const fixture = routingConsumerFixture(t, ["worker"]);
+	// The owning session starts first; the user's saved store is what the
+	// opened panel must read at open time, not what startup machinery seeded.
+	await fixture.startSession(fixture.ctx);
+	mkdirSync(fixture.configHome, { recursive: true });
+	writeFileSync(join(fixture.configHome, "profiles.json"), JSON.stringify({ kind: PROFILES_KIND, version: PROFILES_VERSION, active: "team", profiles: { team: { worker: { model: "openai/alpha" } } } }));
+	// Esc closes the opened panel through the panel's own done, like every
+	// other profiles-panel test drives it.
+	fixture.onInput((panel) => panel.handleInput("\x1b"));
+	fixture.emitEvent(PROFILES_OPEN_EVENT);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(fixture.panelVisits(), 1, "the event opens the one panel");
+	// The visible preselection contract: the resolved active profile is the
+	// opened tab, exactly like the bare command (agent rows beyond the fold
+	// depend on discovery, not on this entry point).
+	assert.match(fixture.panels[0] ?? "", /team ◉/, "the bare command's own preselection decides the opened profile");
+});
+
+test("a profiles-open request with a role lands the cursor on that routing row", async (t) => {
+	const fixture = routingConsumerFixture(t, ["worker"]);
+	await fixture.startSession(fixture.ctx);
+	mkdirSync(fixture.configHome, { recursive: true });
+	writeFileSync(join(fixture.configHome, "profiles.json"), JSON.stringify({ kind: PROFILES_KIND, version: PROFILES_VERSION, active: "team", profiles: { team: { worker: { model: "openai/alpha" } } } }));
+	let panel: { render(width: number): string[] } | undefined;
+	fixture.onInput((opened) => { panel = opened; opened.handleInput("\x1b"); });
+	fixture.emitEvent(PROFILES_OPEN_EVENT, { role: "worker" });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(panel, "the panel opened");
+	const rendered = stripAnsi(panel!.render(120).join("\n"));
+	// The cursor marker sits on the worker row, not the default orchestrator top.
+	const lines = rendered.split("\n");
+	const workerLine = lines.findIndex(line => line.includes("worker") && line.includes("openai/alpha"));
+	const cursorLine = lines.findIndex(line => line.includes("▸"));
+	assert.ok(workerLine >= 0, "the worker row renders");
+	assert.equal(cursorLine, workerLine, "the requested role owns the cursor");
+});
+
+test("an unknown role keeps the default cursor without breaking the open", async (t) => {
+	const fixture = routingConsumerFixture(t, ["worker"]);
+	await fixture.startSession(fixture.ctx);
+	mkdirSync(fixture.configHome, { recursive: true });
+	writeFileSync(join(fixture.configHome, "profiles.json"), JSON.stringify({ kind: PROFILES_KIND, version: PROFILES_VERSION, active: "team", profiles: { team: { worker: { model: "openai/alpha" } } } }));
+	fixture.onInput((panel) => panel.handleInput("\x1b"));
+	fixture.emitEvent(PROFILES_OPEN_EVENT, { role: "no-such-agent" });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(fixture.panelVisits(), 1, "an unknown role still opens the modal");
+});
+
+test("a profiles-open request without an owning session or UI stays inert", async (t) => {
+	const fixture = routingConsumerFixture(t, ["worker"]);
+	// No session_start ran, so the listener has no owning context and must not
+	// throw or open anything.
+	fixture.emitEvent(PROFILES_OPEN_EVENT);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(fixture.panelVisits(), 0, "no context, no panel");
+});
 
 const RIGHT_KEY = "\x1b[C";
 
@@ -1891,8 +1956,8 @@ test(`${channel} emits only a private, balanced Herdr projection`, () => {
 	const privateHostDiscovery = new Set(["gentle:yolo:host-ui", "gentle:rdd:host-ui"]);
 	for (const channel of privateHostDiscovery) assert.equal(eventHandlers.has(channel), true);
 	assert.deepEqual([...eventHandlers.keys()].filter(name => !privateHostDiscovery.has(name)).sort(), [
-		"gentle-pi:ask-user-choice:blocked", "gentle-pi:ask-user-question:blocked", "rpiv:ask-user:blocked",
-	], "only the original three blocked channels remain besides the known private host adapters");
+		PROFILES_OPEN_EVENT, "gentle-pi:ask-user-choice:blocked", "gentle-pi:ask-user-question:blocked", "rpiv:ask-user:blocked",
+	], "the profiles-open entry joins the known display channels without adding private host payloads");
 	assert.deepEqual(published, [], "registering host discovery emits no public event or private payload");
 	assert.equal(eventHandlers.has("gentle-pi:ask-user-choice:blocked"), true);
 	assert.equal(eventHandlers.has("rpiv:ask-user:blocked"), true);
