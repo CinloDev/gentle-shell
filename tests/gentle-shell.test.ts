@@ -573,9 +573,6 @@ test("PROFILE quotas repaint cached providers at identical timestamps without fe
 	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
-
-
-
 test("PROFILE quota hint click fetches the scoped providers and a profile change refreshes the new scope", async t => {
 	const home = scopedDoubleEscCancelConfigHome(t);
 	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
@@ -618,6 +615,7 @@ test("PROFILE quota hint click fetches the scoped providers and a profile change
 		assert.ok(fetches > afterProfile, "a changed profile refreshes the new scope through the existing poller");
 	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
+
 test("PROFILE profile-card body clicks request the profiles modal, header clicks do not", async t => {
 	const home = scopedDoubleEscCancelConfigHome(t);
 	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
@@ -670,6 +668,31 @@ test("PROFILE profile-card body clicks request the profiles modal, header clicks
 		(pi.events as { emit(name: string, data?: unknown): void }).emit = originalEmit as never;
 	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
+
+test("a usage reading crossing the quota threshold notifies once per window cycle", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+	const { pi, handlers } = fakePi();
+	let fetches = 0, now = 1_788_600_000_000;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { now: () => now, fetch: (async () => { fetches++; return { ok: false } as Response; }) as typeof fetch });
+	const { ctx, ui } = fakeContext({ token: JWT }); await fire(handlers, "session_start", ctx); await settle();
+	const response = async (percent: number) => {
+		for (const handler of handlers.get("after_provider_response") ?? []) await handler({ headers: { "x-codex-primary-used-percent": String(percent), "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-at": String((now + 3600000) / 1000) } }, ctx);
+	};
+	try {
+		const notifications = ui.notices;
+		await response(96);
+		assert.match(notifications.at(-1) ?? "", /openai-codex codex 5h is at 96%/, "crossing the threshold notifies");
+		const afterFirst = notifications.length;
+		await response(98);
+		assert.equal(notifications.length, afterFirst, "the same window cycle never re-notifies");
+		await response(40);
+		await response(99);
+		assert.match(notifications.at(-1) ?? "", /is at 99%/, "recovered below the threshold, a new crossing notifies again");
+	} finally { await fire(handlers, "session_shutdown", ctx); }
+});
+
 test("PROFILE long routes fill the useful composed frame width without consuming border padding", async t => {
 	const previousSurface = chromeSurface(), previousStyle = cardStyle();
 	t.after(() => { setChromeSurface(previousSurface); setCardStyle(previousStyle); });
