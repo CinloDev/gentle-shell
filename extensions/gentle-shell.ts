@@ -140,7 +140,7 @@ import { installSidebar, invalidateSidebar, narrowStatusOwner, SIDEBAR_BREAKPOIN
 import { SidebarGitCards } from "../lib/git-cards.ts";
 import { buildProfileCards, type ProfileCardId, type ProfileCardsFrame, type ProfileCardsSnapshot } from "../lib/profile-cards.ts";
 import { discoverSidebarGitRoots, type SidebarGitRoots } from "../lib/sidebar-git-roots.ts";
-import { panelSheetBackHit, renderPanelSheet, renderWorkRow, setChromeSurface, workRowLead } from "../lib/shell-panel.ts";
+import { chromeSurface, panelSheetBackHit, renderPanelSheet, renderWorkRow, setChromeSurface, workRowLead } from "../lib/shell-panel.ts";
 import { installPagePaint, type PageTheme } from "../lib/shell-page.ts";
 import { layoutSchematic } from "../lib/visual-layout-preview.ts";
 import { collectSessionStats, type SessionStats } from "../lib/shell-stats.ts";
@@ -2753,15 +2753,26 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				render(width) {
 					const showGit = tabsSettings.gitHistory === "on", showDiff = tabsSettings.diff === "on";
 					const bothOpen = showGit && showDiff && !historyCollapsed && !diffCollapsed;
-					const available = Math.max(1, historyViewport - Number(selectorVisible()));
+					// The separating row between the two equal-weight cards reserves one
+					// viewport row on the tinted surface, so both cards share what is
+					// left: the gap never grows the rail beyond MAIN's per-section gaps.
+					// On transparent there is no painted gap row: the card chrome keeps
+					// the two frames side by side, so the viewport budget is untouched.
+					const tintedGap = bothOpen && chromeSurface() !== "transparent";
+					const available = Math.max(1, historyViewport - Number(selectorVisible()) - (tintedGap ? 1 : 0));
 					const gitHeight = showGit ? (bothOpen ? Math.ceil(available / 2) : historyCollapsed ? 1 : Math.max(1, available - Number(showDiff))) : 0;
 					const diffHeight = showDiff ? (bothOpen ? Math.floor(available / 2) : diffCollapsed ? 1 : Math.max(1, available - Number(showGit))) : 0;
 					historyCardViewport = gitHeight;
 					const rows = selectorVisible() ? [selector(width)] : [];
 					if (showGit) rows.push(...gitCardsState.historyRows(theme, width, gitHeight, Math.min(historyOffset, maxHistoryOffset(gitHeight)), historyCollapsed, historyHovered));
 					// Filler rows between the two cards must paint the full width: the tinted
-			// surface fills per cell, and a one-space filler leaves a bare notch.
-			if (bothOpen) while (rows.length < gitHeight + Number(selectorVisible())) rows.push(" ".repeat(width));
+					// surface fills per cell, and a one-space filler leaves a bare notch.
+					if (bothOpen) while (rows.length < gitHeight + Number(selectorVisible())) rows.push(" ".repeat(width));
+					// Git and Changes are two equal-weight cards, never a nested one: a
+					// separating row always sits between them when both are open. The tinted
+					// surface paints it full-width; on transparent the card chrome already
+					// separates both frames and this row only keeps the same space.
+					if (tintedGap) rows.push(" ".repeat(width));
 					diffStart = rows.length;
 					if (showDiff) {
 						const list = files();
@@ -2771,7 +2782,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					diffLength = rows.length - diffStart;
 					return rows;
 				},
-				cardGroups: () => ({ groups: [...(tabsSettings.gitHistory === "on" ? [{ start: Number(selectorVisible()), end: diffStart }] : []), ...(tabsSettings.diff === "on" ? [{ start: diffStart, end: diffStart + diffLength }] : [])], loose: selectorVisible() ? [0] : [] }),
+				// The separating row belongs to neither card: the history group ends
+				// before it, so both cards keep equal spans and the tinted paint fills it.
+				cardGroups: () => {
+					const tintedGap = tabsSettings.gitHistory === "on" && tabsSettings.diff === "on" && !historyCollapsed && !diffCollapsed && chromeSurface() !== "transparent";
+					// The separating row belongs to neither card: the history group ends
+					// before it, so both cards keep equal spans and the tinted paint fills it.
+					return { groups: [...(tabsSettings.gitHistory === "on" ? [{ start: Number(selectorVisible()), end: diffStart - (tintedGap ? 1 : 0) }] : []), ...(tabsSettings.diff === "on" ? [{ start: diffStart, end: diffStart + diffLength }] : [])], loose: selectorVisible() ? [0] : [] };
+				},
 				invalidate() {},
 				handleMouse(event) {
 					if (selectorVisible() && event.y === 0) {

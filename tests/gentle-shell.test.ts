@@ -1326,7 +1326,10 @@ test("Git heading folds after history scroll on tinted and transparent rails", a
    assert.ok(diffRow >= 0);
    const cardSpan = diffRow - gitRow;
    const available = scroll.viewportHeight;
-   const separator = surface === "transparent" ? 1 : 0;
+   // Both cards keep an equal share of the viewport; the separating row between
+   // them (painted on tinted, absorbed by the card chrome on transparent) is
+   // not part of either card's span.
+   const separator = 1;
    assert.ok(Math.abs(cardSpan - separator - (available - cardSpan)) <= 1, `${surface}/${style}: unequal card spans ${cardSpan - separator}/${available - cardSpan}`);
    assert.ok(geometryRows.length <= 19, `${surface}/${style}: no viewport overflow`);
    assert.match(stripAnsi(frame().lines.join("\n")), /history 0/, surface);
@@ -1408,6 +1411,37 @@ test("Changes reports unavailable counts and keeps small viewport fold and file 
   assert.equal(click(rows().findIndex((line: string) => line.includes("binary.dat")))?.handled, true);
   assert.ok(ui.overlayView); ui.closeOverlay?.();
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("the two GIT cards sit side by side with a full-width separating row, never nested", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "on", diff: "on" }));
+	// 30 commits and files fill both viewports, so the only full-width row
+	// between the two cards is the separating row this test pins.
+	const snapshots = [{ numstat: Array.from({ length: 30 }, (_, i) => `2\t1\tdir/f${String(i).padStart(2, "0")}.ts`).join("\n"), porcelain: Array.from({ length: 30 }, (_, i) => `${i === 0 ? "A " : " M"} dir/f${String(i).padStart(2, "0")}.ts\x00`).join("") }];
+	const { pi, handlers } = fakePi(snapshots);
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { rootExists: () => true, resolveWorktree: () => ({ root: "/repo", commonDir: "/repo/.git" }) as never, gitRunner: () => async args => ({ code: 0, stdout: args[0] === "worktree" ? "worktree /repo\x00branch refs/heads/main\x00\x00worktree /other\x00branch refs/heads/other\x00\x00" : args[0] === "status" ? snapshots[0]!.porcelain : args[0] === "diff" ? snapshots[0]!.numstat : args[0] === "symbolic-ref" ? "main" : `* \x1e8d2f1aa\x1f\x1ffix: commit ${args[0]}\x1e\n${Array.from({ length: 29 }, (_, i) => `* \x1e${(0x8d2f1a0 + i).toString(16)}\x1f\x1ffix: keep the rail ${i}\x1e`).join("\n")}` }) });
+	const { ctx, ui } = fakeContext({ entries: [{ type: "custom", customType: "gentle-pi.session-worktree/v1", data: { sessionId: "shell-session", root: "/other", evidence: "test" } }] }); await fire(handlers, "session_start", ctx);
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const painted = { ...plainTheme, bg: (_role: string, value: string) => `\x1b[44m${value}\x1b[49m` };
+	const footer = (ui.footerFactory as any)(host, painted, footerData);
+	try {
+		const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+		const boxes = (box: any): any[] => [box, ...box.children.flatMap(boxes)];
+		const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]"));
+		nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+		frame(); await fire(handlers, "agent_end", ctx); await changesSettled();
+		for (let i = 0; i < 100 && !stripAnsi(frame().lines.join("\n")).includes("f00.ts"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+		const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+		const rows = (): string[] => scroll.render(50).map(stripAnsi);
+		const gitHeader = rows().findIndex(line => line.includes("▾ GIT"));
+		const changesHeader = rows().findIndex(line => line.includes("▾ CHANGES"));
+		assert.ok(gitHeader >= 0 && changesHeader > gitHeader + 1, `both cards are painted:\n${rows().join("\n")}`);
+		const between = rows().slice(gitHeader + 1, changesHeader);
+		assert.ok(between.some(row => row.length === 50 && row.trim() === ""), `a full-width separating row sits between the cards: ${JSON.stringify(between)}`);
+	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
 test("Git and Diff share the viewport, route border wheels independently, and fold", async t => {
