@@ -435,6 +435,324 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
+test("PROFILE tab paints read-only cards only when its policy key is on", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => "team (session)" });
+	const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const footer = (ui.footerFactory as (host: unknown, theme: ShellBarTheme, data: unknown) => { dispose(): void })(host, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+	try {
+		const frame = () => renderLayoutFrame(root, 160, 24, () => {});
+		const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+		// The tab renders with its key on; GIT is off in this fixture.
+		const tab = stripAnsi(frame().lines.join("\n"));
+		assert.match(tab, /\[MAIN\].*PROFILE/);
+		assert.doesNotMatch(tab, /\[GIT\]/);
+		const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width).join("\n")).includes("PROFILE"));
+		assert.ok(nav, "PROFILE tab appears with its policy key on");
+		nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+		frame();
+		const cards = stripAnsi(frame().lines.join("\n"));
+		assert.match(cards, /╭─[^\n]*PROFILE/);
+		assert.match(cards, /╭─[^\n]*MODEL/);
+		assert.match(cards, /╭─[^\n]*ROUTING/);
+		assert.match(cards, /team \(session\)/);
+		assert.match(cards, /openai-codex .*gpt-5\.5/);
+		assert.match(cards, /45%/);
+		assert.match(cards, /ROUTING/);
+		assert.match(cards, /No routing rows/);
+		// Tinted surfaces paint the section rows on the shared panel background,
+		// the same IDE-like treatment the GIT cards get (layout.402/458).
+		const previousSurface = chromeSurface();
+		t.after(() => setChromeSurface(previousSurface));
+		const bgTheme = { ...plainTheme, bg: (_color: string, value: string) => `\x1b[44m${value}\x1b[49m` };
+		setChromeSurface("tinted");
+		const tintedFooter = (ui.footerFactory as (host: unknown, theme: ShellBarTheme, data: unknown) => { dispose(): void })(host, bgTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+		try {
+			frame();
+			const tinted = frame().lines.join("\n");
+			assert.ok(tinted.includes("\x1b[44m"), "tinted surface paints the PROFILE section rows");
+			assert.match(stripAnsi(tinted), /PROFILE/);
+		} finally { tintedFooter.dispose(); }
+	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("PROFILE quotas repaint cached providers at identical timestamps without fetching on navigation or interaction", async t => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface: "tinted", density: "compact" }, { gentlePiConfigHome: home });
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+	const { pi, handlers } = fakePi();
+	let fetches = 0, now = 1_788_600_000_000, renders = 0;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { now: () => now, fetch: (async () => { fetches++; return { ok: false } as Response; }) as typeof fetch });
+	const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx); await settle();
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() { renders++; } };
+	const footer = (ui.footerFactory as any)(host, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+	const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+	const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+	const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+	const rows = (): string[] => scroll().render(50);
+	const text = () => rows().map(stripAnsi).join("\n");
+	const select = (x: number) => {
+		const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+		nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
+	};
+	const mouse = (type: string) => scroll().handleMouse({ type, button: type === "move" ? "none" : "left", x: 4, y: rows().findIndex(row => stripAnsi(row).includes("QUOTAS")), width: 50, height: 55 });
+	const response = async (percent: number) => {
+		for (const handler of handlers.get("after_provider_response") ?? []) await handler({ headers: { "x-codex-primary-used-percent": String(percent), "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-at": String((now + 3600000) / 1000) } }, ctx);
+	};
+	try {
+		const baseline = fetches;
+		select(10);
+		assert.match(text(), /Run \/gentle:usage to fetch/);
+		assert.match(text(), /PROFILE[\s\S]*MODEL[\s\S]*QUOTAS[\s\S]*ROUTING/);
+		await response(25);
+		assert.match(text(), /openai-codex[\s\S]*codex 5h\s+[▰▱]+\s+25% · 1h 0m/);
+		const before = renders;
+		await response(75);
+		assert.ok(renders > before, "existing response notification requests repaint");
+		assert.match(text(), /codex 5h\s+[▰▱]+\s+75%/, "same fetchedAt and row count still invalidates the composed frame");
+		now += 120000;
+		assert.match(text(), /58m/, "cached reset label advances without polling");
+		now += 86400000;
+		assert.match(text(), /75% · now/, "stale snapshot remains readable");
+		assert.match(text(), /updated 1442m ago/);
+		now += 60000;
+		assert.match(text(), /updated 1443m ago/, "expired resets still advance cache age");
+		const original = rows();
+		mouse("move"); mouse("click");
+		assert.doesNotMatch(text(), /codex 5h/);
+		assert.match(text(), /No routing rows/, "quotas folds independently");
+		select(2); select(10);
+		assert.doesNotMatch(text(), /codex 5h/, "collapse survives tab switches");
+		mouse("click");
+		assert.deepEqual(rows(), original);
+		assert.ok(rows().every(row => visibleWidth(row) <= 50));
+		await settle();
+		assert.equal(fetches, baseline, "PROFILE select/render/hover/fold/tab return never adds a fetch");
+		// A registered source uses the existing refresh owner, not PROFILE. Its
+		// provider need not be the one that produced the retained Codex snapshot.
+		let sourceCalls = 0;
+		(ctx.model as { provider: string }).provider = "fixture-cloud";
+		pi.events.emit(USAGE_SOURCE_EVENT, { schema: USAGE_SOURCE_SCHEMA, provider: "fixture-cloud", fetch: async () => {
+			sourceCalls++;
+			return { provider: "fixture-cloud", plan: "Fixture plan", fetchedAt: now, limits: [{ name: "fixture-model", limitReached: false, windows: [{ label: "4h", usedPercent: 20, windowSeconds: 14400, resetAt: null, used: 200, budget: 1000 }] }] };
+		} });
+		await settle();
+		assert.match(text(), /fixture-cloud · Fixture plan[\s\S]*fixture-model 4h\s+[▰▱]+\s+20%/);
+		assert.match(text(), /openai-codex[\s\S]*75%/, "all available providers survive a model/provider switch");
+		pi.events.emit(USAGE_SOURCE_EVENT, { schema: USAGE_SOURCE_SCHEMA, provider: "fixture-cloud", fetch: async () => { sourceCalls++; return undefined; } });
+		await settle();
+		assert.match(text(), /fixture-model 4h\s+[▰▱]+\s+20%/, "failed refresh retains the last good cache");
+		now += 60000;
+		assert.match(text(), /Fixture plan · updated 1m ago/, "null resets still advance cache age");
+		const settledCalls = sourceCalls;
+		select(2); select(10); mouse("move"); mouse("click"); mouse("click"); rows();
+		await settle();
+		assert.equal(sourceCalls, settledCalls, "PROFILE interactions never invoke registered sources either");
+		assert.equal(fetches, baseline);
+		// Pi recreates the theme-bound footer on theme changes. Keep the usage
+		// store, but resolve each new theme's gauge outside PROFILE's hot path.
+		for (const [index, filled, empty] of [[1, "#", "."], [2, "+", "-"]] as const) {
+			const sourcePath = join(home, `profile-gauge-${index}.json`);
+			writeFileSync(sourcePath, JSON.stringify({ colors: {}, vars: { "gauge.filled": filled, "gauge.emptyGlyph": empty } }));
+			(ctx.ui.theme as unknown as { sourcePath: string }).sourcePath = sourcePath;
+			const themedFooter = (ui.footerFactory as any)(host, plainTheme, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+			try {
+				select(10);
+				assert.ok(rows().some(row => stripAnsi(row).includes(filled.repeat(2))), "new footer respects changed gauge glyphs");
+				assert.doesNotMatch(text(), /[▰▱]/);
+				assert.equal(fetches, baseline);
+				assert.equal(sourceCalls, settledCalls);
+			} finally { themedFooter.dispose(); }
+		}
+	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+
+
+
+test("PROFILE long routes fill the useful composed frame width without consuming border padding", async t => {
+	const previousSurface = chromeSurface(), previousStyle = cardStyle();
+	t.after(() => { setChromeSurface(previousSurface); setCardStyle(previousStyle); });
+	for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) for (const ansi of [false, true]) {
+		await t.test(`${surface}/${style}/${ansi ? "ANSI" : "plain"}`, async t => {
+			const home = scopedDoubleEscCancelConfigHome(t);
+			writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface, density: "compact" }, { gentlePiConfigHome: home });
+			writeCardStyle(style, { gentlePiConfigHome: home });
+			writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+			writeFileSync(join(home, "profiles.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: { explore: { model: "provider/" + "m".repeat(100) }, worker: { model: "short" } } } }));
+			const { pi, handlers } = fakePi();
+			gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+			const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+			const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+			const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+			const painted = { ...plainTheme, ...(ansi ? { fg: (_role: string, value: string) => `\x1b[36m${value}\x1b[39m` } : {}), bg: (_role: string, value: string) => `\x1b[44m${value}\x1b[49m` };
+			const footer = (ui.footerFactory as any)(host, painted, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+			try {
+				const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+				const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+				const nav = boxes(frame().root).find(box => /\[MAIN\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+				nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, width: 50, height: 3, screenX: 120, screenY: 0, shift: false, alt: false, ctrl: false });
+				const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+				const rows: string[] = scroll.render(50);
+				const route = rows.find(row => stripAnsi(row).includes("explore →"));
+				assert.ok(route, rows.map(stripAnsi).join("\n"));
+				const float = surface === "transparent" && style === CARD_STYLE.FLOAT;
+				// The effort marker column is reserved on every routing row (one gap
+				// + one marker char), so the model budget shrinks by 2.
+				const useful = (surface === "tinted" ? 46 : float ? 44 : 46) - 2;
+				const content = `explore → provider/${"m".repeat(useful - 20)}…  `;
+				const expected = surface === "tinted" ? `   ${content} ` : float ? ` ▎ ${content}   ` : `│ ${content} │`;
+				assert.equal(stripAnsi(route), expected, "only intentional border/margin padding remains");
+				assert.equal(visibleWidth(route), 50);
+				assert.ok(rows.some(row => stripAnsi(row).includes("worker → short")), "short route remains unchanged");
+				assert.deepEqual(scroll.render(50), rows, "cached frame stays stable");
+			} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+		});
+	}
+});
+
+test("PROFILE follows MAIN spacing across surfaces, styles and live densities", async t => {
+	const previousSurface = chromeSurface(), previousStyle = cardStyle();
+	t.after(() => { setChromeSurface(previousSurface); setCardStyle(previousStyle); });
+	for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
+		await t.test(`${surface}/${style}`, async t => {
+			const home = scopedDoubleEscCancelConfigHome(t);
+			writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface, density: "compact" }, { gentlePiConfigHome: home });
+			writeCardStyle(style, { gentlePiConfigHome: home });
+			writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+			const { pi, handlers, commands } = fakePi();
+			gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => "team (session)" });
+			const { ctx, ui, overlayReady } = fakeContext();
+			await fire(handlers, "session_start", ctx);
+			const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+			const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+			const painted = { ...plainTheme, bg: (_role: string, value: string) => `\x1b[44m${value}\x1b[49m` };
+			const footer = (ui.footerFactory as (host: unknown, theme: ShellBarTheme, data: unknown) => { dispose(): void })(host, painted, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+			try {
+				const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+				const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+				const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+				const select = (x: number) => {
+					const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+					assert.ok(nav);
+					nav.component.handleMouse({ type: "click", button: "left", x, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
+				};
+				const gapBefore = (rows: string[], title: string) => {
+					const end = rows.findIndex(row => new RegExp(`(?:▾|╭|▎).*${title}`).test(stripAnsi(row)));
+					assert.ok(end > 0, `${title}: ${rows.map(stripAnsi).join("\n")}`);
+					let gap = 0;
+					let before = end - 1;
+					if (surface === "transparent" && style === CARD_STYLE.FLOAT && stripAnsi(rows[before]).trim() === "▎") before--;
+					for (let y = before; y >= 0 && stripAnsi(rows[y]).trim() === ""; y--) gap++;
+					return gap;
+				};
+				const pending = commands.get("gentle:customize")!.handler("", ctx);
+				await overlayReady;
+				for (const density of ["compact", "comfortable", "minimal", "compact"] as const) {
+					await customizeAction(ui, `Density: ${density}`);
+					select(2);
+					const mainGap = gapBefore(scroll().render(50), "INTEGRATIONS");
+					assert.equal(mainGap, surface === "transparent" && style === CARD_STYLE.FLOAT || density === "comfortable" ? 1 : 0, scroll().render(50).map(stripAnsi).join("\n"));
+					select(10);
+					const rows: string[] = scroll().render(50);
+					assert.equal(gapBefore(rows, "MODEL"), mainGap, `${surface}/${style}/${density}: PROFILE → MODEL matches MAIN`);
+					assert.equal(gapBefore(rows, "QUOTAS"), mainGap, `${surface}/${style}/${density}: MODEL → QUOTAS matches MAIN`);
+					assert.equal(gapBefore(rows, "ROUTING"), mainGap, `${surface}/${style}/${density}: QUOTAS → ROUTING matches MAIN`);
+					assert.ok(rows.every(row => visibleWidth(row) <= 50), "clipped to rail width");
+					assert.match(rows.map(stripAnsi).join("\n"), /team \(session\)[\s\S]*45%[\s\S]*No routing rows/);
+					if (surface === "tinted") assert.ok(rows.every(row => row.includes("\x1b[44m")), "content, gaps and fill keep panel paint");
+					assert.deepEqual(scroll().render(50), rows, "unchanged cached frame is stable");
+				}
+				ui.overlayView!.handleInput("\x1b");
+				await pending;
+			} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+		});
+	}
+});
+
+test("PROFILE headings hover and independently collapse through the public scroll view", async t => {
+	const previousSurface = chromeSurface(), previousStyle = cardStyle();
+	t.after(() => { setChromeSurface(previousSurface); setCardStyle(previousStyle); });
+	for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
+		await t.test(`${surface}/${style}`, async t => {
+			const home = scopedDoubleEscCancelConfigHome(t);
+			writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface, density: "compact" }, { gentlePiConfigHome: home });
+			writeCardStyle(style, { gentlePiConfigHome: home });
+			writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "off", profile: "on" }));
+			const { pi, handlers } = fakePi();
+			gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => "team (session)" });
+			const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+			const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+			const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+			const colored = { ...plainTheme, fg: (role: string, value: string) => `\x1b[${role === "warning" ? 35 : 37}m${value}\x1b[39m` };
+			const footer = (ui.footerFactory as any)(host, colored, { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} });
+			const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+			const frame = () => renderLayoutFrame(root, host.terminal.columns, host.terminal.rows, () => {});
+			const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+			const rows = (): string[] => scroll().render(50);
+			const select = (x: number) => {
+				const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+				nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3, screenX: x, screenY: 0, shift: false, alt: false, ctrl: false });
+			};
+			const heading = (title: string) => rows().findIndex(row => new RegExp(`(?:▾|▸|╭|▎).*${title}`).test(stripAnsi(row)));
+			const mouse = (y: number, type = "click", button = "left", x = 4) => {
+				const view = scroll();
+				return view.handleMouse({ type, button, x, y: y - view.scrollTop, width: 50, height: 55, screenX: x, screenY: y, shift: false, alt: false, ctrl: false });
+			};
+			try {
+				select(10);
+				const original = rows();
+				mouse(heading("PROFILE"), "move", "none");
+				const hovered = rows()[heading("PROFILE")];
+				assert.match(hovered, /\x1b\[35m▾/);
+				assert.match(hovered, /\x1b\[35mPROFILE/);
+				mouse(heading("PROFILE") + 1, "move", "none");
+				assert.deepEqual(rows(), original, "body clears hover");
+				mouse(heading("PROFILE") + 1);
+				mouse(heading("PROFILE"), "click", "right");
+				assert.deepEqual(rows(), original, "body and right click leave expanded data intact");
+				const modelY = heading("MODEL");
+				mouse(heading("PROFILE"));
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /team \(session\)/);
+				assert.ok(heading("MODEL") < modelY, "following heading reflows upward");
+				mouse(heading("MODEL"));
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /45%/);
+				mouse(heading("ROUTING"));
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /No routing rows/);
+				select(2); select(10);
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /team \(session\)|45%|No routing rows/);
+				mouse(heading("QUOTAS"));
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /Run \/gentle:usage to fetch/);
+				for (const title of ["PROFILE", "MODEL", "QUOTAS", "ROUTING"]) mouse(heading(title));
+				assert.deepEqual(rows(), original, "expanding restores the exact frame");
+				mouse(heading("MODEL"), "move", "none");
+				select(2); select(10);
+				assert.deepEqual(rows(), original, "leaving clears hover, not collapse state");
+				mouse(heading("MODEL"), "move", "none");
+				host.terminal.columns = 170; frame();
+				assert.deepEqual(rows(), original, "resize clears hover");
+				host.terminal.rows = 8; frame();
+				const view = scroll(); view.scrollTo(2);
+				assert.ok(view.scrollTop > 0, "fixture actually scrolls");
+				mouse(heading("MODEL"));
+				assert.doesNotMatch(rows().map(stripAnsi).join("\n"), /45%/, "scrolled coordinates still hit MODEL");
+				host.terminal.rows = 60; frame(); view.scrollTo(0);
+				mouse(heading("MODEL"), "move", "none");
+				mouse(rows().length - 1, "move", "none");
+				assert.doesNotMatch(rows()[heading("MODEL")], /\x1b\[35mMODEL/, "blank fill clears hover");
+				mouse(heading("MODEL"), "move", "none");
+				footer.dispose();
+				assert.equal(view.handleMouse({ type: "click", button: "left", x: 4, y: 0, width: 50, height: 55 }), undefined);
+			} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+		});
+	}
+});
+
 test("turn end during initial Diff load waits and refreshes the selected root", async t => {
  const home = scopedDoubleEscCancelConfigHome(t);
  writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "off", diff: "on" }));
@@ -1635,6 +1953,26 @@ test("profile reader follows store changes and rejects missing or invalid active
 	assert.equal(read(), "team");
 	rmSync(path);
 	assert.equal(read(), undefined);
+});
+
+test("profile reader exposes configured name and cached routing without re-reading", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "shell-profile-routes-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: root });
+	assert.equal(read.configured(), undefined);
+	assert.deepEqual(read.routes(), []);
+	writeFileSync(join(root, "profiles.json"), JSON.stringify({
+		kind: "gentle-pi.agent_model_profiles", version: 1, active: "team",
+		profiles: { team: { explore: { model: "gemini/flash" }, orchestrator: { model: "anthropic/opus" } }, other: {} },
+	}));
+	assert.equal(read(), "team");
+	assert.equal(read.configured(), "team");
+	assert.deepEqual(read.routes(), [{ role: "explore", model: "gemini/flash", effort: undefined }], "the orchestrator is not a role");
+	assert.deepEqual(read.routes("other"), []);
+	assert.deepEqual(read.routes("missing"), []);
+	writeFileSync(join(root, "profiles.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {} } }));
+	assert.equal(read(), "team", "cached until the file identity changes");
+	assert.deepEqual(read.routes(), [], "routing follows the same cached read");
 });
 
 test("bound profile reader follows pin precedence and keeps frames free of resolution", (t) => {
@@ -4377,6 +4715,7 @@ test("customize Layout persists global Tabs and preserves Task summary", async (
 	for (const name of ["MAIN", "GIT", "TREE", "PROFILE", "MEMORY", "STATS"]) assert.match(frame, new RegExp(name));
 	assert.match(frame, /MAIN\s+● on\s+○ off/);
 	assert.match(frame, /GIT\s+● on\s+○ off/);
+	assert.match(frame, /TREE\s+○ on\s+● off[\s\S]*PROFILE\s+○ on\s+● off/);
 	assert.match(frame, /\[x\] Git history/);
 	assert.match(frame, /\[x\] Diff/);
 	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput(" ");

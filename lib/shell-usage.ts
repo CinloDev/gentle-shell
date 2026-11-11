@@ -530,7 +530,7 @@ export function renderUsageBar(usage: ProviderUsage, theme: UsageTheme, activeMo
 	return [head, ...tail].join(" ");
 }
 
-function updatedAgo(fetchedAt: number, now: number): string {
+export function updatedAgo(fetchedAt: number, now: number): string {
 	const minutes = Math.floor((now - fetchedAt) / 60_000);
 	return minutes < 1 ? "updated just now" : `updated ${minutes}m ago`;
 }

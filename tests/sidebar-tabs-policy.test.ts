@@ -20,6 +20,25 @@ test("TREE defaults off for legacy preferences and persists independently", t =>
  assert.equal(resolveSidebarTabs(options).tree, "on");
 });
 
+test("PROFILE defaults off for legacy preferences and persists independently", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-profile-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ const path = join(home, "sidebar-tabs.json");
+ for (const raw of ['{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"off","git":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"off","diff":"on"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"off"}', '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on"}']) {
+  writeFileSync(path, raw);
+  assert.equal(resolveSidebarTabs(options).profile, "off");
+  assert.equal(resolveSidebarTabs(options).malformed, false);
+ }
+ writeSidebarTabs("on", options, { main: "on", git: "on", profile: "on" });
+ writeSidebarTabs("off", options);
+ assert.equal(resolveSidebarTabs(options).profile, "on");
+ writeSidebarTabs("on", options, { main: "off", git: "on", profile: "off" });
+ assert.equal(resolveSidebarTabs(options).profile, "off");
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"invalid"}');
+ assert.equal(resolveSidebarTabs(options).malformed, true);
+});
+
 test("destination preferences persist independently of global Tabs and legacy files remain enabled", t => {
  const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-destinations-"));
  t.after(() => rmSync(home, { recursive: true, force: true }));

@@ -138,6 +138,7 @@ import { UsageView } from "../lib/shell-usage-view.ts";
 import { releaseSidebarHover, setSidebarHover, sidebarHeader, sidebarPart, sidebarState, sidebarStatusBar, VISUAL_SETTINGS_CHANGED, type SidebarRail } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar, narrowStatusOwner, SIDEBAR_BREAKPOINT, STATUS_OWNER } from "../lib/shell-sidebar-layout.ts";
 import { SidebarGitCards } from "../lib/git-cards.ts";
+import { buildProfileCards, type ProfileCardId, type ProfileCardsFrame, type ProfileCardsSnapshot } from "../lib/profile-cards.ts";
 import { discoverSidebarGitRoots, type SidebarGitRoots } from "../lib/sidebar-git-roots.ts";
 import { panelSheetBackHit, renderPanelSheet, renderWorkRow, setChromeSurface, workRowLead } from "../lib/shell-panel.ts";
 import { installPagePaint, type PageTheme } from "../lib/shell-page.ts";
@@ -208,6 +209,10 @@ export interface ShellDeps {
 
 export type ActiveProfileReader = (() => string | undefined) & {
 	tier(): ShellBarModel["profileTier"];
+	/** The configured profile name (no origin label); memory-only snapshot like tier(). */
+	configured(): string | undefined;
+	/** The cached role→model routing rows of a profile, defaulting to the configured one; memory-only snapshot. */
+	routes(profile?: string): Array<{ role: string; model: string; effort?: string }>;
 	bind(cwd: string, resolveWorktree: WorktreeResolver, sessionId?: string): boolean;
 	refresh(): boolean;
 	reset(): void;
@@ -220,12 +225,14 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 	let fingerprint: string | undefined;
 	let name: string | undefined;
 	let tiers: Record<string, ShellBarModel["profileTier"]> = {};
+	let routes: Record<string, Array<{ role: string; model: string }>> = {};
 	let effectiveTier: ShellBarModel["profileTier"];
 	let bound = false;
 	let cwd: string | undefined;
 	let identity: WorktreeIdentity | undefined;
 	let sessionId: string | undefined;
 	let effective: string | undefined;
+	let effectiveConfig: string | undefined;
 	const global = () => {
 		try {
 			const stat = statSync(path, { bigint: true });
@@ -234,12 +241,14 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 				const result = readProfilesFileResult(path);
 				name = result.status === "valid" ? result.file.active : undefined;
 				tiers = result.status === "valid" ? Object.fromEntries(Object.entries(result.file.profiles).map(([name, config]) => [name, config.orchestrator?.tier])) : {};
+				routes = result.status === "valid" ? Object.fromEntries(Object.entries(result.file.profiles).map(([profileName, config]) => [profileName, profileRoleEntries(config).map(([role, entry]) => ({ role, model: entry.model ?? "inherit", effort: entry.thinking }))])) : {};
 				fingerprint = next;
 			}
 			return name;
 		} catch {
 			fingerprint = undefined;
 			name = undefined;
+			routes = {};
 			return undefined;
 		}
 	};
@@ -249,6 +258,11 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 		const active = global();
 		return active ? tiers[active] : undefined;
 	};
+	reader.configured = () => {
+		if (bound) return effectiveConfig;
+		return global() ? name : undefined;
+	};
+	reader.routes = (profile?: string) => routes[profile ?? (bound ? effectiveConfig : name)] ?? [];
 	reader.refresh = () => {
 		if (!bound) return false;
 		// gentle-shell#1064: the status shows the profile launches use, through
@@ -270,6 +284,7 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 		const changed = next !== effective || nextTier !== effectiveTier;
 		effective = next;
 		effectiveTier = nextTier;
+		effectiveConfig = configuredName;
 		return changed;
 	};
 	reader.bind = (nextCwd, resolveWorktree, nextSessionId) => {
@@ -280,7 +295,7 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 		bound = true;
 		return reader.refresh();
 	};
-	reader.reset = () => { bound = false; cwd = undefined; identity = undefined; sessionId = undefined; effective = undefined; effectiveTier = undefined; };
+	reader.reset = () => { bound = false; cwd = undefined; identity = undefined; sessionId = undefined; effective = undefined; effectiveTier = undefined; effectiveConfig = undefined; };
 	return reader;
 }
 
@@ -3095,7 +3110,89 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					return tree.handleMouse(selector ? { ...event, y: event.y - 1, height: Math.max(0, event.height - 1) } : event);
 				},
 			};
-			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : [])] : [], id => {
+			// PROFILE cards read only in-memory snapshots: the profileReader's bound
+			// snapshot (2s poll already live), the memoized footer status model and the
+			// cached routing rows. Click entry into the /gentle:profiles modal joins in
+			// its own slice with explicit preselection; the tab itself mutates nothing.
+			// Resolve at footer installation, not in PROFILE render/digest. Theme
+			// changes reinstall the footer, as for its other theme-bound paint.
+			const profileGauge = gaugePaint(ctx);
+			const profileRailSnapshot = (): ProfileCardsSnapshot => ({
+				gauge: profileGauge,
+				profile: footerModel().profile ? { label: footerModel().profile, tier: footerModel().profileTier } : undefined,
+				model: ctx.model ? { id: ctx.model.id, provider: ctx.model.provider ?? "", effort: footerModel().effort, contextPercent: footerModel().contextPercent ?? undefined, costTotal: footerModel().costTotal } : undefined,
+				routing: profileReader.routes(),
+				quotas: usage.all(),
+				now: deps.now(),
+			});
+			// Store recordings are replaced normalized objects, including when timestamps
+			// and row counts repeat. Reference ids detect those updates without serializing
+			// payloads or changing UsageStore's public contract. Weak keys retain no history.
+			const profileUsageIds = new WeakMap<ProviderUsage, number>();
+			let profileUsageId = 0;
+			const profileUsageKey = () => {
+				const now = deps.now();
+				let timed = false;
+				const ids = usage.all().map(reading => {
+					let id = profileUsageIds.get(reading);
+					if (id === undefined) { id = ++profileUsageId; profileUsageIds.set(reading, id); }
+					timed ||= reading.limits.some(limit => limit.windows.some(window => window.resetAt !== null && window.resetAt > now));
+					return id;
+				});
+				// Future reset labels use seconds; every cached provider also has a
+				// minute-age label, including readings with null or expired resets.
+				return [ids, timed ? Math.floor(now / 1000) : ids.length ? Math.floor(now / 60000) : 0];
+			};
+			const profileCollapsed = new Set<ProfileCardId>();
+			let profileHover: ProfileCardId | undefined;
+			let profileWidth = tui.terminal?.columns;
+			let profileFrame: { width: number; frame: ProfileCardsFrame } | undefined;
+			const profileCard: SidebarRail = {
+				// Not framed + panel surface, exactly like the GIT cards: transparent
+				// surfaces frame each cardGroups group with the shared card chrome, and
+				// tinted surfaces paint the section rows on the shared panel background.
+				// footerStatus.key() is the cheap per-frame key the status rails reuse
+				// (issue #1681); routing rows ride in bounded text because their content
+				// can change while the profile label does not.
+				digest: () => JSON.stringify([footerStatus.key(), profileUsageKey(), visualSettings.density, profileReader(), profileReader.tier(), profileReader.configured(), profileReader.routes().map(entry => `${entry.role}:${entry.model}:${entry.effort ?? ""}`).join(";"), [...profileCollapsed], profileHover]),
+				surface: "panel",
+				cardGroups: width => ({ groups: profileFrame?.width === width ? profileFrame.frame.groups : [] }),
+				render(width) {
+					const frame = buildProfileCards(profileRailSnapshot(), theme, width, visualSettings.density, { collapsed: profileCollapsed, hovered: profileHover });
+					profileFrame = { width, frame };
+					return frame.rows;
+				},
+				invalidate() {},
+			};
+			const profileTarget = (y: number, width: number) => profileFrame?.width === width ? profileFrame.frame.headers.find(header => header.row === y)?.id : undefined;
+			const profileRegion = new NativePointerRegion(profileCard, {
+				onHover(event) {
+					const next = profileTarget(event.y, event.width);
+					if (next) setSidebarHover(tui, profileRegion, () => profileRegion.clearHover());
+					else setSidebarHover(tui);
+					if (next === profileHover) return { handled: true };
+					profileHover = next;
+					return { handled: true, render: true };
+				},
+				onLeave() {
+					releaseSidebarHover(tui, profileRegion);
+					if (!profileHover) return;
+					profileHover = undefined;
+					tui.requestRender();
+				},
+				onClick(event) {
+					if (event.button !== "left") return undefined;
+					const id = profileTarget(event.y, event.width);
+					if (!id) return undefined;
+					if (profileCollapsed.has(id)) profileCollapsed.delete(id);
+					else profileCollapsed.add(id);
+					return { handled: true, render: true };
+				},
+			});
+			const profileRail: SidebarRail = Object.assign(profileRegion, { surface: profileCard.surface, digest: profileCard.digest, cardGroups: profileCard.cardGroups });
+			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROFILE", rail: profileRail }] : [])] : [], id => {
+				if (id !== "profile" || profileWidth !== tui.terminal?.columns) profileRegion.clearHover();
+				profileWidth = tui.terminal?.columns;
 				if (id === "tree" && !treeActive) {
 					treeActive = true; const epoch = ++treeEpoch;
 					queueMicrotask(() => {
@@ -3185,6 +3282,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				disposeHeader();
 				disposeStatusBar();
 				statusRegion.dispose();
+				profileRegion.dispose();
 				uninstall();
 				if (refreshSidebarHistory === refreshHistoryCards) refreshSidebarHistory = undefined;
 				if (refreshSidebarDiff === refreshDiffCards) { refreshSidebarDiff = undefined; toggleSidebarDiff = undefined; toggleSidebarHistory = undefined; }
@@ -3712,9 +3810,9 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				layoutChoice("Density", value, () => visual().density === value, "Spacing: comfortable adds gaps between rail sections and a padding row under a top header; compact removes them; minimal also drops the brand and the key hints"));
 			for (const value of Object.values(CHROME_SURFACE)) add(() => `Surface: ${value}${visual().surface === value ? " (current)" : ""}`, pending, () => updateVisual((settings) => ({ ...settings, surface: value })), () => layoutPreview({ ...visual(), surface: value }),
 				layoutChoice("Surface", value, () => visual().surface === value, "Chrome background: transparent (default) lets the terminal background show through; tinted paints the rail, header rows and panel"));
-			const saveTabs = (policy: "on" | "off", destination?: "main" | "git" | "gitHistory" | "diff" | "tree") => {
+			const saveTabs = (policy: "on" | "off", destination?: "main" | "git" | "gitHistory" | "diff" | "tree" | "profile") => {
 				const current = resolveSidebarTabs(animationOptions);
-				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree });
+				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree, profile: destination === "profile" ? policy : current.profile });
 				tabsSettings = resolveSidebarTabs(animationOptions);
 				if (destination === "diff" && current.diff !== tabsSettings.diff) toggleSidebarDiff?.();
 				if (destination === "gitHistory" && current.gitHistory !== tabsSettings.gitHistory) toggleSidebarHistory?.();
@@ -3726,8 +3824,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				explicitChoice("Tabs", label, () => resolveSidebarTabs(animationOptions).policy === policy),
 			);
 			rows.push({ category, label: "Configure tabs", indent: 2, visible: () => { const result = resolveSidebarTabs(animationOptions); return !result.malformed && result.policy === "on"; }, action: () => {}, children: [
-				...(["main", "git", "tree"] as const).flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${destination.toUpperCase()}: ${policy}`, choice: { setting: destination.toUpperCase(), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
-				...["PROFILE", "MEMORY", "STATS"].map(name => ({ label: `${name} · coming soon`, inert: true, action: () => {} })),
+				...(["main", "git", "tree", "profile"] as const).flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${destination.toUpperCase()}: ${policy}`, choice: { setting: destination.toUpperCase(), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
+				...["MEMORY", "STATS"].map(name => ({ label: `${name} · coming soon`, inert: true, action: () => {} })),
 			] });
 			category = "Cards";
 			// One live style for conversation cards, panels, header/footer and prompt.
