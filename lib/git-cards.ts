@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { renderPanelHeader } from "./shell-panel.ts";
+import { renderPanelHeader, renderPanelRow } from "./shell-panel.ts";
 import { ChangesTracker, type ChangesModel, type FileRevision, type GitRunner, type LineCounter } from "./shell-changes.ts";
 import { renderSidebarGitGraph, SidebarGitFrameCache, SidebarGitHistory, type GraphTheme, type SidebarGitGraph } from "./sidebar-git-graph.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
@@ -178,13 +178,16 @@ export class SidebarGitCards {
 		const files = card?.model?.files ?? [];
 		const statusRead = card?.statusRead ?? false;
 		const rows = [renderPanelHeader(theme, width, { title: "Changes", count: `${files.length}`, open: !collapsed, hovered })];
-		if (collapsed || viewport <= 1) return rows;
+		// The tinted surface paints per occupied cell: the rows fill the full width
+		// so the panel background never shows bare notches (the MAIN/PROFILE rule).
+		const fit = (row: string) => renderPanelRow(width, row);
+		if (collapsed || viewport <= 1) return rows.map(fit);
 		// The shared tracker does not distinguish failed numstat or binary counts
 		// from zero, so its sums are necessarily provisional.
 		rows.push(card?.model && statusRead
 			? truncateToWidth(`${theme.fg("success", `+${card.model.added}`)} ${theme.fg("error", `-${card.model.deleted}`)} ${theme.fg("muted", "· partial counts")}`, width, "…")
 			: theme.fg("muted", card && (card.painted || card.diffLoaded) ? "Counts unavailable" : "Loading changes…"));
-		if (viewport > 2 && !files.length && statusRead) { rows.push(theme.fg("muted", "No changes.")); return rows; }
+		if (viewport > 2 && !files.length && statusRead) { rows.push(theme.fg("muted", "No changes.")); return rows.map(fit); }
 		for (const file of files.slice(offset, offset + Math.max(0, viewport - 2))) {
 			const status = { modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U" }[file.status];
 			const path = sanitizeTerminalText(file.path).replace(/[\r\n\t]/g, " ");
@@ -198,7 +201,7 @@ export class SidebarGitCards {
 			const counts = file.countsUnavailable ? "" : `${theme.fg("success", `+${file.added}`)} ${theme.fg("error", `-${file.deleted}`)} `;
 			rows.push(`${theme.fg("accent", status)} ${painted}${" ".repeat(Math.max(1, rowWidth - 2 - visibleWidth(label) - visibleWidth(suffix)))}${counts}${theme.fg("accent", "[diff]")}`);
 		}
-		return rows;
+		return rows.map(fit);
 	}
 
 	private paintedCard(): Card | undefined {

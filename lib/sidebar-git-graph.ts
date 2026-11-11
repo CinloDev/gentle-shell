@@ -1,7 +1,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { GitRunner } from "./shell-changes.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
-import { renderPanelHeader } from "./shell-panel.ts";
+import { renderPanelHeader, renderPanelRow } from "./shell-panel.ts";
 
 export type SidebarGitGraph = { state: "ready"; branch: string; lines: string[] } | { state: "unborn"; branch: string } | { state: "error" } | { state: "pending" };
 export type GraphTheme = { fg(role: string, text: string): string; bold?(text: string): string };
@@ -42,10 +42,13 @@ export function renderSidebarGitGraph(graph: SidebarGitGraph, theme: GraphTheme,
  if (width <= 0 || viewport <= 0) return [];
  const detail = graph.state === "error" ? "history unavailable" : graph.state === "pending" ? "Loading history…" : graph.branch;
  const rows = [renderPanelHeader(theme, width, { title: "Git", count: detail, open: !collapsed, hovered })];
- if (collapsed) return rows.map(row => truncateToWidth(row, width, "…"));
- if (graph.state === "unborn" && viewport > 1) rows.push(theme.fg("muted", "No commits yet"));
- if (graph.state === "ready") for (const line of graph.lines.slice(offset, offset + Math.max(0, viewport - 1))) rows.push(renderLine(line, theme));
- return rows.map(row => truncateToWidth(row, width, "…"));
+ if (collapsed) return rows;
+ if (graph.state === "unborn" && viewport > 1) rows.push(renderPanelRow(width, theme.fg("muted", "No commits yet")));
+ // The rail's tinted surface paints the background per occupied cell, so every
+ // row must fill the full render width — the MAIN/PROFILE rule: body rows carry
+ // the panel indent the transparent card path strips off itself.
+ if (graph.state === "ready") for (const line of graph.lines.slice(offset, offset + Math.max(0, viewport - 1))) rows.push(renderPanelRow(width, renderLine(line, theme)));
+ return rows;
 }
 /** Coalesces overlapping refreshes and discards results after deactivation. */
 export class SidebarGitHistory {

@@ -2706,7 +2706,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const maxHistoryOffset = (viewport = historyCardViewport) => Math.max(0, (gitCardsState.graph.state === "ready" ? gitCardsState.graph.lines.length : 0) - Math.max(1, viewport - 1));
 			const gitRail: SidebarRail = {
 				surface: "panel",
-				digest: () => `${gitCardsState.digest()}:${historyViewport}:${historyOffset}:${historyCollapsed}:${historyHovered}`,
+				digest: () => `${gitCardsState.digest()}:${visualSettings.density}:${historyViewport}:${historyOffset}:${historyCollapsed}:${historyHovered}`,
 				render: width => gitCardsState.historyRows(theme, width, historyViewport, Math.min(historyOffset, maxHistoryOffset()), historyCollapsed, historyHovered),
 				invalidate() {},
 				handleMouse(event) {
@@ -2749,7 +2749,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const gitCards: SidebarRail = {
 				surface: "panel",
 				// The selector and offsets follow the painted root during a deferred switch.
-				digest: () => JSON.stringify([gitRail.digest?.(), roots, selectedRoot, diffOffset, diffCollapsed, diffHovered]),
+				digest: () => JSON.stringify([gitRail.digest?.(), roots, selectedRoot, diffOffset, diffCollapsed, diffHovered, visualSettings.density]),
 				render(width) {
 					const showGit = tabsSettings.gitHistory === "on", showDiff = tabsSettings.diff === "on";
 					const bothOpen = showGit && showDiff && !historyCollapsed && !diffCollapsed;
@@ -2759,7 +2759,9 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					historyCardViewport = gitHeight;
 					const rows = selectorVisible() ? [selector(width)] : [];
 					if (showGit) rows.push(...gitCardsState.historyRows(theme, width, gitHeight, Math.min(historyOffset, maxHistoryOffset(gitHeight)), historyCollapsed, historyHovered));
-					if (bothOpen) while (rows.length < gitHeight + Number(selectorVisible())) rows.push(" ");
+					// Filler rows between the two cards must paint the full width: the tinted
+			// surface fills per cell, and a one-space filler leaves a bare notch.
+			if (bothOpen) while (rows.length < gitHeight + Number(selectorVisible())) rows.push(" ".repeat(width));
 					diffStart = rows.length;
 					if (showDiff) {
 						const list = files();

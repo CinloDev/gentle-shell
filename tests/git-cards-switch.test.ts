@@ -232,3 +232,13 @@ test("steady-state refreshes publish once and keep the painted root", async () =
 	await f.cards.refreshDiff();
 	assert.equal(f.calls.length, callsBefore, "a hidden GIT tab starts no reads");
 });
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+test("GIT card rows fill the rail width so the tinted surface has no bare notches", async () => {
+	const f = fixture();
+	f.cards.enter(MAIN);
+	await f.settle();
+	const rows = f.render();
+	assert.ok(rows.length >= 5, `both cards are populated: ${rows.join(" | ")}`);
+	for (const row of rows) assert.equal(visibleWidth(row), 80, JSON.stringify(row));
+});

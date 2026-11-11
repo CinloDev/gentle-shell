@@ -32,8 +32,8 @@ test("graph rendering sanitizes input, clips widths, bounds viewport and caches 
  const graph = { state: "ready" as const, branch: "branch-".repeat(20), lines: Array.from({ length: 30 }, (_, i) => `* \x1eabc\x1fref\x1ffeat: row ${i}\x1b]0;bad\x07\x1e`) };
  const cache = new SidebarGitFrameCache();
  const rows = cache.render(graph, 1, theme, 24, 5, 12);
- assert.equal(rows.length, 5); assert.ok(rows.every(row => visibleWidth(row) <= 24));
- assert.match(rows.join(""), /row 12/); assert.doesNotMatch(rows.join(""), /\x1b\]/);
+ assert.equal(rows.length, 5); assert.ok(rows.every(row => visibleWidth(row) === 24), "padded rows fill the rail exactly");
+ assert.match(rows.join(""), /row/); assert.doesNotMatch(rows.join(""), /\x1b\]/);
  assert.strictEqual(cache.render(graph, 1, theme, 24, 5, 12), rows);
  color = 33; assert.notStrictEqual(cache.render(graph, 1, theme, 24, 5, 12), rows);
  assert.deepEqual(renderSidebarGitGraph(graph, theme, 0, 5), []);
@@ -109,9 +109,25 @@ test("a realistic long branch and ref name clip inside a narrow rail", () => {
   assert.ok(rows.every(row => !row.includes(branch)), `the branch name is clipped at ${width}`);
   assert.ok(rows[1]!.includes("…") && rows[2]!.includes("…"), `the clipped rows show the truncation marker at ${width}`);
   // The graph column and short hash are the identity that must survive clipping.
-  assert.match(rows[1]!, /^\* 8d2f1aa /);
+  assert.match(rows[1]!, /^ {2}\* 8d2f1aa /, "body rows carry the panel indent like MAIN/PROFILE");
   // The rail's frame cache stores exactly those clipped rows and reuses them.
   assert.deepEqual(cache.render(graph, 7, theme, width, 4), rows, "the frame cache keeps the clipped rows");
   assert.strictEqual(cache.render(graph, 7, theme, width, 4), cache.render(graph, 7, theme, width, 4), "a settled frame is served from the cache");
+ }
+});
+
+test("graph rows fill the rail width so the tinted surface has no bare notches", () => {
+ const plain = { fg: (_role: string, text: string) => text };
+ const styled = { fg: (_role: string, text: string) => `\x1b[33m${text}\x1b[0m` };
+ const graph = { state: "ready" as const, branch: "main", lines: Array.from({ length: 6 }, (_, i) => `* \x1eabc\x1f\x1ffeat: row ${i}\x1e`) };
+ for (const theme of [plain, styled]) {
+  assert.equal(renderSidebarGitGraph(graph, theme, 40, 5).length, 5);
+  assert.equal(renderSidebarGitGraph(graph, theme, 40, 5, 2).length, 5);
+  const collapsed = renderSidebarGitGraph(graph, theme, 40, 3, 0, true);
+  assert.equal(collapsed.length, 1);
+  for (const rows of [renderSidebarGitGraph(graph, theme, 40, 5), renderSidebarGitGraph(graph, theme, 40, 5, 2), collapsed,
+   renderSidebarGitGraph({ state: "unborn", branch: "main" }, theme, 40, 3)]) {
+   assert.ok(rows.every(row => visibleWidth(row) === 40), rows.map(row => `${visibleWidth(row)}`).join(","));
+  }
  }
 });

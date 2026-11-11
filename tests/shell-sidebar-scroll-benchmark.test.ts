@@ -373,7 +373,7 @@ test("the GIT destination keeps the transcript and header byte-identical to the 
 		await settle(); // the published viewport settles the visible history rows
 		const activated = enabled.render();
 		assert.match(activated.join("\n"), /▾ GIT/, "the GIT card is painted");
-		assert.match(activated.join("\n"), /feat\(side/);
+		assert.match(activated.join("\n"), /8d2f1aa/, "the history body is painted");
 		assert.match(disabled.render().join("\n"), /Status card/);
 		const off = measure(disabled);
 		const on = measure(enabled, false, off.positions);
