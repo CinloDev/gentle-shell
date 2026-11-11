@@ -241,13 +241,13 @@ test("PROFILE quota hint exposes a fetch action only while the hint row is rende
 test("PROFILE quotas render normalized cached providers, caps and resets without nonfinite percentages", () => {
 	const now = 1_788_600_000_000;
 	const codex = parseCodexUsage({ plan_type: "Plus", rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_after_seconds: 3600 }, secondary_window: { used_percent: 80, limit_window_seconds: 604800 } } }, now);
-	const nan = parseNanQuota({ models: [{ model: "glm5", fullCap: 1000, tokensUsed: 200, periodEnd: (now + 86400000) / 1000 }] }, now);
+	const nan = parseNanQuota({ models: [{ model: "glm5.3", fullCap: 1000, tokensUsed: 200, periodEnd: (now + 86400000) / 1000 }] }, now);
 	const snapshot: ProfileCardsSnapshot = { routing: [], quotas: [codex, nan], now };
 	const text = plain(renderProfileCards(snapshot, theme, 70)).join("\n");
 	assert.match(text, /openai-codex · Plus/);
 	assert.match(text, /codex 5h\s+[▰▱]+\s+25% · 1h 0m/);
 	assert.match(text, /codex week\s+[▰▱]+\s+80%/);
-	assert.match(text, /nan[\s\S]*glm5\s+[▰▱]+\s+20% · 1d 0h/);
+	assert.match(text, /nan[\s\S]*glm5\.3\s+[▰▱]+\s+20% · 1d 0h/);
 	assert.doesNotMatch(text, /Run \/gentle:usage/);
 	assert.match(plain(renderProfileCards({ ...snapshot, now: now + 172800000 }, theme, 70)).join("\n"), /25% · now/, "stale cache stays visible");
 	codex.limits[0].windows[0].usedPercent = Number.NaN;
