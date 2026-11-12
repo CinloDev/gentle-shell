@@ -203,6 +203,15 @@ test("PROFILE routing rows append the effort letter in a distinct color at the r
 	assert.ok(plainLine && !/[a-z]$/.test(plainLine.trimEnd()), "an undefined effort paints a blank marker");
 });
 
+test("PROFILE model context row paints the shared context gauge", () => {
+	const rows = plain(renderProfileCards(full, theme, 60));
+	const contextRow = rows.find(row => row.includes("Context"));
+	assert.ok(contextRow, "renders the context row");
+	assert.match(contextRow, /Context ▰*▱* 42%/);
+	const cells = (contextRow.match(/[▰▱]/g) ?? []).length;
+	assert.equal(cells, 16, "the context gauge uses the quota 16-cell budget");
+});
+
 test("PROFILE model and routing rows publish their role targets for the focused modal open", () => {
 	const now = 1_788_600_000_000;
 	const snapshot: ProfileCardsSnapshot = {

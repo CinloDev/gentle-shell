@@ -143,7 +143,7 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 			},
 			invalidate() {},
 		};
-		destinations.push({ id: "profile", label: "PROFILE", rail: profileRail });
+		destinations.push({ id: "profile", label: "PROF", rail: profileRail });
 		navigation = () => destinations;
 	}
 	if (sidebar) footer.addChild(sidebarPart(tui, "footer", {
@@ -485,8 +485,8 @@ test("the PROFILE destination keeps the transcript and header byte-identical to 
 	const enabled = createFixture(140, 120, true, "plain", true, true);
 	try {
 		disabled.render();
-		const selected = openTab(enabled, "PROFILE");
-		assert.match(selected.join("\n"), /\[PROFILE\]/, "the click selects the PROFILE destination");
+		const selected = openTab(enabled, "PROF");
+		assert.match(selected.join("\n"), /\[PROF\]/, "the click selects the PROFILE destination");
 		const activated = enabled.render();
 		assert.match(activated.join("\n"), /PROFILE/, "the PROFILE cards are painted");
 		assert.match(activated.join("\n"), /team \(session\)/, "the profile card shows the active profile");
