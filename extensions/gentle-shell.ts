@@ -3105,24 +3105,30 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			};
 			const refreshTree = () => treeSession.refresh();
 			refreshSidebarTree = refreshTree;
+			// Use the same logical width for the loose selector's paint and hits.
+			const treeSelectorVisible = (width: number) => treeRoots?.state === "ready" && width >= 16 + selectorInset();
+			let treeRows = 0;
 			const treeRail: SidebarRail = {
-				framed: true,
+				surface: "panel",
 				render: width => {
-					if (treeRoots?.state !== "ready" || width < 16) return tree.renderSidebar(width, treeViewport);
-					const selected = tree.paintedRoot;
-					const left = selected === treeRoots.main ? "[MAIN]" : " MAIN ";
-					const right = treeRoots.main === treeRoots.wt ? "" : selected === treeRoots.wt ? "[WORKTREE]" : " WORKTREE ";
-					const inset = selectorInset();
-					const selectorWidth = visualSettings.surface === "transparent" ? panelInnerWidth(theme, width) + 2 : width;
-					const row = " ".repeat(inset) + theme.fg(selected === treeRoots.main ? "accent" : "muted", left) + " ".repeat(Math.max(0, selectorWidth - inset - left.length - right.length)) + theme.fg(selected === treeRoots.wt ? "accent" : "muted", right);
-					return treeViewport > 0 ? [row, ...tree.renderSidebar(width, treeViewport - 1)] : [];
+					const selector = treeSelectorVisible(width);
+					const rows = tree.renderSidebar(width, Math.max(0, treeViewport - Number(selector)));
+					if (selector && treeRoots?.state === "ready") {
+						const selected = tree.paintedRoot;
+						const left = selected === treeRoots.main ? "[MAIN]" : " MAIN ";
+						const right = treeRoots.main === treeRoots.wt ? "" : selected === treeRoots.wt ? "[WORKTREE]" : " WORKTREE ";
+						const inset = selectorInset();
+						rows.unshift(" ".repeat(inset) + theme.fg(selected === treeRoots.main ? "accent" : "muted", left) + " ".repeat(Math.max(0, width - inset - left.length - right.length)) + theme.fg(selected === treeRoots.wt ? "accent" : "muted", right));
+					}
+					treeRows = rows.length;
+					return rows;
 				},
+				cardGroups: width => ({ groups: treeRows > Number(treeSelectorVisible(width)) ? [{ start: Number(treeSelectorVisible(width)), end: treeRows }] : [], loose: treeSelectorVisible(width) ? [0] : [] }),
 				invalidate: () => tree.invalidate(),
 				handleMouse: event => {
-					const selector = treeRoots?.state === "ready" && event.width >= 16;
+					const selector = treeSelectorVisible(event.width);
 					if (selector && event.y === 0 && event.type === "click" && event.button === "left" && treeRoots?.state === "ready") {
-						const selectorWidth = visualSettings.surface === "transparent" ? panelInnerWidth(theme, event.width) + 2 : event.width;
-						const root = event.x >= selectorInset() + 1 && event.x < selectorInset() + 5 ? treeRoots.main : treeRoots.main !== treeRoots.wt && event.x >= selectorWidth - 9 && event.x < selectorWidth - 1 ? treeRoots.wt : undefined;
+						const root = event.x >= selectorInset() + 1 && event.x < selectorInset() + 5 ? treeRoots.main : treeRoots.main !== treeRoots.wt && event.x >= event.width - 9 && event.x < event.width - 1 ? treeRoots.wt : undefined;
 						if (!root) return undefined;
 						selectTreeRoot(root);
 						return { handled: true, render: true };

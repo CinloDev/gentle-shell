@@ -9907,6 +9907,142 @@ test("on a transparent rail hovering a section card's title paints it in the hov
 		await fire(handlers, "session_shutdown", ctx);
 	}
 });
+test("TREE production panel owns one chrome and preserves logical mouse rows", async t => {
+ const previousStyle = cardStyle(), previousSurface = chromeSurface();
+ t.after(() => { setCardStyle(previousStyle); setChromeSurface(previousSurface); });
+ for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) for (const density of ["comfortable", "compact", "minimal"] as const) for (const background of [true, false]) {
+  await t.test(`${surface}/${style}/${density}/${background ? "painted" : "fallback"}`, async t => {
+   const home = scopedDoubleEscCancelConfigHome(t);
+   writeCardStyle(style, { gentlePiConfigHome: home });
+   writeVisualSettings({ ...DEFAULT_VISUAL_SETTINGS, surface, density }, { gentlePiConfigHome: home });
+   writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "off", tree: "on", profile: "off" }));
+   const entry = (name: string, directory = false) => ({ name, isDirectory: () => directory, isSymbolicLink: () => false });
+   const reads: string[] = [], previews: Array<[string, string]> = [];
+   const pending: Array<(entries: ReturnType<typeof entry>[]) => void> = [];
+   let finishMain: ((entries: ReturnType<typeof entry>[]) => void) | undefined;
+   // Shared panel indentation is replaced by chrome on transparent cards.
+   // The remaining body width pays four connector columns, two icon columns,
+   // one icon/name gap, and (for status rows) a gap plus the badge.
+   const useful = surface === "transparent" && style === CARD_STYLE.FLOAT && background ? 44 : 46;
+   const fit = "c".repeat(useful - 7), over = "d".repeat(useful - 6);
+   const badgeFit = "e".repeat(useful - 9), badgeOver = "f".repeat(useful - 8);
+   const { pi, handlers } = fakePi();
+   gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+    activeProfile: () => undefined, rootExists: () => true,
+    gitRunner: () => async args => ({ code: 0, stdout: args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0" : args[0] === "rev-parse" ? "/repo\n" : args[0] === "status" ? ` M ${badgeFit}\0 M ${badgeOver}\0` : "" }),
+    treeReadDirectory: async path => {
+     reads.push(path);
+     if (path === "/main") return new Promise(resolve => { finishMain = resolve; });
+     if (path.endsWith("/folder")) return new Promise(resolve => pending.push(resolve));
+     return [entry("folder", true), entry("a.ts"), entry("b".repeat(90)), ...[fit, over, badgeFit, badgeOver].map(name => entry(name)), ...Array.from({ length: 40 }, (_, i) => entry(`file-${String(i).padStart(2, "0")}.ts`))];
+    },
+    treeReadFile: async (root, path) => { previews.push([root, path]); return { kind: "text", text: "preview", language: "typescript" } as never; },
+   });
+   const { ctx, ui } = fakeContext(); await fire(handlers, "session_start", ctx);
+   const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+   let renders = 0;
+   const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot: root, requestRender() { renders++; } };
+   const painted = { ...plainTheme, bg: (_role: string, text: string) => background ? `\x1b[44m${text}\x1b[49m` : text };
+   const footer = (ui.footerFactory as any)(host, painted, footerData);
+   try {
+    const boxes = (box: LayoutBox): LayoutBox[] => [box, ...box.children.flatMap(boxes)];
+    const frame = () => renderLayoutFrame(root, 160, host.terminal.rows, () => {});
+    const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("[MAIN]") && typeof (box.component as any).getContentWidth !== "function")!;
+    nav.component.handleMouse?.({ type: "click", button: "left", x: 10, y: 0, width: 50, height: 2 } as TuiMouseEvent);
+    frame(); await settle(); frame(); frame();
+    const scrollBox = boxes(frame().root).find(box => typeof (box.component as any).getContentWidth === "function")!;
+    const scroll = scrollBox.component as any;
+    const rows = (): string[] => { frame(); return scroll.render(50).map(stripAnsi); };
+    const mouse = (x: number, y: number, wheelDelta?: number) => scroll.handleMouse({ type: wheelDelta === undefined ? "click" : "wheel", button: wheelDelta === undefined ? "left" : "none", x, y, wheelDelta, width: 50, height: scrollBox.rect.height, screenX: scrollBox.rect.x + x, screenY: scrollBox.rect.y + y, shift: false, alt: false, ctrl: false });
+    let shown = rows();
+    assert.ok(shown.every(row => visibleWidth(row) <= 50), shown.join("\n"));
+    assert.ok(shown.slice(1).every(row => visibleWidth(row) === 50), "panel rows fill the outer rail width");
+    assert.equal(visibleWidth(shown[0]!), surface === "tinted" ? 50 : style === CARD_STYLE.FLOAT && background ? 46 : 48, "loose selector uses the shared logical render width");
+    assert.equal(shown.filter(row => row.includes("╭")).length, surface === "transparent" && (style === CARD_STYLE.NEON || !background) ? 1 : 0, "only shared chrome owns a frame");
+    assert.ok(shown.length <= scrollBox.rect.height, "selector, header and chrome fit the viewport");
+    const short = shown.find(row => row.includes("a.ts"))!;
+    assert.ok(short); assert.doesNotMatch(short, /…/);
+    assert.match(shown.find(row => row.includes("bbbb"))!, /…/, "genuinely long names truncate");
+    const boundaryRow = (prefix: string) => shown.find(row => row.includes(prefix.repeat(4)))!;
+    assert.ok(boundaryRow("c").includes(fit)); assert.doesNotMatch(boundaryRow("c"), /…/, "exact-fit filename is not shortened");
+    assert.ok(boundaryRow("d").includes("d".repeat(over.length - 2) + "…"));
+    assert.ok(!boundaryRow("d").includes(over), "one-over filename loses only the overflowing column and ellipsis column");
+    assert.ok(boundaryRow("e").includes(badgeFit)); assert.doesNotMatch(boundaryRow("e"), /…/, "exact fit includes badge reservation");
+    assert.ok(boundaryRow("f").includes("f".repeat(badgeOver.length - 2) + "…"));
+    for (const prefix of ["e", "f"]) {
+     const row = boundaryRow(prefix);
+     assert.equal(row.indexOf("M"), row.indexOf(prefix.repeat(4)) + (useful - 7) - 1, "badge keeps the final body column");
+    }
+    const beforeEdges = { reads: [...reads], previews: [...previews], renders };
+    const fileY = shown.findIndex(row => row.includes("a.ts"));
+    for (const x of [0, 49]) assert.equal(mouse(x, fileY), undefined, "left/right body chrome is inert");
+    assert.deepEqual(reads, beforeEdges.reads); assert.deepEqual(previews, beforeEdges.previews);
+    assert.equal(renders, beforeEdges.renders); assert.deepEqual(rows(), shown);
+    const selectorY = shown.findIndex(row => row.includes("WORKTREE"));
+    assert.equal(selectorY, 0, "selector remains outside the group");
+    const mainX = shown[0]!.indexOf("MAIN"), wtX = shown[0]!.indexOf("WORKTREE");
+    assert.equal(mouse(mainX - 1, selectorY), undefined);
+    assert.equal(mouse(wtX + 8, selectorY), undefined);
+    const headerY = shown.findIndex(row => row.includes("REPO") && !row.includes("WORKTREE"));
+    const beforeHeader = reads.length; mouse(8, headerY); assert.equal(reads.length, beforeHeader);
+    assert.deepEqual(rows(), shown, "header stays inert");
+    let folderY = shown.findIndex(row => row.includes("folder"));
+    assert.equal(mouse(8, folderY)?.handled, true); frame();
+    assert.equal(reads.at(-1), "/repo/folder");
+    mouse(8, rows().findIndex(row => row.includes("folder"))); frame();
+    const beforeLate = renders; pending.shift()!([entry("stale-child")]); await settle();
+    assert.equal(renders, beforeLate); assert.doesNotMatch(rows().join("\n"), /stale-child/);
+    mouse(8, rows().findIndex(row => row.includes("folder"))); frame();
+    const beforeLoad = renders; pending.shift()!([entry("fresh-child")]); await settle();
+    assert.ok(renders > beforeLoad); assert.match(rows().join("\n"), /fresh-child/);
+    mouse(8, rows().findIndex(row => row.includes("folder"))); frame();
+    shown = rows(); mouse(8, shown.findIndex(row => row.includes("a.ts"))); await settle();
+    assert.deepEqual(previews, [["/repo", "/repo/a.ts"]]); ui.closeOverlay?.(); await settle();
+    mouse(8, selectorY, 5); shown = rows();
+    assert.doesNotMatch(shown.join("\n"), /a\.ts/); assert.match(shown.join("\n"), /file-/);
+    assert.equal(scroll.scrollTop, 0, "wheel on selector scrolls TREE, not the surrounding rail");
+    mouse(8, selectorY, -100); rows();
+    assert.equal(mouse(mainX, selectorY)?.handled, true); await settle();
+    shown = rows(); assert.match(shown[0]!, /\[WORKTREE\]/, "pending selection still names the painted root");
+    assert.equal(reads.at(-1), "/main"); assert.ok(finishMain);
+    mouse(8, shown.findIndex(row => row.includes("a.ts"))); await settle();
+    assert.deepEqual(previews.at(-1), ["/repo", "/repo/a.ts"], "pending-root click opens painted path and root");
+    ui.closeOverlay?.(); await settle();
+    const beforeMain = renders; finishMain!([entry("a.ts")]); await settle();
+    assert.ok(renders > beforeMain, "root completion invalidates the prepared layout");
+    shown = rows(); assert.match(shown[0]!, /\[MAIN\]/);
+    assert.equal(shown[0]!.indexOf("MAIN"), mainX); assert.equal(shown[0]!.indexOf("WORKTREE"), wtX);
+    mouse(8, shown.findIndex(row => row.includes("a.ts"))); await settle();
+    assert.deepEqual(previews.at(-1), ["/main", "/main/a.ts"]); ui.closeOverlay?.(); await settle();
+    shown = rows();
+    const lastBody = shown.findIndex(row => row.includes("a.ts"));
+    const bottomY = lastBody + 1;
+    assert.ok(bottomY < scrollBox.rect.height);
+    const beforeBottom = { reads: [...reads], previews: [...previews], renders };
+    for (const x of [0, 8, 49]) assert.equal(mouse(x, bottomY), undefined, "bottom card chrome / tinted fill is inert");
+    assert.deepEqual(reads, beforeBottom.reads); assert.deepEqual(previews, beforeBottom.previews);
+    assert.equal(renders, beforeBottom.renders); assert.deepEqual(rows(), shown);
+    // Drive real layout resizing, including the viewport where the selector
+    // consumes all logical room and the card group has no header/body rows.
+    for (const height of [1, 2, 3, 4, 5, 6]) {
+     const bars = density === "comfortable" ? 5 : 3;
+     host.terminal.rows = bars + height;
+     for (let pass = 0; pass < 6; pass++) frame();
+     const tiny = boxes(frame().root).find(box => box.component === scroll)!;
+     const tinyRows: string[] = scroll.render(50).map(stripAnsi);
+     assert.equal(tiny.rect.height, height, "actual integrated viewport height");
+     assert.equal(scroll.scrollTop, 0);
+     assert.ok(tinyRows.length <= height, `${height}: ${JSON.stringify(tinyRows)}`);
+     assert.match(tinyRows[0]!, /\[MAIN\]/, "selector spends the first viewport row");
+     if (height === 1) {
+      assert.equal(tinyRows.length, 1); assert.doesNotMatch(tinyRows.join("\n"), /╭|╰|▎|a\.ts/, "empty group paints no phantom chrome");
+     }
+    }
+   } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+  });
+ }
+});
+
 test("Git and TREE selectors and cards share geometry", async t => {
  const priorStyle = cardStyle(), priorSurface = chromeSurface(); t.after(() => { setCardStyle(priorStyle); setChromeSurface(priorSurface); });
  for (const surface of ["tinted", "transparent"] as const) for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
@@ -9940,7 +10076,7 @@ test("Git and TREE selectors and cards share geometry", async t => {
      for(let i=0;i<100;i++){frame(); row=rows()[y]; if(row.includes(`[${root}]`) && (label !== "TREE" || rows().join("\n").includes(`00-${root.toLowerCase()}-only.ts`))) break; await new Promise(resolve=>setTimeout(resolve,5));}
      assert.ok(row.includes(`[${root}]`),`${label}/${root}: ${row}`);
      if(label === "TREE") assert.ok(rows().join("\n").includes(`00-${root.toLowerCase()}-only.ts`), `${root}: selected root content visible`);
-     const rawRows=scroll.render(50); const rawCard=rawRows.slice(y+1).find((value:string)=>/[╭▎]/.test(stripAnsi(value)) || (surface === "tinted" && stripAnsi(value).includes("GIT"))); assert.ok(rawCard,JSON.stringify(rows()));
+     const rawRows=scroll.render(50); const rawCard=rawRows.slice(y+1).find((value:string)=>/[╭▎]/.test(stripAnsi(value)) || (surface === "tinted" && stripAnsi(value).includes(label === "TREE" ? root : "GIT"))); assert.ok(rawCard,JSON.stringify(rows()));
      const card=stripAnsi(rawCard); const left=surface === "tinted" ? 0 : Math.max(card.indexOf("╭"),card.indexOf("▎")); const right=surface === "tinted" ? card.length-1 : card.includes("╮") ? card.indexOf("╮") : stripAnsi(rawCard.slice(0,rawCard.lastIndexOf("\x1b[49m"))).length-1;
      assert.ok(left>=0 && right>left); results.push({main:mainX,wt:wtX,cardLeft:left,cardRight:right,cardWidth:right-left+1});
     }

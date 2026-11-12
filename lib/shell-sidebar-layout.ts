@@ -420,8 +420,7 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 				const reusable = existing?.component === component && existing.contentWidth === contentWidth && existing.renderWidth === renderWidth && existing.cardStyle === style && existing.theme === theme && existing.themeSignature === signature &&
 					(digest !== undefined ? existing.digest === digest : existing.digest === undefined && existing.revision === cache.revision);
 				const lines = reusable ? existing.lines : (() => {
-					const sectionWidth = carded && key === "$destination" && activeDestination === "tree" ? contentWidth : renderWidth;
-					const rendered = [...(component.render(sectionWidth) ?? [])];
+					const rendered = [...(component.render(renderWidth) ?? [])];
 					while (rendered.length && rendered[rendered.length - 1]?.trim() === "") rendered.pop();
 					return rendered;
 				})();
@@ -476,7 +475,11 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 						const body = section.lines.slice(group.start + 1, group.end).map((row) => row.startsWith(indent) ? row.slice(PANEL_ROW_INDENT) : row);
 						if (section.key !== "$destination") while (body.length && body[body.length - 1]?.trim() === "") body.pop();
 						const top = railLines.length;
-						railLines.push(...sectionCardRows(headerParts(section.lines[group.start] ?? ""), body, theme, contentWidth));
+						const cardRows = sectionCardRows(headerParts(section.lines[group.start] ?? ""), body, theme, contentWidth);
+						// TREE's bounded viewport can be smaller than the shared chrome
+						// itself. Never turn that chrome into outer rail scroll range.
+						const room = section.key === "$destination" && activeDestination === "tree" && scroll.viewportHeight > 0 ? Math.max(0, scroll.viewportHeight - top) : cardRows.length;
+						railLines.push(...cardRows.slice(0, room));
 						// The title row folds the section like its header; body rows keep their own rows.
 						const frame = { frameWidth: renderWidth, frameHeight: section.lines.length };
 						hits.push({ key: section.key, component: section.component, startY: top + geometry.headerRow, height: 1, width: renderWidth, x: geometry.headerX, row: group.start, wholeRow: true, ...frame });
@@ -487,12 +490,11 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 					continue;
 				}
 				const startY = railLines.length;
-				const treeTransparent = carded && activeDestination === "tree" && section.key === "$destination";
-				const padding = treeTransparent ? 0 : RAIL_PADDING;
+				const padding = RAIL_PADDING;
 				railLines.push(...section.lines.map((line) => paint(" ".repeat(padding) + line + " ".repeat(padding))));
 				previousPanel = panel;
 				fillRow = panel ? paint(" ".repeat(contentWidth)) : "";
-				const frameWidth = treeTransparent ? contentWidth : renderWidth;
+				const frameWidth = renderWidth;
 				hits.push({ key: section.key, component: section.component, startY, height: section.lines.length, width: frameWidth, x: padding, row: 0, frameWidth, frameHeight: section.lines.length });
 			}
 			// Height is owned by the native ScrollView, never by the transcript.
