@@ -4,7 +4,7 @@ import { truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-wor
 import { parsePorcelain, type ChangeStatus, type GitRunner } from "./shell-changes.ts";
 import type { ShellBarTheme } from "./shell-bar.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
-import { CARD_TONE, panelExtraRows, panelInnerWidth, renderCard } from "./shell-card.ts";
+import { PANEL_ROW_INDENT, renderPanelHeader, renderPanelRow } from "./shell-panel.ts";
 
 type Entry = { name: string; isDirectory(): boolean; isSymbolicLink(): boolean };
 type Reader = (path: string) => Promise<Entry[]>;
@@ -190,7 +190,7 @@ export class SidebarTree {
  private paint(width: number, viewport?: number): string[] {
   const painted = this.painted();
   const root = painted?.root ?? this.root, gitFiles = painted?.gitFiles ?? this.gitFiles, dirty = painted?.dirtyDirectories ?? this.dirtyDirectories, gitError = painted?.gitError ?? this.gitError;
-  const lines: string[] = []; const nodes: Array<Node | undefined> = []; const inner = panelInnerWidth(this.theme, width);
+  const lines: string[] = []; const nodes: Array<Node | undefined> = []; const inner = Math.max(0, width - PANEL_ROW_INDENT);
   const items: Array<{ node?: Node; ancestors: boolean[]; more?: boolean; text?: string; role?: string }> = [];
   const add = (prefix: string, text: string, node?: Node, role = "text", badge?: [string, string]) => {
    let content = this.theme.fg("muted", prefix);
@@ -198,7 +198,7 @@ export class SidebarTree {
     const label = truncateToWidth(text, Math.max(0, inner - visibleWidth(prefix) - 2), "…");
     content += this.theme.fg(badge[1], label) + " ".repeat(Math.max(1, inner - visibleWidth(prefix) - visibleWidth(label) - 1)) + this.theme.fg(badge[1], badge[0]);
    } else content += this.theme.fg(role, text);
-   lines.push(truncateToWidth(content, inner)); nodes.push(node);
+   lines.push(renderPanelRow(width, truncateToWidth(content, inner, "…"))); nodes.push(node);
   };
   const children = (node: Node, ancestors: boolean[]) => {
    if (node.state === "idle" || node.state === "loading") { items.push({ ancestors, text: "Loading…", role: "muted" }); return; }
@@ -212,7 +212,7 @@ export class SidebarTree {
   };
   if (gitError) items.push({ ancestors: [], text: "Could not refresh Git", role: "error" });
   children(root, []);
-  const extra = panelExtraRows(this.theme, width); const capacity = viewport === undefined ? items.length : Math.max(0, viewport - 2 - extra);
+  const capacity = viewport === undefined ? items.length : Math.max(0, viewport - 1);
   this.bodyCount = items.length; this.bodyCapacity = capacity;
   const offset = Math.min(this.viewOffset, Math.max(0, items.length - capacity)); this.setViewOffset(offset);
   for (const item of items.slice(offset, offset + capacity)) {
@@ -229,9 +229,10 @@ export class SidebarTree {
   const current = name(root.path); const project = this.projectRoot ? name(this.projectRoot) : current;
   const hasError = (node: Node): boolean => Boolean(node.refreshError) || node.children.some(child => child.expanded && hasError(child));
   const title = (hasError(root) ? "Error reading directory · " : "") + (project === current ? current.toUpperCase() : `${project.toUpperCase()} · ${current.toUpperCase()}`);
-  const rendered = renderCard({ title, body: shown, tone: CARD_TONE.INFO }, this.theme, width, { expanded: true, panel: true });
+  const header = renderPanelHeader(this.theme, width, { title, open: true }).replace("ERROR READING DIRECTORY", "Error reading directory");
+  const rendered = [header, ...shown];
   const clipped = viewport === undefined ? rendered : rendered.slice(0, viewport);
-  this.rows = [...Array<Node | undefined>(1 + (shown.length ? extra : extra / 2)).fill(undefined), ...nodes, undefined].slice(0, clipped.length);
+  this.rows = [undefined, ...nodes].slice(0, clipped.length);
   this.geometryValid = true; return clipped;
  }
  handleMouse(event: TuiMouseEvent): { handled: boolean; render: boolean } | undefined {
