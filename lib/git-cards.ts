@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { renderPanelHeader, renderPanelRow } from "./shell-panel.ts";
+import { PANEL_ROW_INDENT, renderPanelHeader, renderPanelRow } from "./shell-panel.ts";
 import { ChangesTracker, type ChangesModel, type FileRevision, type GitRunner, type LineCounter } from "./shell-changes.ts";
 import { renderSidebarGitGraph, SidebarGitFrameCache, SidebarGitHistory, type GraphTheme, type SidebarGitGraph } from "./sidebar-git-graph.ts";
 import { sanitizeTerminalText } from "./terminal-theme.ts";
@@ -194,15 +194,21 @@ export class SidebarGitCards {
 		for (const file of files.slice(offset, offset + Math.max(0, viewport - 2))) {
 			const status = { modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U" }[file.status];
 			const path = sanitizeTerminalText(file.path).replace(/[\r\n\t]/g, " ");
-			const suffix = `${file.countsUnavailable ? "" : `+${file.added} -${file.deleted} `}[diff]`;
-			const rowWidth = Math.max(0, width - 2);
-			const room = Math.max(0, rowWidth - visibleWidth(status) - 2 - visibleWidth(suffix));
-			if (!room) { rows.push(truncateToWidth(`${status} ${path}`, width, "…")); continue; }
+			// A file row only names counts that exist: no -0, no +0, and an untracked
+			// or empty row carries no numbers at all. The header keeps the full totals.
+			const parts: string[] = [];
+			if (file.added > 0) parts.push(theme.fg("success", `+${file.added}`));
+			if (file.deleted > 0) parts.push(theme.fg("error", `-${file.deleted}`));
+			const counts = parts.join(" ");
+			// The [diff] tag is the row's right column, flush against the margin on
+			// every row: fitPanelLine pins it to the right edge and gives the file
+			// text only what remains, so the tag can never drift or overflow.
+			const right = `${counts ? `${counts} ` : ""}${theme.fg("accent", "[diff]")}`;
+			const room = Math.max(1, width - PANEL_ROW_INDENT - visibleWidth(status) - 2 - visibleWidth(right));
 			const label = truncateToWidth(path, room, "…");
 			const slash = label.lastIndexOf("/");
 			const painted = slash < 0 ? theme.fg("text", label) : theme.fg("muted", label.slice(0, slash + 1)) + theme.fg("text", label.slice(slash + 1));
-			const counts = file.countsUnavailable ? "" : `${theme.fg("success", `+${file.added}`)} ${theme.fg("error", `-${file.deleted}`)} `;
-			rows.push(fit(`${theme.fg("accent", status)} ${painted}${" ".repeat(Math.max(1, rowWidth - 2 - visibleWidth(label) - visibleWidth(suffix)))}${counts}${theme.fg("accent", "[diff]")}`));
+			rows.push(renderPanelRow(width, `${theme.fg("accent", status)} ${painted}`, right));
 		}
 		return rows;
 	}

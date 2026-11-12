@@ -248,3 +248,30 @@ test("GIT card rows fill the rail width so the tinted surface has no bare notche
 	assert.ok(!header.startsWith("  "), "the header carries no panel indent");
 	assert.match(header, /\d\s*$/, "the count survives at the right edge");
 });
+
+test("Changes rows never show a zero count; the header keeps the full totals", async () => {
+	// One file of each kind: an added-only (+34 / no deletions), a deleted-only
+	// (-5 / no additions), a mixed (+2 -1) and an untracked file (0 0). File
+	// rows must never carry a zero part; the header keeps the full totals.
+	const porcelain = ["A  dir/a-only.ts", "D  dir/d-only.ts", " M dir/mixed.ts", "?? dir/new.ts"].join("\x00") + "\x00";
+	const numstat = ["34\t0\tdir/a-only.ts", "0\t5\tdir/d-only.ts", "2\t1\tdir/mixed.ts"].join("\n");
+	const cards = new SidebarGitCards({
+		git: () => async args => ({ code: 0, stdout: args[0] === "symbolic-ref" ? "main" : args[0] === "rev-parse" ? "abc" : args[0] === "-c" ? "* \x1eabc\x1f\x1ffeat: history\x1e" : args[0] === "status" ? porcelain : args[0] === "diff" ? numstat : "" }),
+		untrackedLines: () => async () => 0,
+		fileRevision: () => undefined,
+		publish: () => {},
+	}, { history: true, diff: true });
+	cards.enter(MAIN);
+	for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+	const text = [...cards.historyRows(theme, 80, 2), ...cards.changesRows(theme, 80, 8)].join("\n");
+	assert.doesNotMatch(text, /[-+]0\b/, "no zero part in any file row");
+	for (const row of text.split("\n")) {
+		if (!row.includes("[diff]") || row.includes("partial counts") || row.includes("▾")) continue;
+		assert.ok(row.endsWith("[diff]"), `the diff tag sits flush on the right margin of every row: ${JSON.stringify(row)}`);
+	}
+	assert.match(text, /\+34 \[diff\]/, "added only shows its +");
+	assert.match(text, /-5 \[diff\]/, "deleted only shows its -");
+	assert.match(text, /\+2 -1 \[diff\]/, "mixed keeps both");
+	assert.match(text, /new\.ts\s+\[diff\]/, "the untracked row shows no numbers");
+	assert.match(text, /\+36 -6 · partial counts/, "the header keeps the full totals");
+});
