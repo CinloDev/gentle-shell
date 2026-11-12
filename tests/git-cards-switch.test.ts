@@ -241,4 +241,10 @@ test("GIT card rows fill the rail width so the tinted surface has no bare notche
 	const rows = f.render();
 	assert.ok(rows.length >= 5, `both cards are populated: ${rows.join(" | ")}`);
 	for (const row of rows) assert.equal(visibleWidth(row), 80, JSON.stringify(row));
+	// The Changes header keeps the exact-width, glyph-first shape every card
+	// header needs: no panel indent, count intact at the right edge.
+	const header = rows.find(row => row.includes("▾ CHANGES"))!;
+	assert.ok(header, "the changes header row is painted");
+	assert.ok(!header.startsWith("  "), "the header carries no panel indent");
+	assert.match(header, /\d\s*$/, "the count survives at the right edge");
 });

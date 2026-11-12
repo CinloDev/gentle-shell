@@ -178,16 +178,19 @@ export class SidebarGitCards {
 		const files = card?.model?.files ?? [];
 		const statusRead = card?.statusRead ?? false;
 		const rows = [renderPanelHeader(theme, width, { title: "Changes", count: `${files.length}`, open: !collapsed, hovered })];
-		// The tinted surface paints per occupied cell: the rows fill the full width
-		// so the panel background never shows bare notches (the MAIN/PROFILE rule).
+		// The tinted surface paints per occupied cell: BODY rows fill the full
+		// width via renderPanelRow (the transparent card path strips that indent).
+		// The header never goes through it: the card chrome parses the leading
+		// glyph from an exact-width header row, and an indent would turn it into
+		// the default ✿ glyph with a clipped count.
 		const fit = (row: string) => renderPanelRow(width, row);
-		if (collapsed || viewport <= 1) return rows.map(fit);
+		if (collapsed || viewport <= 1) return rows;
 		// The shared tracker does not distinguish failed numstat or binary counts
 		// from zero, so its sums are necessarily provisional.
-		rows.push(card?.model && statusRead
+		rows.push(fit(card?.model && statusRead
 			? truncateToWidth(`${theme.fg("success", `+${card.model.added}`)} ${theme.fg("error", `-${card.model.deleted}`)} ${theme.fg("muted", "· partial counts")}`, width, "…")
-			: theme.fg("muted", card && (card.painted || card.diffLoaded) ? "Counts unavailable" : "Loading changes…"));
-		if (viewport > 2 && !files.length && statusRead) { rows.push(theme.fg("muted", "No changes.")); return rows.map(fit); }
+			: theme.fg("muted", card && (card.painted || card.diffLoaded) ? "Counts unavailable" : "Loading changes…")));
+		if (viewport > 2 && !files.length && statusRead) { rows.push(fit(theme.fg("muted", "No changes."))); return rows; }
 		for (const file of files.slice(offset, offset + Math.max(0, viewport - 2))) {
 			const status = { modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U" }[file.status];
 			const path = sanitizeTerminalText(file.path).replace(/[\r\n\t]/g, " ");
@@ -199,9 +202,9 @@ export class SidebarGitCards {
 			const slash = label.lastIndexOf("/");
 			const painted = slash < 0 ? theme.fg("text", label) : theme.fg("muted", label.slice(0, slash + 1)) + theme.fg("text", label.slice(slash + 1));
 			const counts = file.countsUnavailable ? "" : `${theme.fg("success", `+${file.added}`)} ${theme.fg("error", `-${file.deleted}`)} `;
-			rows.push(`${theme.fg("accent", status)} ${painted}${" ".repeat(Math.max(1, rowWidth - 2 - visibleWidth(label) - visibleWidth(suffix)))}${counts}${theme.fg("accent", "[diff]")}`);
+			rows.push(fit(`${theme.fg("accent", status)} ${painted}${" ".repeat(Math.max(1, rowWidth - 2 - visibleWidth(label) - visibleWidth(suffix)))}${counts}${theme.fg("accent", "[diff]")}`));
 		}
-		return rows.map(fit);
+		return rows;
 	}
 
 	private paintedCard(): Card | undefined {
