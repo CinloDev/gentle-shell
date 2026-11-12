@@ -31,12 +31,16 @@ import * as boards from "./canvas-boards.js";
 import * as comments from "./canvas-comments.js";
 import * as compare from "./canvas-compare.js";
 import * as events from "./canvas-events.js";
+import * as exporter from "./canvas-export.js";
 import * as focus from "./canvas-focus.js";
 import * as handoffs from "./canvas-handoffs.js";
+import * as layout from "./canvas-layout.js";
 import * as menu from "./canvas-menu.js";
 import * as messages from "./canvas-messages.js";
+import * as minimap from "./canvas-minimap.js";
 import * as popover from "./canvas-popover.js";
 import * as rail from "./canvas-rail.js";
+import * as sizes from "./canvas-sizes.js";
 import { createStore } from "./canvas-store.js";
 import * as ui from "./canvas-ui.js";
 import * as view from "./canvas-view.js";
@@ -44,9 +48,11 @@ import * as view from "./canvas-view.js";
 /**
  * The modules whose functions become ctx.actions, in their listener registration order.
  * The rail comes before the popover: its keydown listener that takes the next key for a
- * shortcut runs in the capture phase, ahead of the popover's Esc.
+ * shortcut runs in the capture phase, ahead of the popover's Esc. The layout comes before
+ * the popover too: its Esc clears the selected artboard first, and the next Esc reaches
+ * the popover's (leave Comment mode).
  */
-const MODULES = [view, focus, boards, handoffs, compare, events, comments, menu, rail, popover, messages];
+const MODULES = [view, focus, boards, handoffs, compare, events, comments, menu, rail, sizes, exporter, layout, minimap, popover, messages];
 
 export function boot(win, doc) {
 	const config = JSON.parse(doc.getElementById("gd-config").textContent);
@@ -62,6 +68,12 @@ export function boot(win, doc) {
 		zoomIn: $("gd-zoom-in"),
 		zoomLevel: $("gd-zoom-level"),
 		fit: $("gd-fit"),
+		arrange: { row: $("gd-arrange-row"), column: $("gd-arrange-column"), grid: $("gd-arrange-grid") },
+		device: $("gd-device"),
+		deviceIcon: $("gd-device-icon"),
+		deviceName: $("gd-device-name"),
+		deviceSize: $("gd-device-size"),
+		deviceMenu: $("gd-device-menu"),
 		sprite: $("gd-sprite"),
 		rail: $("gd-rail"),
 		toolNavigate: $("gd-tool-navigate"),
@@ -80,6 +92,10 @@ export function boot(win, doc) {
 		viewport: $("gd-viewport"),
 		world: $("gd-world"),
 		empty: $("gd-empty"),
+		minimap: $("gd-minimap"),
+		minimapMap: $("gd-minimap-map"),
+		minimapView: $("gd-minimap-view"),
+		minimapKey: $("gd-minimap-key"),
 		popover: $("gd-popover"),
 		form: $("gd-popover-form"),
 		target: $("gd-popover-target"),
@@ -129,12 +145,14 @@ export function boot(win, doc) {
 	function viewportResized() {
 		actions.centerFocus();
 		actions.refit();
+		actions.measureMinimap();
 	}
 	if (typeof win.ResizeObserver === "function") new win.ResizeObserver(viewportResized).observe(els.viewport);
 	else win.addEventListener("resize", viewportResized);
 
 	actions.setMode(actions.storedMode());
 	actions.startRail();
+	actions.startSizes();
 	actions.start();
 	actions.connectEvents();
 }
