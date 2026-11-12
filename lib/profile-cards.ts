@@ -76,7 +76,11 @@ export function buildProfileCards(snapshot: ProfileCardsSnapshot, theme: Profile
 		if (model.effort) modelBody.push(renderPanelRow(width, theme.fg("muted", `Effort: ${model.effort}`)));
 		if (model.contextPercent !== undefined) {
 			const right = model.costTotal > 0 ? formatCost(model.costTotal) : "";
-			modelBody.push(renderPanelRow(width, theme.fg("accent", `Context ${Math.round(model.contextPercent)}%`), right));
+			// Same 16-cell gauge budget the QUOTA windows use, shrinking with the
+			// row so the painted meter matches the quota card's at normal widths.
+			const room = Math.max(0, width - PANEL_ROW_INDENT);
+			const cells = Math.max(2, Math.min(16, room - visibleWidth("Context") - 6 - (right ? visibleWidth(right) + 1 : 0)));
+			modelBody.push(renderPanelRow(width, `${theme.fg("accent", "Context ")}${paintGauge(model.contextPercent, theme, cells, snapshot.gauge)}${theme.fg("accent", ` ${Math.round(model.contextPercent)}%`.padStart(4))}`, right));
 		}
 	} else {
 		modelBody.push(renderPanelRow(width, theme.fg("muted", "No model.")));

@@ -451,10 +451,10 @@ test("PROFILE tab paints read-only cards only when its policy key is on", async 
 		const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
 		// The tab renders with its key on; GIT is off in this fixture.
 		const tab = stripAnsi(frame().lines.join("\n"));
-		assert.match(tab, /\[MAIN\].*PROFILE/);
+		assert.match(tab, /\[MAIN\].*PROF/);
 		assert.doesNotMatch(tab, /\[GIT\]/);
-		const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width).join("\n")).includes("PROFILE"));
-		assert.ok(nav, "PROFILE tab appears with its policy key on");
+		const nav = boxes(frame().root).find(box => stripAnsi(box.component.render(box.rect.width).join("\n")).includes("PROF"));
+		assert.ok(nav, "PROF tab appears with its policy key on");
 		nav.component.handleMouse({ type: "click", button: "left", x: 10, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
 		frame();
 		const cards = stripAnsi(frame().lines.join("\n"));
@@ -477,7 +477,7 @@ test("PROFILE tab paints read-only cards only when its policy key is on", async 
 			frame();
 			const tinted = frame().lines.join("\n");
 			assert.ok(tinted.includes("\x1b[44m"), "tinted surface paints the PROFILE section rows");
-			assert.match(stripAnsi(tinted), /PROFILE/);
+			assert.match(stripAnsi(tinted), /PROF/);
 		} finally { tintedFooter.dispose(); }
 	} finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });

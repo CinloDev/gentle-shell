@@ -3239,7 +3239,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			});
 			const profileRail: SidebarRail = Object.assign(profileRegion, { surface: profileCard.surface, digest: profileCard.digest, cardGroups: profileCard.cardGroups });
-			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROFILE", rail: profileRail }] : [])] : [], id => {
+			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROF", rail: profileRail }] : [])] : [], id => {
 				if (id !== "profile" || profileWidth !== tui.terminal?.columns) profileRegion.clearHover();
 				profileWidth = tui.terminal?.columns;
 				if (id === "tree" && !treeActive) {
