@@ -1014,11 +1014,14 @@ test("Git selector switches history and changes without hidden or frame Git call
  writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on" }));
  const calls: Array<{ root: string; args: string[] }> = [];
  let extra = false, hold = false, releaseLate: (() => void) | undefined, renders = 0, holdRoot = "/repo";
+ let initialHeld = false, releaseInitial!: () => void;
+ const initialLoad = new Promise<void>(resolve => { releaseInitial = resolve; });
  const { pi, handlers } = fakePi();
  gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
   activeProfile: () => undefined, rootExists: () => true,
   gitRunner: (root, limit) => async args => {
    calls.push({ root, args });
+   if (!initialHeld && limit && root === "/repo" && args[0] === "status") { initialHeld = true; await initialLoad; }
    if (hold && limit && root === holdRoot && args[0] === "status") { hold = false; await new Promise<void>(resolve => { releaseLate = resolve; }); }
    const output = args[0] === "worktree" ? "worktree /main\0\0worktree /repo\0\0worktree /sibling\0\0" : args[0] === "rev-parse" ? (args[1] === "--show-toplevel" ? "/repo\n" : "abc\n") : args[0] === "symbolic-ref" ? (root === "/main" ? "main\n" : "feature\n") : args[0] === "-c" ? `* \x1eabc\x1f\x1ffeat: ${root} history\x1e\n` : args[0] === "status" ? ` M ${root === "/main" ? "main" : "worktree"}.ts\0${extra && root === "/repo" ? "?? created.ts\0" : ""}` : args[0] === "diff" ? `${root === "/main" ? "7\t3\tmain" : "1\t0\tworktree"}.ts\n` : "";
    return { code: 0, stdout: output };
@@ -1041,7 +1044,20 @@ test("Git selector switches history and changes without hidden or frame Git call
   assert.match(stripAnsi(frame().lines.join("\n")), /\[GIT\]/, "navigation must select Git before checking its contents");
   const scroll = boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
   const rows = () => scroll.render(50).map(stripAnsi);
-  assert.match(rows().join("\n"), /WORKTREE/); assert.match(rows().join("\n"), /worktree\.ts/); assert.match(rows().join("\n"), /\/repo history/);
+  const diagnostics = () => JSON.stringify({ rows: rows(), calls }, null, 2);
+  // Five event-loop turns do not mean the initial Changes scan has completed.
+  // Hold its status response so this remains a deterministic pending-state probe.
+  const heldDeadline = Date.now() + 1_000;
+  while (!initialHeld && Date.now() < heldDeadline) { await new Promise(resolve => setTimeout(resolve, 5)); frame(); }
+  assert.ok(initialHeld, diagnostics());
+  assert.match(rows().join("\n"), /Loading changes/, diagnostics());
+  assert.doesNotMatch(rows().join("\n"), /worktree\.ts/, diagnostics());
+  releaseInitial();
+  const readyDeadline = Date.now() + 1_000;
+  while (Date.now() < readyDeadline && !(/worktree\.ts/.test(rows().join("\n")) && /\/repo history/.test(rows().join("\n")))) {
+   await new Promise(resolve => setTimeout(resolve, 5)); frame();
+  }
+  assert.match(rows().join("\n"), /WORKTREE/); assert.match(rows().join("\n"), /worktree\.ts/, diagnostics()); assert.match(rows().join("\n"), /\/repo history/, diagnostics());
   assert.match(rows().join("\n"), /\+1 -0 · partial counts/, "worktree totals are labeled partial");
   extra = true;
   await fire(handlers, "agent_end", ctx); await changesSettled();
@@ -1085,7 +1101,7 @@ test("Git selector switches history and changes without hidden or frame Git call
   assert.ok(releaseLate); footer.dispose();
   const afterDispose = renders; releaseLate!(); await changesSettled();
   assert.equal(renders, afterDispose, "disposed sidebar discards late results");
- } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+ } finally { releaseInitial(); releaseLate?.(); footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
 });
 
 test("GIT tab re-entry reconciles roots without resetting a surviving selection", async t => {
