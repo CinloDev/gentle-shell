@@ -168,7 +168,7 @@ test("Back to canvas and focusing another artboard leave All sizes and restore t
 	commentMode(canvas);
 	const phone = iframeOf(sizeSections(canvas)[0]);
 	phone.dispatch("load");
-	assert.deepEqual(lastOf(phone, "gd:mode"), { type: "gd:mode", enabled: false });
+	assert.deepEqual(lastOf(phone, "gd:mode"), { type: "gd:mode", enabled: false, inspect: false });
 	assert.equal(phone.contentWindow!.posted.filter((message) => message.type === "gd:pins").length, 0, "no pins either");
 	canvas.message(phone.contentWindow, inspectorPick(phone, { type: "gd:pick", selector: "#x", excerpt: "", rect: { x: 0, y: 0, width: 1, height: 1 } }));
 	assert.equal($(canvas, "gd-popover").hidden, true);
@@ -217,14 +217,14 @@ test("size frames are registered like the artboard's frame: they get focus, mode
 	for (const frame of frames) {
 		frame.dispatch("load");
 		assert.deepEqual(lastOf(frame, "gd:focus"), { type: "gd:focus", enabled: true });
-		assert.deepEqual(lastOf(frame, "gd:mode"), { type: "gd:mode", enabled: false });
+		assert.deepEqual(lastOf(frame, "gd:mode"), { type: "gd:mode", enabled: false, inspect: false });
 		assert.deepEqual(lastOf(frame, "gd:pins"), { type: "gd:pins", pins: [{ id: "a1", selector: "main > .a1" }] });
 	}
 	commentMode(canvas);
-	for (const frame of frames) assert.deepEqual(frame.contentWindow!.posted.at(-1), { type: "gd:mode", enabled: true });
+	for (const frame of frames) assert.deepEqual(frame.contentWindow!.posted.at(-1), { type: "gd:mode", enabled: true, inspect: false });
 	assert.ok(withClass(canvas.viewport, "gd-sizes-all")[0].classes.has("gd-commenting"), "the frames wear the comment-mode outline");
 	$(canvas, "gd-tool-navigate").dispatch("click");
-	for (const frame of frames) assert.deepEqual(frame.contentWindow!.posted.at(-1), { type: "gd:mode", enabled: false });
+	for (const frame of frames) assert.deepEqual(frame.contentWindow!.posted.at(-1), { type: "gd:mode", enabled: false, inspect: false });
 	assert.ok(!withClass(canvas.viewport, "gd-sizes-all")[0].classes.has("gd-commenting"));
 	// Frames made while Comment mode is on start with the outline.
 	commentMode(canvas);
@@ -582,12 +582,12 @@ test("E4: the client's viewport limits and the Phone and Tablet presets match wh
 	assert.deepEqual(named, client, "the server names the same sizes the card names");
 });
 
+// Its strings go through ctx.i18n, checked against canvas-i18n-es.js in tests/design-canvas-i18n.test.ts.
 test("All sizes keeps the module rules: state through the store, board fields documented, English strings in TEXT", () => {
 	const sizes = read("canvas-sizes.js");
 	assert.ok(sizes.indexOf("const TEXT = Object.freeze({") < sizes.indexOf("export function init"), "the strings sit in one TEXT block before init");
 	for (const literal of ["All sizes", "Overflows", "Made at"]) assert.ok(sizes.slice(0, sizes.indexOf("export function init")).includes(literal), `${literal} is in TEXT`);
 	assert.ok(!/\bstate\.size\s*=(?!=)/.test(sizes));
-	assert.ok(!/data-i18n|\bloc\(|\bt\(/.test(sizes));
 	assert.match(sizes, /setAttribute\("sandbox", "allow-scripts"\)/, "size frames keep the scripts-only sandbox");
 	assert.ok(!/setAttribute\("style"|\.cssText/.test(sizes), "styles go through the CSSOM");
 	const store = read("canvas-store.js");
@@ -607,7 +607,7 @@ test("All sizes keeps the module rules: state through the store, board fields do
 test("index.html has the All sizes icon, and canvas.css styles the frames, the chip and the comment's size in the Sizes section on --gd-* tokens", () => {
 	const html = read("index.html");
 	assert.match(html, /<symbol id="i-devices" viewBox="0 0 24 24">/);
-	assert.ok(!/data-i18n/.test(html));
+	assert.ok(!/data-i18n/.test(html.slice(html.indexOf('<svg id="gd-sprite"'), html.indexOf("</svg>"))));
 	const css = read("canvas.css");
 	const start = css.indexOf("/* Screen sizes (canvas-sizes.js)");
 	assert.ok(start >= 0 && css.split("/* Screen sizes (canvas-sizes.js)").length === 2, "one Sizes section");
