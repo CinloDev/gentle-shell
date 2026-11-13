@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { profilesFilePath, profileRoleEntries, readProfilesFileResult } from "../lib/agent-profiles.ts";
 import { resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles } from "../lib/session-profile-freeze.ts";
 import * as os from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, basename } from "node:path";
 import { buildShellHeaderModel, renderShellBar, renderShellBelowInputFloat, renderShellBottomOnlyBar, renderShellHeaderChrome, renderShellSidebarBar, renderShellStatusBar, renderShellStatusSections, renderShellChromeBar, renderShellChromePad, renderShellTitleRow, type StatusSection, type StatusTarget, keepNativeWorkingRow, shellEnabled, shellHeaderUsageHit, shellJobsCount, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
 import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, ChangesTracker, WorktreeChangesTracker, changesDigest, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
@@ -139,6 +139,8 @@ import { releaseSidebarHover, setSidebarHover, sidebarHeader, sidebarPart, sideb
 import { installSidebar, invalidateSidebar, narrowStatusOwner, SIDEBAR_BREAKPOINT, STATUS_OWNER } from "../lib/shell-sidebar-layout.ts";
 import { SidebarGitCards } from "../lib/git-cards.ts";
 import { buildProfileCards, type ProfileCardId, type ProfileCardsFrame, type ProfileCardsSnapshot } from "../lib/profile-cards.ts";
+import { buildEngramCards, deriveEngramCloudSnapshot, engramCardsDigest, engramDashboardUrl, parseEngramEnrollment, parseEngramHealth, parseEngramObservationList, parseEngramStats, type EngramCardId, type EngramObservationSnapshot, type EngramCardsSnapshot } from "../lib/engram-cards.ts";
+import { ENGRAM_DEFAULT_PORT } from "../lib/gentle-shell-bundled.ts";
 import { discoverSidebarGitRoots, type SidebarGitRoots } from "../lib/sidebar-git-roots.ts";
 import { chromeSurface, panelSheetBackHit, renderPanelSheet, renderWorkRow, setChromeSurface, workRowLead } from "../lib/shell-panel.ts";
 import { installPagePaint, type PageTheme } from "../lib/shell-page.ts";
@@ -2531,6 +2533,11 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	let changes: WorktreeChangesTracker | undefined;
 	let registry: SessionWorktreeRegistry | undefined;
 	let currentContext: ExtensionContext | undefined;
+	// MEM tab probe state lives here because it spans scopes: the sidebar's
+	// session_start handler starts and stops the poll loop, while
+	// session_shutdown must always be able to clear its timer.
+	let engramSnapshot: EngramCardsSnapshot | undefined;
+	let engramTimer: ReturnType<typeof setInterval> | undefined;
 	let disposeFooter: (() => void) | undefined;
 	let refreshSidebarHistory: (() => Promise<void>) | undefined;
 	let refreshSidebarDiff: (() => Promise<void>) | undefined;
@@ -3239,7 +3246,176 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			});
 			const profileRail: SidebarRail = Object.assign(profileRegion, { surface: profileCard.surface, digest: profileCard.digest, cardGroups: profileCard.cardGroups });
-			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROF", rail: profileRail }] : [])] : [], id => {
+			// MEM tab: the Engram session memory card. The host owns all I/O — a
+			// bounded probe loop that runs only while this tab is visible (the tab
+			// switch below starts and stops it) — and hands the painter a plain
+			// snapshot. The card never touches the network, the filesystem or the
+			// CLI, and the cloud token never leaves cloud.json: only its server URL
+			// is read, matching the paint-only contract of the other cards.
+			const engramPort = Number(process.env.ENGRAM_PORT) > 0 ? Number(process.env.ENGRAM_PORT) : ENGRAM_DEFAULT_PORT;
+			// Engram groups data by repository, not by checkout directory, so the
+			// stats project is the MAIN repository's name: from a worktree like
+			// .worktrees/contrib-profile neither the cwd nor the worktree root is
+			// known to the daemon — it knows "gentle-shell", the basename of the
+			// git common dir (L12/L15 unknown_project bug).
+			let engramProjectName: string | undefined;
+			let engramProjectTried = false;
+			const engramProject = () => engramProjectName ?? basename(ctx.cwd);
+			const engramResolveProject = () => new Promise<void>(done => {
+				engramProjectTried = true;
+				execFile("git", ["-C", ctx.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeout: 2_000 }, (error, stdout) => {
+					if (!error && typeof stdout === "string") {
+						const gitDir = stdout.trim();
+						if (gitDir) engramProjectName = basename(dirname(gitDir === ".git" ? join(ctx.cwd, ".git") : gitDir));
+					}
+					done();
+				});
+			});
+			const engramCloudServer = async (): Promise<string | undefined> => {
+				try {
+					const cloudHome = process.env.ENGRAM_DATA_DIR?.trim() || join(os.homedir(), ".engram");
+					const record = JSON.parse(await readFile(join(cloudHome, "cloud.json"), "utf8")) as { server_url?: unknown };
+					return typeof record.server_url === "string" && /^https?:\/\//.test(record.server_url) ? record.server_url : undefined;
+				} catch { return undefined; }
+			};
+			const engramFetchJson = async (path: string): Promise<unknown | null> => {
+				try {
+					const response = await fetch(`http://127.0.0.1:${engramPort}${path}`, { signal: AbortSignal.timeout(1_000) });
+					if (!response.ok) return null;
+					return await response.json();
+				} catch { return null; }
+			};
+			const engramPoll = async () => {
+				if (engramProjectTried === false) await engramResolveProject();
+				if (engramEnrollmentTried === false) await engramDetectEnrollment();
+				// The observation list is heavy, so it refreshes on a slower cadence
+				// than the 2s status probe; both ride the same visibility-gated loop.
+				if (Date.now() - engramListAt > 30_000) {
+					const list = await engramFetchJson(`/observations?project=${encodeURIComponent(engramProject())}&limit=100`);
+					if (list !== null) engramActivity = parseEngramObservationList(list, Date.now());
+					engramListAt = Date.now();
+				}
+				const [health, stats, sync, server] = await Promise.all([
+					engramFetchJson("/health"),
+					engramFetchJson(`/stats?project=${encodeURIComponent(engramProject())}`),
+					engramFetchJson("/sync/status"),
+					engramCloudServer(),
+				]);
+				if (health !== null) engramDaemonSeen = true;
+				engramProbes += 1;
+				const counts = parseEngramStats(stats);
+				engramSnapshot = {
+					// Availability: sticky once the daemon answers; a few failed probes
+					// mean Engram is not running, so the local card vanishes (L18).
+					daemonAvailable: engramDaemonSeen || engramProbes < 3 ? engramDaemonSeen ? true : undefined : false,
+					local: health !== null ? parseEngramHealth(health, engramPort) : engramDaemonSeen ? { online: false, port: engramPort } : undefined,
+					observations: counts.observations,
+					sessions: counts.sessions,
+					project: engramProject(),
+					today: engramActivity?.today,
+					week: engramActivity?.week,
+					latest: engramActivity?.latest,
+					cloud: deriveEngramCloudSnapshot(server, (sync && typeof sync === "object" ? sync : null) as { enabled?: unknown; phase?: unknown; reason_code?: unknown; reason_message?: unknown; last_error?: unknown; last_sync_at?: unknown; deferred_count?: unknown } | null, engramEnrolled),
+					now: Date.now(),
+				};
+				invalidateSidebar(tui); tui.requestRender();
+			};
+			// The dashboard opener mirrors design-open-browser's fixed per-platform
+			// shape but accepts the cloud.json https URL, which is the user's own
+			// configured server and never a loopback canvas address.
+			const openEngramDashboard = (server: string) => {
+				const platform = process.platform;
+				const opener = platform === "darwin" ? { command: "/usr/bin/open", args: [server] }
+					: platform === "win32" && typeof process.env.SystemRoot === "string" ? { command: join(process.env.SystemRoot, "System32", "rundll32.exe"), args: ["url.dll,FileProtocolHandler", server] }
+					: platform === "win32" ? undefined
+					: { command: "xdg-open", args: [server] };
+				if (!opener) return;
+				execFile(opener.command, opener.args, { timeout: 5_000 }, () => { /* The opener failing to launch is not a card error. */ });
+			};
+			const enrollEngramProject = async () => {
+				const project = engramProject();
+				if (!(await ctx.ui.confirm("Engram Cloud", `Enroll project "${project}" for cloud sync?`))) return;
+				execFile(process.env.ENGRAM_BIN?.trim() || "engram", ["cloud", "enroll", project], { timeout: 15_000 }, () => { engramEnrollmentTried = false; void engramPoll(); });
+			};
+			// /sync/status is global: it stays healthy while projects are unenrolled,
+			// so per-project enrollment comes from the CLI, once per tab session and
+			// again after an enroll (L24: gentle-shell showed Synced while "not
+			// enrolled"). A missing CLI leaves the state unknown, not invented.
+			let engramEnrolled: boolean | undefined;
+			let engramEnrollmentTried = false;
+			const engramDetectEnrollment = () => new Promise<void>(done => {
+				engramEnrollmentTried = true;
+				execFile(process.env.ENGRAM_BIN?.trim() || "engram", ["cloud", "status", "--project", engramProject()], { timeout: 10_000 }, (error, stdout) => {
+					engramEnrolled = error ? undefined : parseEngramEnrollment(typeof stdout === "string" ? stdout : "");
+					done();
+				});
+			});
+			const engramCollapsed = new Set<EngramCardId>();
+			let engramHover: EngramCardId | undefined;
+			let engramActivity: { today?: number; week?: number; latest?: EngramObservationSnapshot[] } | undefined;
+			let engramListAt = 0;
+			let engramDaemonSeen = false;
+			let engramProbes = 0;
+			// Visibility = preference ∧ availability: the customizer's card toggles
+			// hide whole cards, exactly like GIT's history/diff toggles (L17/L18).
+			const engramHidden = () => {
+				const hidden = new Set<EngramCardId>();
+				if (tabsSettings.memLocal !== "on") hidden.add("engram");
+				if (tabsSettings.memCloud !== "on") hidden.add("cloud");
+				return hidden;
+			};
+			let engramFrame: { width: number; frame: ReturnType<typeof buildEngramCards> } | undefined;
+			const engramCard: SidebarRail = {
+				// The snapshot digest already hashes every painted field; collapsed,
+				// hover and the preference-derived hidden set ride alongside like the
+				// profile card's own state.
+				digest: () => JSON.stringify([engramSnapshot ? engramCardsDigest(engramSnapshot) : "", visualSettings.density, [...engramCollapsed], engramHover, [...engramHidden()]]),
+				surface: "panel",
+				cardGroups: width => ({ groups: engramFrame?.width === width ? engramFrame.frame.groups : [] }),
+				render(width) {
+					const frame = buildEngramCards(engramSnapshot ?? {}, theme, width, visualSettings.density, { collapsed: engramCollapsed, hovered: engramHover, hidden: engramHidden() });
+					engramFrame = { width, frame };
+					return frame.rows;
+				},
+				invalidate() {},
+			};
+			const engramTarget = (y: number, width: number): EngramCardId | undefined => {
+				if (engramFrame?.width !== width) return undefined;
+				return engramFrame.frame.headers.find(header => header.row === y)?.id;
+			};
+			const engramActionTarget = (y: number, width: number) => engramFrame?.width === width ? engramFrame.frame.actions.find(action => action.row === y)?.id : undefined;
+			const engramRegion = new NativePointerRegion(engramCard, {
+				onHover(event) {
+					const next = engramTarget(event.y, event.width);
+					if (next) setSidebarHover(tui, engramRegion, () => engramRegion.clearHover());
+					else setSidebarHover(tui);
+					if (next === engramHover) return { handled: true };
+					engramHover = next;
+					return { handled: true, render: true };
+				},
+				onLeave() {
+					releaseSidebarHover(tui, engramRegion);
+					if (!engramHover) return;
+					engramHover = undefined;
+					tui.requestRender();
+				},
+				onClick(event) {
+					if (event.button !== "left") return undefined;
+					const action = engramActionTarget(event.y, event.width);
+					if (action === "open-dashboard") {
+						if (engramSnapshot?.cloud) openEngramDashboard(engramDashboardUrl(engramSnapshot.cloud.server));
+						return { handled: true };
+					}
+					if (action === "enroll") { void enrollEngramProject(); return { handled: true }; }
+					const id = engramTarget(event.y, event.width);
+					if (!id) return undefined;
+					if (engramCollapsed.has(id)) engramCollapsed.delete(id);
+					else engramCollapsed.add(id);
+					return { handled: true, render: true };
+				},
+			});
+			const engramRail: SidebarRail = Object.assign(engramRegion, { surface: engramCard.surface, digest: engramCard.digest, cardGroups: engramCard.cardGroups });
+			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROF", rail: profileRail }] : []), ...(tabsSettings.mem === "on" && (tabsSettings.memLocal === "on" || tabsSettings.memCloud === "on") ? [{ id: "mem", label: "MEM", rail: engramRail }] : [])] : [], id => {
 				if (id !== "profile" || profileWidth !== tui.terminal?.columns) profileRegion.clearHover();
 				profileWidth = tui.terminal?.columns;
 				if (id === "tree" && !treeActive) {
@@ -3256,6 +3432,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 						});
 					});
 				} else if (id !== "tree" && treeActive) { treeActive = false; treeEpoch++; treeSession.setActive(false); }
+				// MEM polling lives only while the tab is visible: the activation runs
+				// an immediate probe and starts the ~2s refresh; leaving stops the
+				// timer and drops the snapshot so nothing keeps probing in background.
+				if (id === "mem") {
+					if (!engramTimer) {
+						void engramPoll();
+						engramTimer = setInterval(() => { void engramPoll(); }, 2_000);
+						engramTimer.unref?.();
+					}
+				} else if (engramTimer) { clearInterval(engramTimer); engramTimer = undefined; engramSnapshot = undefined; }
 				const active = id === "git";
 				if (active === gitActive) return;
 				gitActive = active;
@@ -3447,6 +3633,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		}
 		registry?.close();
 		registry = undefined;
+		if (engramTimer) { clearInterval(engramTimer); engramTimer = undefined; engramSnapshot = undefined; }
 		changes = undefined;
 		currentContext = undefined;
 	});
@@ -3859,9 +4046,9 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				layoutChoice("Density", value, () => visual().density === value, "Spacing: comfortable adds gaps between rail sections and a padding row under a top header; compact removes them; minimal also drops the brand and the key hints"));
 			for (const value of Object.values(CHROME_SURFACE)) add(() => `Surface: ${value}${visual().surface === value ? " (current)" : ""}`, pending, () => updateVisual((settings) => ({ ...settings, surface: value })), () => layoutPreview({ ...visual(), surface: value }),
 				layoutChoice("Surface", value, () => visual().surface === value, "Chrome background: transparent (default) lets the terminal background show through; tinted paints the rail, header rows and panel"));
-			const saveTabs = (policy: "on" | "off", destination?: "main" | "git" | "gitHistory" | "diff" | "tree" | "profile") => {
+			const saveTabs = (policy: "on" | "off", destination?: "main" | "git" | "gitHistory" | "diff" | "tree" | "profile" | "mem" | "memLocal" | "memCloud") => {
 				const current = resolveSidebarTabs(animationOptions);
-				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree, profile: destination === "profile" ? policy : current.profile });
+				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree, profile: destination === "profile" ? policy : current.profile, mem: destination === "mem" ? policy : current.mem, memLocal: destination === "memLocal" ? policy : current.memLocal, memCloud: destination === "memCloud" ? policy : current.memCloud });
 				tabsSettings = resolveSidebarTabs(animationOptions);
 				if (destination === "diff" && current.diff !== tabsSettings.diff) toggleSidebarDiff?.();
 				if (destination === "gitHistory" && current.gitHistory !== tabsSettings.gitHistory) toggleSidebarHistory?.();
@@ -3873,7 +4060,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				explicitChoice("Tabs", label, () => resolveSidebarTabs(animationOptions).policy === policy),
 			);
 			rows.push({ category, label: "Configure tabs", indent: 2, visible: () => { const result = resolveSidebarTabs(animationOptions); return !result.malformed && result.policy === "on"; }, action: () => {}, children: [
-				...(["main", "git", "tree", "profile"] as const).flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${destination.toUpperCase()}: ${policy}`, choice: { setting: destination.toUpperCase(), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
+				...(["main", "git", "tree", "profile", "mem"] as const).flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${destination.toUpperCase()}: ${policy}`, choice: { setting: destination.toUpperCase(), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : destination === "mem" ? (["memLocal", "memCloud"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "memLocal" ? "Engram local" : "Engram cloud"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).mem === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
 				...["MEMORY", "STATS"].map(name => ({ label: `${name} · coming soon`, inert: true, action: () => {} })),
 			] });
 			category = "Cards";
