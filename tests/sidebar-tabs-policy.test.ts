@@ -88,3 +88,47 @@ test("global Tabs defaults off, persists both choices, and refuses malformed fil
   assert.equal(readFileSync(path, "utf8"), raw);
  }
 });
+
+test("MEM defaults off for legacy preferences and persists independently", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ assert.deepEqual([resolveSidebarTabs(options).mem, resolveSidebarTabs(options).malformed], ["off", false]);
+ writeSidebarTabs("on", options, { main: "on", git: "on", mem: "on" });
+ const persisted = resolveSidebarTabs(options);
+ assert.deepEqual([persisted.mem, persisted.main, persisted.profile], ["on", "on", "off"]);
+ writeSidebarTabs("off", options, { main: "on", git: "on", mem: "off" });
+ assert.equal(resolveSidebarTabs(options).mem, "off");
+});
+
+test("MEM card toggles default on for legacy preferences and persist independently", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-memcards-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ const path = join(home, "sidebar-tabs.json");
+ // Every existing preference shape keeps resolving, with the new card toggles on.
+ for (const raw of [
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on"}',
+ ]) {
+  writeFileSync(path, raw);
+  const result = resolveSidebarTabs(options);
+  assert.deepEqual([result.memLocal, result.memCloud, result.malformed], ["on", "on", false], raw);
+ }
+ assert.deepEqual([resolveSidebarTabs(options).memLocal, resolveSidebarTabs(options).memCloud], ["on", "on"]);
+ writeSidebarTabs("on", options, { main: "on", git: "on", mem: "on", memLocal: "off" });
+ let persisted = resolveSidebarTabs(options);
+ assert.deepEqual([persisted.memLocal, persisted.memCloud, persisted.mem], ["off", "on", "on"]);
+ writeSidebarTabs("on", options, { main: "on", git: "on", mem: "on", memLocal: "on", memCloud: "off" });
+ persisted = resolveSidebarTabs(options);
+ assert.deepEqual([persisted.memLocal, persisted.memCloud], ["on", "off"]);
+ // A partial chain (up to 10 keys) still resolves without the cloud key.
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"off"}');
+ persisted = resolveSidebarTabs(options);
+ assert.deepEqual([persisted.memLocal, persisted.memCloud, persisted.malformed], ["off", "on", false]);
+ // A malformed memLocal value rejects the whole file.
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"maybe","memCloud":"on"}');
+ assert.equal(resolveSidebarTabs(options).malformed, true);
+});
