@@ -18,6 +18,8 @@ function fixture() {
 	const calls: Array<{ root: string; args: string[] }> = [];
 	const extra = new Set<string>();
 	const failures = new Set<string>();
+	/** When set, the git runner itself throws instead of returning a code. */
+	let hardFailure = false;
 	const historyHolds = new Map<string, Promise<void>>();
 	let releaseHistory: (() => void) | undefined;
 	const holdHistory = (root: string) => historyHolds.set(root, new Promise<void>(resolve => { releaseHistory = resolve; }));
@@ -26,6 +28,7 @@ function fixture() {
 	const release = (root: string) => { const resolve = releases.get(root); holds.delete(root); releases.delete(root); resolve?.(); };
 	const git = (root: string): GitRunner => async args => {
 		calls.push({ root, args });
+		if (hardFailure) throw new Error("git runner crashed");
 		const gate = holds.get(root);
 		if (gate) await gate;
 		if (args[0] === "symbolic-ref") await historyHolds.get(root);
@@ -46,7 +49,7 @@ function fixture() {
 	}, { history: true, diff: true });
 	const render = () => [...cards.historyRows(theme, 80, 4), ...cards.changesRows(theme, 80, 4)];
 	const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
-	return { cards, calls, hold, release, render, settle, extra, failures, holdHistory, releaseHistory: () => releaseHistory?.(), publishes: () => publishes };
+	return { cards, calls, hold, release, render, settle, extra, failures, holdHistory, releaseHistory: () => releaseHistory?.(), publishes: () => publishes, setHardFailure: (v: boolean) => { hardFailure = v; } };
 }
 
 test("initial pending is not an error or a reusable settled snapshot", async () => {
@@ -277,19 +280,77 @@ test("Changes rows never show a zero count; the header keeps the full totals", a
 	assert.match(text, /\+36 -6 · partial counts/, "the header keeps the full totals");
 });
 
-test("overlapping refreshDiff retries cannot overwrite a success with a stale failure", async () => {
+test("a repaint failure during a diff load never marks the status unread", async () => {
+	const events: string[] = [];
+	let repaints = 0;
+	let failing = false;
+	const cards = new SidebarGitCards({
+		git: () => async args => ({ code: 0, stdout: args[0] === "status" ? " M a.ts\0" : args[0] === "rev-parse" ? "main\n" : args[0] === "log" ? "* \x1eabc\x1f\x1ffeat: x\x1e\n" : "" }),
+		untrackedLines: () => async () => 0,
+		fileRevision: () => async () => undefined,
+		publish: () => {
+			repaints++;
+			if (failing) throw new Error("repaint failure");
+			events.push("publish");
+		},
+	}, { history: false, diff: true });
+	cards.enter("/repo");
+	// A repaint failure during settle, not during the load: enter()'s first
+	// publish already ran, so arm the failure before refreshDiff() (CodeRabbit
+	// finding — the armed flag must exercise the path the test claims).
+	failing = true;
+	await cards.refreshDiff();
+	// The load succeeded; a repaint failure during settle must not mark the
+	// status unread (the CodeRabbit finding): the catch guards only start().
+	assert.equal(cards.statusRead, true, "a successful start() keeps statusRead true even if a repaint threw");
+	assert.ok(cards.model, "the model is kept");
+	assert.ok(repaints > 0, "the throwing repaint callback ran");
+});
+
+test("card.start never rejects: a repaint failure during the success path stays contained", async () => {
+	const events: string[] = [];
+	let failNextPublish = false;
+	const cards = new SidebarGitCards({
+		git: () => async args => ({ code: 0, stdout: args[0] === "status" ? " M a.ts\0" : args[0] === "rev-parse" ? "main\n" : "" }),
+		untrackedLines: () => async () => 0,
+		fileRevision: () => async () => undefined,
+		publish: () => { if (failNextPublish) { failNextPublish = false; throw new Error("repaint failure"); } events.push("publish"); },
+	}, { history: false, diff: true });
+	cards.enter("/repo");
+	// The first publish runs inside loadDiff's success path: a repaint failure
+	// there must not reject card.start, which enter() fire-and-forgets.
+	failNextPublish = true;
+	const unhandled: unknown[] = [];
+	const catcher = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", catcher);
+	try {
+		await cards.refreshDiff();
+		await new Promise(resolve => setImmediate(resolve));
+	} finally {
+		process.off("unhandledRejection", catcher);
+	}
+	assert.equal(cards.statusRead, true, "the successful load keeps its status");
+	assert.deepEqual(unhandled, [], "no rejection escapes card.start");
+});
+
+test("a recovery retry whose start() rejects never rejects card.start", async () => {
 	const f = fixture();
 	f.failures.add(WT);
 	f.cards.enter(WT);
 	await f.settle();
-	assert.equal(f.cards.statusRead, false, "the initial read failed");
-	// Git recovers between two overlapping turn-end refreshes: the first retry
-	// runs while Git answers, the second overlaps and must not clobber it.
-	f.failures.delete(WT);
-	const first = f.cards.refreshDiff();
-	const second = f.cards.refreshDiff();
-	await Promise.all([first, second]);
-	await f.settle();
-	assert.equal(f.cards.statusRead, true, "the recovered read wins");
-	assert.ok(f.cards.model && f.cards.model.files.length > 0, "the successful scan's model survives the overlap");
+	assert.equal(f.cards.statusRead, false);
+	// The recovery retry itself fails hard (the runner throws instead of
+	// returning a code): card.start must stay settled, never escape.
+	f.setHardFailure(true);
+	const unhandled: unknown[] = [];
+	const catcher = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", catcher);
+	try {
+		await f.cards.refreshDiff().catch(() => unhandled.push("refreshDiff rejected"));
+		await new Promise(resolve => setImmediate(resolve));
+	} finally {
+		process.off("unhandledRejection", catcher);
+	}
+	assert.deepEqual(unhandled, [], "no rejection escapes the retry chain");
+	assert.equal(f.cards.statusRead, false, "the failed recovery leaves the status unread for the next retry");
 });

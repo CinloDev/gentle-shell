@@ -164,6 +164,12 @@ export class SidebarGitCards {
 				card.model = tracker.model;
 				card.statusRead = tracker.statusRead;
 				try { this.settle(card); } catch { /* repaint failures cannot corrupt the load. */ }
+			}).catch(() => {
+				// A runner crash during recovery keeps the status unread for the
+				// next turn's retry: card.start never rejects (CodeRabbit finding).
+				if (retryEpoch !== card.diffEpoch || !this.live(card)) return;
+				card.statusRead = false;
+				try { this.settle(card); } catch { /* contained. */ }
 			});
 			const guard = { inFlight };
 			void inFlight.finally(() => { if (card.retry === guard) card.retry = undefined; });
@@ -314,12 +320,15 @@ export class SidebarGitCards {
 			this.deps.fileRevision(card.root),
 		);
 		card.tracker = tracker;
+		// card.start never rejects: repaint failures inside the success path's
+		// settle() are contained, so enter()/select() fire-and-forget callers
+		// observe no escaping rejection (CodeRabbit finding).
 		card.start = tracker.start().then(() => {
 			if (epoch !== card.diffEpoch) return;
 			card.model = tracker.model;
 			card.statusRead = tracker.statusRead;
 			card.diffLoaded = true;
-			this.settle(card);
+			try { this.settle(card); } catch { /* repaint failures cannot corrupt a successful load. */ }
 		}).catch(() => {
 			if (epoch !== card.diffEpoch) return;
 			card.statusRead = false;
