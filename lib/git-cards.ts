@@ -39,6 +39,8 @@ type Card = {
 	diffLoaded: boolean;
 	historyEpoch: number;
 	diffEpoch: number;
+	/** In-flight recovery retry for a failed initial status read. */
+	retry?: { inFlight: Promise<void> };
 	/** The card has been on screen at least once, so its cached frame is a last-good frame. */
 	painted: boolean;
 };
@@ -148,6 +150,34 @@ export class SidebarGitCards {
 		if (epoch !== card.diffEpoch || !this.live(card)) return;
 		const tracker = card.tracker;
 		if (!tracker) return;
+		// A failed first capture leaves the tracker unread and its refresh() inert:
+		// restart it so a transient Git failure recovers on the next turn instead
+		// of pinning "Counts unavailable" until re-navigation. The retry replaces
+		// card.start and runs once per card (an in-flight retry guard), so
+		// overlapping agent_end refreshes cannot start two retries whose last
+		// finisher could overwrite a success with a failure (CodeRabbit finding).
+		if (!tracker.statusRead) {
+			if (card.retry?.inFlight) { await card.retry.inFlight; return; }
+			const retryEpoch = epoch;
+			const inFlight = tracker.start().then(() => {
+				if (retryEpoch !== card.diffEpoch || !this.live(card)) return;
+				card.model = tracker.model;
+				card.statusRead = tracker.statusRead;
+				try { this.settle(card); } catch { /* repaint failures cannot corrupt the load. */ }
+			}).catch(() => {
+				// A runner crash during recovery keeps the status unread for the
+				// next turn's retry: card.start never rejects (CodeRabbit finding).
+				if (retryEpoch !== card.diffEpoch || !this.live(card)) return;
+				card.statusRead = false;
+				try { this.settle(card); } catch { /* contained. */ }
+			});
+			const guard = { inFlight };
+			void inFlight.finally(() => { if (card.retry === guard) card.retry = undefined; });
+			card.retry = guard;
+			card.start = inFlight;
+			await inFlight;
+			return;
+		}
 		const model = await tracker.refresh();
 		if (epoch !== card.diffEpoch || !this.live(card)) return;
 		if (model.digest === card.model?.digest && tracker.statusRead === card.statusRead) return;
@@ -290,18 +320,18 @@ export class SidebarGitCards {
 			this.deps.fileRevision(card.root),
 		);
 		card.tracker = tracker;
-		// Only start() failures mark the status unread: a repaint failure inside
-		// settle() would otherwise corrupt a successful load (CodeRabbit finding).
-		const startFailed = tracker.start().catch(() => {
-			if (epoch !== card.diffEpoch) return;
-			card.statusRead = false;
-			card.diffLoaded = true;
-			this.settle(card);
-		});
-		card.start = startFailed.then(() => {
+		// card.start never rejects: repaint failures inside the success path's
+		// settle() are contained, so enter()/select() fire-and-forget callers
+		// observe no escaping rejection (CodeRabbit finding).
+		card.start = tracker.start().then(() => {
 			if (epoch !== card.diffEpoch) return;
 			card.model = tracker.model;
 			card.statusRead = tracker.statusRead;
+			card.diffLoaded = true;
+			try { this.settle(card); } catch { /* repaint failures cannot corrupt a successful load. */ }
+		}).catch(() => {
+			if (epoch !== card.diffEpoch) return;
+			card.statusRead = false;
 			card.diffLoaded = true;
 			this.settle(card);
 		});

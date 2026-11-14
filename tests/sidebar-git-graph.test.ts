@@ -136,8 +136,17 @@ test("subject roles come from own properties only, never the prototype", () => {
  const theme = { fg: (role: string, text: string) => `<${role}>${text}</${role}>` };
  for (const subject of ["constructor: update", "toString: report", "hasOwnProperty: audit"]) {
   const rows = renderSidebarGitGraph({ state: "ready", branch: "main", lines: [`* \x1eabc\x1f\x1f${subject}\x1e`] }, theme, 80, 4);
-  assert.doesNotMatch(rows.join("\n"), /<\[object|<function|<bound/), `the subject "${subject}" must not receive a function role`;
+  assert.doesNotMatch(rows.join("\n"), /<\[object|<function|<bound/, `the subject "${subject}" must not receive a function role`);
  }
  const rows = renderSidebarGitGraph({ state: "ready", branch: "main", lines: ["* \x1eabc\x1f\x1ffeat: add\x1e"] }, theme, 200, 4);
  assert.match(rows.join("\n"), /<success>feat:<\/success>/, "real type roles still apply");
+});
+
+test("a timed-out rev-parse is an error, never the unborn state", async () => {
+ const graph = await readSidebarGitGraph(async args => {
+  if (args[0] === "symbolic-ref") return { code: 0, stdout: "main\n" };
+  if (args[0] === "rev-parse") return { code: 1, stdout: "", timedOut: true };
+  return { code: 0, stdout: "" };
+ });
+ assert.equal(graph.state, "error", "a deadline is transient, not an unborn repository");
 });
