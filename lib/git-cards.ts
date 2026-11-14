@@ -39,6 +39,8 @@ type Card = {
 	diffLoaded: boolean;
 	historyEpoch: number;
 	diffEpoch: number;
+	/** In-flight recovery retry for a failed initial status read. */
+	retry?: { inFlight: Promise<void> };
 	/** The card has been on screen at least once, so its cached frame is a last-good frame. */
 	painted: boolean;
 };
@@ -149,14 +151,25 @@ export class SidebarGitCards {
 		const tracker = card.tracker;
 		if (!tracker) return;
 		// A failed first capture leaves the tracker unread and its refresh() inert:
-		// restart it once so a transient Git failure recovers on the next turn
-		// instead of pinning "Counts unavailable" until re-navigation.
+		// restart it so a transient Git failure recovers on the next turn instead
+		// of pinning "Counts unavailable" until re-navigation. The retry replaces
+		// card.start and runs once per card (an in-flight retry guard), so
+		// overlapping agent_end refreshes cannot start two retries whose last
+		// finisher could overwrite a success with a failure (CodeRabbit finding).
 		if (!tracker.statusRead) {
-			await tracker.start();
-			if (epoch !== card.diffEpoch || !this.live(card)) return;
-			card.model = tracker.model;
-			card.statusRead = tracker.statusRead;
-			this.settle(card);
+			if (card.retry?.inFlight) { await card.retry.inFlight; return; }
+			const retryEpoch = epoch;
+			const inFlight = tracker.start().then(() => {
+				if (retryEpoch !== card.diffEpoch || !this.live(card)) return;
+				card.model = tracker.model;
+				card.statusRead = tracker.statusRead;
+				try { this.settle(card); } catch { /* repaint failures cannot corrupt the load. */ }
+			});
+			const guard = { inFlight };
+			void inFlight.finally(() => { if (card.retry === guard) card.retry = undefined; });
+			card.retry = guard;
+			card.start = inFlight;
+			await inFlight;
 			return;
 		}
 		const model = await tracker.refresh();

@@ -276,3 +276,20 @@ test("Changes rows never show a zero count; the header keeps the full totals", a
 	assert.match(text, /new\.ts\s+\[diff\]/, "the untracked row shows no numbers");
 	assert.match(text, /\+36 -6 · partial counts/, "the header keeps the full totals");
 });
+
+test("overlapping refreshDiff retries cannot overwrite a success with a stale failure", async () => {
+	const f = fixture();
+	f.failures.add(WT);
+	f.cards.enter(WT);
+	await f.settle();
+	assert.equal(f.cards.statusRead, false, "the initial read failed");
+	// Git recovers between two overlapping turn-end refreshes: the first retry
+	// runs while Git answers, the second overlaps and must not clobber it.
+	f.failures.delete(WT);
+	const first = f.cards.refreshDiff();
+	const second = f.cards.refreshDiff();
+	await Promise.all([first, second]);
+	await f.settle();
+	assert.equal(f.cards.statusRead, true, "the recovered read wins");
+	assert.ok(f.cards.model && f.cards.model.files.length > 0, "the successful scan's model survives the overlap");
+});
