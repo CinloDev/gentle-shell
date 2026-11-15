@@ -1,20 +1,23 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { PANEL_ROW_INDENT, renderPanelHeader, renderPanelRow, sectionGap } from "./shell-panel.ts";
 import { renderStatsRows, type SessionStats } from "./shell-stats.ts";
+import type { EcosystemVersionRow } from "./ecosystem-versions.ts";
 import type { Density } from "./visual-customization-policy.ts";
 
-// Gentle Shell STAT-tab cards: the live session and tools.
-// The host owns the memoized session collector; this module only paints the
-// plain snapshot it is handed. No
+// Gentle Shell STAT-tab cards: the live session, tools and ecosystem versions.
+// The host owns the memoized session collector and activation-gated version
+// detection; this module only paints the plain snapshot it is handed. No
 // filesystem or network reads happen here.
 
 export type StatsCardsSnapshot = {
 	/** The live session, from the host's per-leaf memoized collector. */
 	session?: { stats: SessionStats; subscription?: boolean };
+	/** Detected ecosystem versions; absent until the host's readers answer. */
+	ecosystem?: readonly EcosystemVersionRow[];
 };
 
 export type StatsCardsTheme = { fg(role: string, text: string): string };
-export type StatsCardId = "session" | "tools";
+export type StatsCardId = "session" | "tools" | "ecosystem";
 export type StatsCardsState = { collapsed?: ReadonlySet<StatsCardId>; hovered?: StatsCardId };
 export type StatsCardsFrame = {
 	rows: string[];
@@ -22,7 +25,20 @@ export type StatsCardsFrame = {
 	headers: Array<{ id: StatsCardId; row: number }>;
 };
 
+/** Wide enough for "Gentle Shell" plus the space that separates it from its version. */
+const VERSION_LABEL_WIDTH = 13;
+
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+/** One row per ecosystem entry: the version, and how it was obtained. */
+function ecosystemBody(rows: readonly EcosystemVersionRow[], theme: StatsCardsTheme, width: number): string[] {
+	return rows.map(entry => {
+		const label = theme.fg("muted", entry.label.padEnd(VERSION_LABEL_WIDTH));
+		// An absent version keeps its column so the panel reads as a table, never as a broken row.
+		const version = entry.version === undefined ? theme.fg("muted", "—") : theme.fg("text", entry.version);
+		return renderPanelRow(width, `${label}${version}`, theme.fg("muted", entry.source));
+	});
+}
 
 /** Important tools lead; uncommon failures keep their identities, successes share one row. */
 function toolsBody(stats: SessionStats, theme: StatsCardsTheme, width: number): string[] {
@@ -52,12 +68,14 @@ function toolsBody(stats: SessionStats, theme: StatsCardsTheme, width: number): 
 	});
 }
 
-/** STAT-tab rows in order: session and tools. */
+/** STAT-tab rows in order: session, tools and ecosystem. */
 export function buildStatsCards(snapshot: StatsCardsSnapshot, theme: StatsCardsTheme, width: number, density?: Density, state: StatsCardsState = {}): StatsCardsFrame {
 	const frame: StatsCardsFrame = { rows: [], groups: [], headers: [] };
 	if (width < 16) return frame;
 	const muted = (text: string) => renderPanelRow(width, theme.fg("muted", text));
 	const sessionBody = snapshot.session ? renderStatsRows(snapshot.session.stats, theme, width, snapshot.session.subscription, { includeTools: false }) : [muted("No session yet")];
+	const versionRows = snapshot.ecosystem ? ecosystemBody(snapshot.ecosystem, theme, width) : [muted("Detecting versions…")];
+	const detected = snapshot.ecosystem ? `${snapshot.ecosystem.filter(entry => entry.version !== undefined).length}/${snapshot.ecosystem.length}` : "";
 	// Like MAIN Status and PROFILE, density gaps stay outside the card ranges so a
 	// transparent surface can frame each card on its own.
 	const gap = sectionGap(density) ? [" ".repeat(Math.max(0, width))] : [];
@@ -75,5 +93,6 @@ export function buildStatsCards(snapshot: StatsCardsSnapshot, theme: StatsCardsT
 	// A compact summary retains both counters even in the minimum supported rail.
 	const toolsSummary = stats && visibleWidth(toolsCount) > width - 10 ? `${stats.toolCalls}${stats.toolErrors ? ` · ${stats.toolErrors}!` : " calls"}` : toolsCount;
 	card("tools", "Tools", toolsSummary, stats ? (stats.toolCalls ? toolsBody(stats, theme, width) : [muted("No tool calls yet")]) : [muted("No session yet")]);
+	card("ecosystem", "Ecosystem", detected, versionRows);
 	return frame;
 }

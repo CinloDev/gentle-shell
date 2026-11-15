@@ -10138,8 +10138,11 @@ test("independent STAT public lifecycle: results, cache, subscription, folding a
 	const home = scopedDoubleEscCancelConfigHome(t);
 	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "on", tree: "off", profile: "off", mem: "off", memLocal: "on", memCloud: "on", stats: "on" }));
 	const { pi, handlers } = fakePi();
+	pi.getAllTools = () => [];
+	let network = 0;
 	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
 		activeProfile: () => undefined,
+		fetch: async () => { network++; assert.fail("no integration must not request health"); },
 	});
 	const entries = [
 		{ type: "message", message: { role: "assistant", model: "provider/model", usage: { input: 100, output: 20, cacheRead: 600, cacheWrite: 300, cost: { total: 1.5 } } } },
@@ -10173,11 +10176,13 @@ test("independent STAT public lifecycle: results, cache, subscription, folding a
 		const main = text();
 		select("STAT"); frame();
 		await new Promise(resolve => setImmediate(resolve));
-		assert.match(text(), /SESSION[\s\S]*TOOLS/);
+		assert.match(text(), /SESSION[\s\S]*TOOLS[\s\S]*ECOSYSTEM/);
 		assert.doesNotMatch(text(), /HISTORY|Scanning/);
 		assert.match(text(), /60% hit · 600 read/);
 		assert.match(text(), /bash\s+1 call · 1 failed/);
 		assert.match(text(), /\$1\.50 sub/);
+		assert.match(text(), /Pi\s+\d+\.\d+\.\d+\s+runtime/);
+		assert.doesNotMatch(text(), /Engram/);
 		oauth = false;
 		assert.doesNotMatch(text(), / sub/);
 		assert.match(text(), /\$1\.50/);
@@ -10199,6 +10204,7 @@ test("independent STAT public lifecycle: results, cache, subscription, folding a
 		assert.equal(text(), main);
 		select("STAT");
 		assert.match(text(), /▸ TOOLS/);
+		assert.equal(network, 0);
 	} finally {
 		footer.dispose();
 		await fire(handlers, "session_shutdown", ctx);
