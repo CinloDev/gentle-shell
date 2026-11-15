@@ -38,6 +38,25 @@ test("session stats total every assistant turn and break them down per model, mo
 	assert.equal(empty.spanMs, 0);
 });
 
+test("persisted tool results reconstruct named counts, strict errors, unknowns and reset without losing prefixes", () => {
+	const result = (toolName: unknown, isError: unknown = false) => ({ type: "message", message: { role: "toolResult", toolName, isError } });
+	const saved = [result("bash"), result("bash", true), result("provider/read", true), result("read", "true"), result(undefined, true), result(42), result(" \n "), result("evil\x1b]0;pwned\x07name", true), { type: "message", message: { role: "assistant", toolName: "bash" } }];
+	const stats = collectSessionStats(saved);
+	assert.equal(stats.toolCalls, 8);
+	assert.equal(stats.toolErrors, 4);
+	assert.deepEqual(stats.tools, [
+		{ name: "bash", calls: 2, errors: 1 },
+		{ name: "provider/read", calls: 1, errors: 1 },
+		{ name: "read", calls: 1, errors: 0 },
+		{ name: "unknown", calls: 3, errors: 1 },
+		{ name: "evilname", calls: 1, errors: 1 },
+	]);
+	assert.deepEqual(collectSessionStats([]).tools, []);
+	assert.deepEqual(collectSessionStats(saved), stats, "resume rebuilds from persisted entries without accumulating calls");
+	assert.equal(stats.cacheHitRate, undefined, "zero prompt denominator stays unavailable");
+	assert.equal(collectSessionStats(entries).cacheHitRate, 17000 / (2150 + 17000 + 2000));
+});
+
 test("the Stats rows fit the rail and name each model with its share", () => {
 	const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
 	const rows = renderStatsRows(collectSessionStats(entries), theme, 46);
@@ -50,6 +69,17 @@ test("the Stats rows fit the rail and name each model with its share", () => {
 	assert.match(text, /tools\s+2 calls · 1 failed/);
 	assert.match(text, /claude-opus-5-5\s+2 turns · 20k · \$1\.25/);
 	assert.match(text, /gpt-5\.5\s+1 turn · 2\.3k · \$0\.100/);
+});
+
+test("MAIN retains the aggregate tools row while the opt-out preserves every other shared row", () => {
+	const theme = { fg: (_role: string, text: string) => text };
+	const stats = collectSessionStats(entries);
+	const original = renderStatsRows(stats, theme, 50);
+	const session = renderStatsRows(stats, theme, 50, false, { includeTools: false });
+	assert.deepEqual(session, original.filter(row => !/^\s+tools\s/.test(row)));
+	assert.match(original.join("\n"), /tools\s+2 calls · 1 failed/);
+	const model = { cwd: "~", modelId: "m", contextPercent: null, contextWindow: 0, costTotal: 0, subscription: false, statuses: [], changes: { files: 0, added: 0, deleted: 0 }, stats };
+	assert.match(renderShellStatusSections(model as never, theme as never, 50).lines.join("\n"), /tools\s+2 calls · 1 failed/);
 });
 
 test("Status adds a foldable Stats section only when the model carries stats", () => {
