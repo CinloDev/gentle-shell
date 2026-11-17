@@ -499,7 +499,7 @@ test("PROFILE quotas repaint cached providers at identical timestamps without fe
 	const rows = (): string[] => scroll().render(50);
 	const text = () => rows().map(stripAnsi).join("\n");
 	const select = (x: number) => {
-		const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+		const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROF\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
 		nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
 	};
 	const mouse = (type: string) => scroll().handleMouse({ type, button: type === "move" ? "none" : "left", x: 4, y: rows().findIndex(row => stripAnsi(row).includes("QUOTAS")), width: 50, height: 55 });
@@ -593,7 +593,7 @@ test("PROFILE quota hint click fetches the scoped providers and a profile change
 		const rows = (): string[] => scroll().render(50);
 		const text = () => rows().map(stripAnsi).join("\n");
 		const select = (x: number) => {
-			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROF\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
 			nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
 		};
 		const click = (y: number) => scroll().handleMouse({ type: "click", button: "left", x: 4, y, width: 50, height: 55 });
@@ -635,7 +635,7 @@ test("PROFILE profile-card body clicks request the profiles modal, header clicks
 		const rows = (): string[] => scroll().render(50);
 		const text = () => rows().map(stripAnsi).join("\n");
 		const select = (x: number) => {
-			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+			const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROF\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
 			nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
 		};
 		const click = (y: number) => scroll().handleMouse({ type: "click", button: "left", x: 4, y, width: 50, height: 55 });
@@ -757,7 +757,7 @@ test("PROFILE follows MAIN spacing across surfaces, styles and live densities", 
 				const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
 				const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
 				const select = (x: number) => {
-					const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+					const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROF\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
 					assert.ok(nav);
 					nav.component.handleMouse({ type: "click", button: "left", x, y: 0, screenX: 120, screenY: 0, width: 50, height: 3, shift: false, alt: false, ctrl: false });
 				};
@@ -815,7 +815,7 @@ test("PROFILE headings hover and independently collapse through the public scrol
 			const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
 			const rows = (): string[] => scroll().render(50);
 			const select = (x: number) => {
-				const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROFILE\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
+				const nav = boxes(frame().root).find(box => /\[MAIN\]|\[PROF\]/.test(stripAnsi(box.component.render(box.rect.width)[0] ?? "")) && typeof box.component.getContentWidth !== "function");
 				nav.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3, screenX: x, screenY: 0, shift: false, alt: false, ctrl: false });
 			};
 			const heading = (title: string) => rows().findIndex(row => new RegExp(`(?:▾|▸|╭|▎).*${title}`).test(stripAnsi(row)));

@@ -43,7 +43,7 @@ function ecosystemBody(rows: readonly EcosystemVersionRow[], theme: StatsCardsTh
 /** Important tools lead; uncommon failures keep their identities, successes share one row. */
 function toolsBody(stats: SessionStats, theme: StatsCardsTheme, width: number): string[] {
 	const important = ["bash", "write", "read", "edit"];
-	const tools = stats.tools;
+	const tools = stats.tools ?? [];
 	const named = [
 		...important.flatMap(name => tools.filter(tool => tool.name === name)),
 		...tools.filter(tool => !important.includes(tool.name) && tool.errors > 0).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0),

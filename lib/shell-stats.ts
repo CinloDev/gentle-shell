@@ -29,8 +29,8 @@ export interface SessionStats {
 	turns: number;
 	toolCalls: number;
 	toolErrors: number;
-	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. */
-	tools: ToolStats[];
+	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. Absent in aggregates that do not track per-tool detail (for example the desktop feed). */
+	tools?: ToolStats[];
 	/** From the first to the last dated entry. */
 	spanMs: number;
 	/** Cache reads over every prompt token, or undefined before the first prompt. */
