@@ -64,7 +64,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { PROVIDER_REVIEW_ROLES, discoverAgents, loadAgentsConfig, unmatchedProfileKeys } from "../lib/agents-config.ts";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
@@ -153,7 +153,7 @@ import { createSessionProfileIntegration, hasPendingSessionProfileSelection, rea
 import { publishSessionProfileOutcome, readSessionProfileAuthority, requireSessionProfileAuthority } from "../lib/session-profile-authority.ts";
 import { isSessionProfileFamilyEntry, type SessionProfileStartupState } from "../lib/session-profile-persistence.ts";
 import type { SessionProfileAppendOutcome } from "../lib/session-profile-append-controller.ts";
-import { freezeSessionProfileAtOwnStart, profileFollowEnabled, readSessionProfileOwnStartup, resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles, sessionProfileRoutingAt, setFrozenDefaultOrchestrator } from "../lib/session-profile-freeze.ts";
+import { freezeSessionProfileAtOwnStart, profileFollowEnabled, readFrozenDefaultOrchestrator, readSessionProfileOwnStartup, resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles, sessionProfileRoutingAt, setFrozenDefaultOrchestrator } from "../lib/session-profile-freeze.ts";
 import {
 	applyOrchestratorSettings,
 	readOrchestratorSettings,
@@ -162,6 +162,24 @@ import {
 	parseOrchestratorModelRef,
 } from "../lib/profiles-orchestrator.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
+import {
+	DESKTOP_PROFILES_SERVICE_CHANNEL,
+	DESKTOP_PROFILES_SERVICE_SCHEMA,
+	beginDesktopProfileApply,
+	desktopConfirmationToken,
+	endDesktopProfileApply,
+	type DesktopProfileApplyRequest,
+	type DesktopProfileApplyResult,
+	type DesktopProfileNote,
+	type DesktopProfilesService,
+} from "../lib/desktop-rpc-profiles.ts";
+import {
+	DESKTOP_REVIEW_SERVICE_CHANNEL,
+	DESKTOP_REVIEW_SERVICE_SCHEMA,
+	type DesktopReviewOwnerRead,
+	type DesktopReviewOwnerWrite,
+	type DesktopReviewService,
+} from "../lib/desktop-rpc-review.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
 	REVIEW_HOST_RELAY_PI_TIMEOUT_ENV,
@@ -1673,6 +1691,10 @@ function resolveSessionDelegationMode(
 
 const TEST_FIRST_PRINCIPLE = "- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Only when your diff changes shared code (options, parsers, helpers) that an existing command the request did not name also uses, run one differential check before finishing, as a single script: for each such command, run it with the new or changed input (for example a new option passed to a sibling subcommand) against the previous code (a copy of the base commit in a `mktemp -d` scratch directory, never committed as a test; committed tests never read git history or a fixed commit) and against your change, and compare stdout, stderr, and exit code; any difference nobody asked for is a regression to fix and pin with a test. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.";
 const FULL_DELEGATION_TEST_FIRST_PRINCIPLE = "- Writers apply test-first (RED, GREEN, PRESERVE with its differential check) from their own contract; forward it in every writer handoff and require their observed RED/GREEN evidence or stated exception. Never invent lifecycle evidence or skip checks.";
+// orchestrator-owns-correction-exhaustion S2: after a worker exhausts its limit the parent decides the next step
+// from the diagnosed cause; only organic mode may fix it inline, full delegation launches a new bounded writer.
+const EXHAUSTION_ROUTE = "fix inline if small and understood, or relaunch with changed scope, hypothesis or handoff plus new evidence";
+const FULL_DELEGATION_EXHAUSTION_ROUTE = "never edit: launch a new bounded writer with the diagnosis, new evidence and changed scope or hypothesis";
 
 function buildGentlePrompt(
 	persona: PersonaMode,
@@ -1689,6 +1711,7 @@ function buildGentlePrompt(
 	// cost-speed-painpoints S5: writers apply the test-first procedure from their own
 	// contract; a full delegation parent only forwards it and checks the evidence.
 	const testFirstPrinciple = delegationMode === DEFAULT_ORCHESTRATOR_MODE ? TEST_FIRST_PRINCIPLE : FULL_DELEGATION_TEST_FIRST_PRINCIPLE;
+	const exhaustionRoute = delegationMode === DEFAULT_ORCHESTRATOR_MODE ? EXHAUSTION_ROUTE : FULL_DELEGATION_EXHAUSTION_ROUTE;
 	return `## el Gentleman Identity and Harness
 
 Current persona mode: ${persona}
@@ -1706,21 +1729,19 @@ ${personaPrompt}
 
 ## Authorized work continuity
 
-An authorized outcome includes its necessary in-scope implementation, documentation and verification steps. Continue those steps without asking the human to approve each transition. Never end a turn merely announcing an immediately executable authorized next step; execute it instead. A progress update is not a request for permission.
+An authorized outcome includes its necessary in-scope implementation, documentation and verification steps. Continue those steps without asking the human to approve each transition. Never end a turn merely announcing an immediately executable authorized next step; execute it instead. A progress update is not a request for permission. An explicit user stop applies only to the work it names.
 
 Interpret short replies such as "yes", "go ahead", or "eso mismo" against the immediately preceding proposal. When the human unambiguously accepts a concrete implementation action they already understand, execute that action within its agreed scope without asking again. Confirming a preference alone does not authorize implementation; genuinely unclear change intent still requires one focused question. Contextual approval never substitutes for provider-owned consent, exact-token authorization, or separate publishing and destructive-action permission.
 
-Resolving an incident or subdecision does not complete or cancel the original authorized objective; resume safe, necessary in-scope steps automatically, using judgment for proportionate recovery and respecting explicit user dispositions. Investigate pending technical uncertainty rather than treating it alone as a new human decision.
+Resolving an incident or subdecision does not complete or cancel the original authorized objective; resume safe, necessary in-scope steps automatically, using judgment for proportionate recovery and respecting explicit user dispositions. Do not infer permission for publishing, destructive actions, unrelated scope or native consent from this continuity rule.
 
-Stop for an unresolved consequential scope/product decision, required explicit consent, a denied action, or the human's explicit stop. Unavailable required proof blocks completion and delivery; it does not alone prohibit specifically authorized in-scope implementation where actual native authority and other limits permit it. Do not infer permission for publishing, destructive actions, unrelated scope or native consent from this continuity rule. Report a concrete blocker and the exact decision needed rather than requesting a generic "continue".
+Honor explicit one-run, no-retry, or diagnostic-only limits. Correct a failing check only within the existing correction budget; never reset budgets, add retry allowances, weaken checks, or override final outcomes.
 
-Before a terminal bounded-stop outcome, distinguish a recoverable technical or harness failure from genuinely inaccessible required proof. A failed test or harness check may be corrected and rerun without another authorization only within the authorized scope and existing correction budget, subject to every applicable limit. Honor explicit one run, no retries, or diagnostic-only limits; stop for permission denial, required new consent, or exhausted budget. Do not propose diagnostic-only or single-attempt authorization unless the human requested it. Respect terminal review and verification outcomes and existing bounded-stop rules: never reset budgets, add retry allowances, weaken checks, or override final outcomes.
-
-An exhausted worker-local correction limit ends that automatic cycle, not necessarily the feature. Partial worker execution is not by itself exhausted proof or a terminal native review outcome. Stop and report the remaining work, failed checks and missing proof, and offer an explicit human-controlled bounded continuation. Name its scope, executor, correction limit and checks, or let the human stop. Before any worker continuation, confirm no child is active or has an uncertain status. The Close stop ends the cycle; later explicit requests stay subject to native authority. Quota recovery: \`orchestrator-quota-recovery.md\`. A new session does not reset any limit. When specifically authorized and not prohibited by actual native authority, continue ordinary in-scope compilation or implementation; unavailable proof still blocks completion and delivery.
+An exhausted worker-local correction limit ends that worker's cycle, not the unit; within native authority you own the next step, unasked. Partial worker execution is not by itself exhausted proof or a terminal native review outcome. Name the loop's cause from the evidence; act on it: ${exhaustionRoute}; never repeat an attempt or swap executors to dodge limits. Same cause again or no new hypothesis: block the unit; continue independent work. Before any worker continuation, confirm no child is active or has an uncertain status. The Close stop ends the cycle; later explicit requests stay subject to native authority. Quota recovery: \`orchestrator-quota-recovery.md\`. A new session does not reset any limit.
 
 For worker-prohibited maintenance or rollback, worker prohibitions remain unchanged. The parent only may perform the operation when the human explicitly authorized the operation itself, exact scope, ownership, and preservation are established, and available permitted tools can perform it; fresh runtime/native consent and guards remain binding. A broad feature authorization is not destructive authority; never substitute another worker or tool to bypass a denial. For an upgrade require a validated backup, artifact and migration validation where applicable, and a recovery path. For rollback preserve unrelated edits even in the same file, remove only proven task-created helpers, and never blanket restore, reset, or clean. Stop when ambiguous ownership or denial stops the operation, or any prerequisite is missing. This route is guidance, not authorization.
 
-For background work, launch the bounded action and end the turn when no independent in-scope work remains. Retain its identity and resume the already-authorized continuation automatically on its completion event; do not ask the human to say "continue", poll, or claim completion while checks remain pending.
+For background work, launch the bounded action and end the turn when no independent in-scope work remains. Retain its identity and resume the already-authorized continuation automatically on its completion event; do not ask the human to say "continue" or poll.
 
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
@@ -2240,9 +2261,109 @@ function normalizePolicyPath(value: string): string {
 	return value.trim().replace(/^~(?=[/\\]|$)/, homedir()).replace(/\\/g, "/").toLowerCase();
 }
 
-function isSensitivePath(value: string): boolean {
+// Gentle Shell Desktop (odd/tasks/herdr-desktop.md T7): the inbox, outbox and
+// snapshots under `<agentDir>/desktop/` are the human's channel into a live
+// session; the agent never writes an action there. Only the real folders are
+// guarded, never a project folder that happens to be named `agent/desktop`:
+// `<home>/desktop` for the resolved Gentle Pi agent home (the one the desktop
+// feed writes under) and the two standard homes, compared as normalized
+// absolute paths. `~`, `$HOME` and `${HOME}` expand, `.` and `..` resolve
+// lexically, and a relative path resolves against the tool call's cwd (a
+// relative path with no cwd never matches), so a project folder that is named
+// `agent/desktop` stays outside the guard while `../../.gentle-shell/...` from
+// the project does not. Case folds like the patterns.
+//
+// On Windows the bash tool is Git for Windows (MSYS) bash, where `/c/Users/x`
+// and `/cygdrive/c/Users/x` are the same folder as `C:\Users\x`, and Win32
+// accepts `//?/C:/...`. On win32 only, those spellings read as the drive path
+// before the compare (separators normalized, case folded). Shell variables
+// such as `$USERPROFILE` are not expanded: that indirection stays the
+// documented fail-open limit of a word-level guard.
+interface PolicyPathHost {
+	platform: NodeJS.Platform;
+	home: string;
+}
+
+function currentPolicyPathHost(): PolicyPathHost {
+	return { platform: process.platform, home: homedir() };
+}
+
+function windowsDrivePath(path: string): string {
+	const msys = /^(?:\/cygdrive)?\/([a-zA-Z])(\/.*)?$/.exec(path);
+	if (msys !== null) return `${msys[1]}:${msys[2] ?? "/"}`;
+	const device = /^\/\/[?.]\/([a-zA-Z]:(?:\/.*)?)$/.exec(path);
+	return device === null ? path : device[1].length === 2 ? `${device[1]}/` : device[1];
+}
+
+function normalizeAbsolutePolicyPath(value: string, cwd?: string, host: PolicyPathHost = currentPolicyPathHost()): string | undefined {
+	let expanded = value.trim()
+		.replace(/^(?:~|\$HOME|\$\{HOME\})(?=[/\\]|$)/, host.home.replace(/\\/g, "/"))
+		.replace(/\\/g, "/");
+	if (expanded.length === 0) return undefined;
+	if (host.platform === "win32") expanded = windowsDrivePath(expanded);
+	if (!/^(?:\/|[a-zA-Z]:\/)/.test(expanded)) {
+		const base = cwd === undefined ? undefined : normalizeAbsolutePolicyPath(cwd, undefined, host);
+		return base === undefined ? undefined : posix.join(base, expanded).replace(/(.)\/+$/, "$1").toLowerCase();
+	}
+	return posix.normalize(expanded).replace(/(.)\/+$/, "$1").toLowerCase();
+}
+
+function desktopActionRootsFor(homes: readonly string[], host: PolicyPathHost): string[] {
+	const roots = new Set<string>();
+	for (const home of homes) {
+		const normalized = normalizeAbsolutePolicyPath(home, undefined, host);
+		if (normalized !== undefined) roots.add(posix.join(normalized, "desktop"));
+	}
+	return [...roots];
+}
+
+function desktopActionRoots(env: NodeJS.ProcessEnv): string[] {
+	const homes = [
+		resolveGentlePiAgentHome(env),
+		resolveGentlePiAgentHome(process.env),
+		join(homedir(), ".gentle-shell", "agent"),
+		join(homedir(), ".pi", "agent"),
+	];
+	const spellings: string[] = [];
+	for (const home of homes) {
+		spellings.push(home);
+		try { spellings.push(realpathSync(home)); } catch { /* A missing home has only its own spelling. */ }
+	}
+	return desktopActionRootsFor(spellings, currentPolicyPathHost());
+}
+
+function isUnderDesktopRoot(value: string, roots: readonly string[], cwd: string | undefined, host: PolicyPathHost): boolean {
+	const normalized = normalizeAbsolutePolicyPath(value, cwd, host);
+	if (normalized === undefined) return false;
+	return roots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+}
+
+/** Pure seam of the desktop-folder guard: `homes` are agent homes, `home` the user home that `~`/`$HOME` expand to. */
+export function isDesktopActionPathOn(value: string, options: PolicyPathHost & { homes: readonly string[]; cwd?: string }): boolean {
+	const host = { platform: options.platform, home: options.home };
+	return isUnderDesktopRoot(value, desktopActionRootsFor(options.homes, host), options.cwd, host);
+}
+
+function isDesktopActionPath(value: string, env: NodeJS.ProcessEnv, cwd?: string): boolean {
+	return isUnderDesktopRoot(value, desktopActionRoots(env), cwd, currentPolicyPathHost());
+}
+
+function isSensitivePath(value: string, env: NodeJS.ProcessEnv = process.env, cwd?: string): boolean {
 	const normalized = normalizePolicyPath(value);
-	return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+	return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(normalized)) || isDesktopActionPath(value, env, cwd);
+}
+
+// A shell word can carry a path after `=`: `--target-directory=$HOME/...` or
+// `VAR=~/...` (quotes are already stripped by shellCommandWords). Only the
+// desktop guard reads these values; the pattern list keeps its word-level reach.
+function isSensitiveCommandWord(word: string, env: NodeJS.ProcessEnv, cwd?: string): boolean {
+	if (isSensitivePath(word, env, cwd)) return true;
+	let index = word.indexOf("=");
+	while (index >= 0) {
+		if (isDesktopActionPath(word.slice(index + 1), env, cwd)) return true;
+		index = word.indexOf("=", index + 1);
+	}
+	return false;
 }
 
 function isSensitiveRequestContextPath(path: string): boolean {
@@ -2360,8 +2481,8 @@ function shellCommandWords(command: string): string[] {
 	return words;
 }
 
-function findSensitiveCommandPath(command: string): string | undefined {
-	return shellCommandWords(command).find(isSensitivePath);
+function findSensitiveCommandPath(command: string, env: NodeJS.ProcessEnv = process.env, cwd?: string): string | undefined {
+	return shellCommandWords(command).find((word) => isSensitiveCommandWord(word, env, cwd));
 }
 
 function sensitivePathBlock(sensitivePath: string): ToolCallEventResult {
@@ -2374,15 +2495,17 @@ function sensitivePathBlock(sensitivePath: string): ToolCallEventResult {
 function evaluateSensitivePathTool(
 	toolName: string,
 	input: unknown,
+	env: NodeJS.ProcessEnv = process.env,
+	cwd?: string,
 ): ToolCallEventResult | undefined {
 	const sensitivePath = PATH_GUARDED_TOOL_NAMES.has(toolName)
-		? collectPathInputs(input).find(isSensitivePath)
+		? collectPathInputs(input).find((path) => isSensitivePath(path, env, cwd))
 		: undefined;
 	if (sensitivePath !== undefined) return sensitivePathBlock(sensitivePath);
 	if (!SHELL_COMMAND_TOOLS.has(toolName)) return undefined;
 	const command = readStringPath(input, ["command"]);
 	if (command === undefined) return undefined;
-	const commandPath = findSensitiveCommandPath(command);
+	const commandPath = findSensitiveCommandPath(command, env, cwd);
 	return commandPath === undefined ? undefined : sensitivePathBlock(commandPath);
 }
 
@@ -3248,13 +3371,16 @@ function readReviewerRouting(cwd: string, sessionId: string | undefined, session
 		: resolution.kind === "inherited" && resolution.profile !== undefined ? "frozen session profile"
 		: resolution.kind === "follow" ? "followed session profile"
 		: "repository profile pin";
-	// Only a profile chosen with Use in this session, or recorded as the session's
-	// startup profile, carries its orchestrator to the provider review roles; an
-	// in-memory freeze, pinned and global routing leave them on Pi's persisted
-	// default (gentle-shell#2716 A1, gentle-shell#2742 section 8).
+	// Provider review roles inherit the explicit binding's orchestrator, the
+	// startup record's, or the in-memory frozen profile's, before Pi's persisted
+	// default. Pins and global routing never supply this fallback; a session
+	// frozen without a profile has no orchestrator to carry to a foreign target.
 	if (resolution.kind !== "explicit") delete config.orchestrator;
-	const recorded = resolution.kind === "inherited" ? readSessionProfileBinding(sessionId)?.modelProfiles.orchestrator : undefined;
-	if (recorded !== undefined) config.orchestrator = { ...recorded };
+	const orchestrator = resolution.kind === "inherited"
+		? readSessionProfileBinding(sessionId)?.modelProfiles.orchestrator
+			?? (resolution.profile === undefined ? undefined : readFrozenDefaultOrchestrator(sessionId))
+		: undefined;
+	if (orchestrator !== undefined) config.orchestrator = { ...orchestrator };
 	return { config, source };
 }
 
@@ -6771,6 +6897,61 @@ async function loadProfilesStore(ctx: ExtensionContext): Promise<{ path: string;
 }
 
 /**
+ * Runs the screen's own "Make default" or "Use in this session" action for
+ * Gentle Desktop. The screen's UI is replaced by a recording adapter: notices
+ * become notes, and a confirmation passes only when the request carries the
+ * token bound to the exact title and message the screen asks and to the saved
+ * profile it applies, so declining semantics (nothing written) hold until
+ * Desktop showed that text to the human for that exact profile.
+ */
+async function applyDesktopProfile(context: ExtensionContext, live: LiveSession, request: DesktopProfileApplyRequest): Promise<DesktopProfileApplyResult> {
+	if (!beginDesktopProfileApply()) return { status: "busy" };
+	try {
+		const notes: DesktopProfileNote[] = [];
+		let pending: { title: string; message: string; confirmation: string } | undefined;
+		// Some dialogs list no routes, so the token also binds the profile content applied.
+		let config: AgentModelConfig = {};
+		const adapter = {
+			notify(message: string, type?: "info" | "warning" | "error") {
+				notes.push({ level: type ?? "info", text: message });
+			},
+			async confirm(title: string, message: string) {
+				const token = desktopConfirmationToken(request.mode, request.profile, title, message, config);
+				const offered = Buffer.from(request.confirmation ?? "");
+				const expected = Buffer.from(token);
+				if (offered.length === expected.length && timingSafeEqual(offered, expected)) return true;
+				pending ??= { title, message, confirmation: token };
+				return false;
+			},
+			// The actions Desktop runs never prompt for text or choices; never open a dialog.
+			select: async () => undefined,
+			input: async () => undefined,
+		};
+		// Pi command contexts are lazy getters with stale checks; inherit them instead of copying.
+		const scoped = Object.create(context, { ui: { value: adapter, enumerable: true } }) as ExtensionContext;
+		const store = await loadProfilesStore(scoped);
+		if (!store) return { status: "not_applied", notes };
+		const name = request.profile;
+		if (!hasOwnProfile(store.file.profiles, name)) return { status: "unknown_profile" };
+		config = normalizeModelConfig(store.file.profiles[name]) ?? {};
+		// A first-run seeding notice precedes the action; only the action's own notices decide its status.
+		const actionStart = notes.length;
+		await runProfilesPanelAction(
+			scoped,
+			live,
+			store.path,
+			store.file,
+			request.mode === "default" ? { type: "apply-global", name, config: cloneModelConfig(config) } : { type: "use-session", name, config },
+		);
+		if (pending) return { status: "confirmation_required", ...pending };
+		// Every success path ends with an info notice; every failure ends with a warning or says nothing.
+		return { status: notes.slice(actionStart).at(-1)?.level === "info" ? "applied" : "not_applied", notes };
+	} finally {
+		endDesktopProfileApply();
+	}
+}
+
+/**
  * The models screen loop: shows one profile's table, runs what the user chose,
  * and reopens with fresh store, binding, and pin state; a tab switch stays on
  * the open screen instead. Bare `/gentle:profiles` passes the profile this
@@ -6930,39 +7111,63 @@ async function openProfilesPanelLoop(
 					else draftOverride = result.config;
 					continue;
 				case "use-session": {
-					// What you see is what the session uses: edits are saved first.
-					// A tab switch may have changed the shown profile since this visit opened.
-					const config = result.config ?? cloneModelConfig(normalizeModelConfig(file.profiles[previous]) ?? {});
-					const saved = differsFromStore(previous, config);
-					// A toggled mode persists before the bind: Enter never leaves it behind,
-					// and the status line says so.
-					const modeChanged = result.orchestratorMode !== undefined
-						&& result.orchestratorMode !== readProfileWorkflow(file, previous).orchestratorMode;
-					if ((saved || modeChanged) && !writeDraft(previous, config, result.orchestratorMode)) {
-						draftOverride = config;
+					// A Desktop apply_profile rewrites the same store and routing from its own
+					// snapshot; this action, including its save, waits until it answers.
+					if (!beginDesktopProfileApply()) {
+						feedback = "Gentle Desktop is applying a profile right now; nothing was saved or applied. Try again when it finishes.";
+						// Keep what is on screen: the next visit shows the same unsaved edits.
+						if (result.config) draftOverride = cloneModelConfig(result.config);
+						modeDraftOverride = result.orchestratorMode;
 						continue;
 					}
-					const report: ProfilesPanelReport = {};
-					file = await step(() => runProfilesPanelAction(ctx, live, path, file, { type: "use-session", name: previous, config }, report));
-					feedback = `${saved ? `Saved "${previous}". ` : ""}${modeChanged ? `"${previous}" now keeps its orchestrator in ${result.orchestratorMode} mode. ` : ""}${report.status ?? ""}`.trim() || undefined;
-					continue;
+					try {
+						// What you see is what the session uses: edits are saved first.
+						// A tab switch may have changed the shown profile since this visit opened.
+						const config = result.config ?? cloneModelConfig(normalizeModelConfig(file.profiles[previous]) ?? {});
+						const saved = differsFromStore(previous, config);
+						// A toggled mode persists before the bind: Enter never leaves it behind,
+						// and the status line says so.
+						const modeChanged = result.orchestratorMode !== undefined
+							&& result.orchestratorMode !== readProfileWorkflow(file, previous).orchestratorMode;
+						if ((saved || modeChanged) && !writeDraft(previous, config, result.orchestratorMode)) {
+							draftOverride = config;
+							continue;
+						}
+						const report: ProfilesPanelReport = {};
+						file = await step(() => runProfilesPanelAction(ctx, live, path, file, { type: "use-session", name: previous, config }, report));
+						feedback = `${saved ? `Saved "${previous}". ` : ""}${modeChanged ? `"${previous}" now keeps its orchestrator in ${result.orchestratorMode} mode. ` : ""}${report.status ?? ""}`.trim() || undefined;
+						continue;
+					} finally {
+						endDesktopProfileApply();
+					}
 				}
 				case "apply-global": {
-					// Make default saves what you see, then runs the guarded global
-					// apply with its diff confirmation, pin honesty, and rollback.
-					const saved = differsFromStore(previous, result.config);
-					if (saved && !writeDraft(previous, result.config)) {
-						draftOverride = result.config;
+					// A Desktop apply_profile rewrites the same store and routing from its own
+					// snapshot; this action, including its save, waits until it answers.
+					if (!beginDesktopProfileApply()) {
+						feedback = "Gentle Desktop is applying a profile right now; nothing was saved or applied. Try again when it finishes.";
+						draftOverride = cloneModelConfig(result.config);
 						continue;
 					}
-					file = await step(() => runProfilesPanelAction(ctx, live, path, file, { type: "apply-global", name: previous, config: cloneModelConfig(result.config) }));
-					const prefix = saved ? `Saved "${previous}". ` : "";
-					feedback = file.active === previous
-						? `${prefix}"${previous}" is the default for new sessions.`
-						: pinWinner() === previous
-							? `${prefix}This repo pins its profile, so "${previous}" now applies to this repo only.`
-							: `${prefix}"${previous}" was not made the default.`;
-					continue;
+					try {
+						// Make default saves what you see, then runs the guarded global
+						// apply with its diff confirmation, pin honesty, and rollback.
+						const saved = differsFromStore(previous, result.config);
+						if (saved && !writeDraft(previous, result.config)) {
+							draftOverride = result.config;
+							continue;
+						}
+						file = await step(() => runProfilesPanelAction(ctx, live, path, file, { type: "apply-global", name: previous, config: cloneModelConfig(result.config) }));
+						const prefix = saved ? `Saved "${previous}". ` : "";
+						feedback = file.active === previous
+							? `${prefix}"${previous}" is the default for new sessions.`
+							: pinWinner() === previous
+								? `${prefix}This repo pins its profile, so "${previous}" now applies to this repo only.`
+								: `${prefix}"${previous}" was not made the default.`;
+						continue;
+					} finally {
+						endDesktopProfileApply();
+					}
 				}
 				case "create-live": {
 					if (!authorityAvailable) {
@@ -9588,8 +9793,8 @@ function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<strin
 // gentle-pi#2271: review-refuter and review-validator are provider review
 // roles, not installable agents, so nothing seeds their entries and profiles
 // never carry them. For those two keys only, a snapshot with no model falls
-// back to Pi's persisted default model and effort, the default the routing
-// panel already labels them with. Lens keys keep the fail-closed rule.
+// back to the session profile's orchestrator, then Pi's persisted default model
+// and effort. Lens keys keep the fail-closed rule.
 //
 // gentle-shell#2163: a caller that knows where the snapshot came from passes
 // it, so the relay's refusal names the routing source and whether the entry
@@ -11927,6 +12132,7 @@ async function executeReviewControllerOperationImpl(
 
 /** @internal */
 export const __testing = {
+	applyDesktopProfile,
 	readSavedModelConfig,
 	readSavedModelConfigAsync,
 	setCandidateViewSymlinkProbeForTesting,
@@ -12723,10 +12929,40 @@ function createGentleAiExtensionForTesting(
 		sessionProfiles.start(ctx.sessionManager, (type, data) => pi.appendEntry(type, data), event);
 		// gentle-shell#2742: only a session's own start tells this process its
 		// startup state; anything else leaves it unknown.
+		let startupProfile: SessionProfileStartupState | undefined;
 		try {
-			if (profileSessionId && isSessionOwnStart(event, ctx.sessionManager))
+			if (profileSessionId && isSessionOwnStart(event, ctx.sessionManager)) {
 				freezeSessionProfileAtOwnStart({ sessionId: profileSessionId, cwd: ctx.sessionManager.getCwd(), configHome: gentleAiConfigHome() });
+				startupProfile = readSessionProfileOwnStartup(profileSessionId);
+			}
 		} catch { /* The startup state stays unknown. */ }
+		// A3: only this session's own start applies its frozen full definition.
+		// The workflow mode remains live; launches still receive role routing only.
+		if (startupProfile && startupProfile !== "none" && permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && !profileFollowEnabled(permissionEnvironment)) {
+			const orchestrator = readProfileOrchestrator(startupProfile.modelProfiles);
+			const current = () => startupEpoch === reminderEpoch && sessionProfiles.isCurrent(ctx.sessionManager);
+			// The switch is best-effort and contained: a reload or session
+			// replacement racing the awaited switch must neither abort the rest
+			// of session_start (Pi's runner throws on any access to a stale ctx)
+			// nor leave the outcome unreported. Checked before and after the await.
+			try {
+				if (!current()) return;
+				const note = orchestrator?.model
+					? await switchLiveOrchestrator(ctx, pi, orchestrator, current)
+						|| "\nThe profile's orchestrator model is invalid; this session keeps its current model."
+					: `\nprofile "${startupProfile.name}" has no orchestrator model; this session keeps its current model.`;
+				if (!current()) return;
+				// A headless session (pi -p) has no notify surface: the startup note
+				// falls back to stderr, the same channel Pi's own startup notifications
+				// use headlessly, so a failed switch is observable instead of silent.
+				const startedWith = `el Gentleman started with profile "${startupProfile.name}".${note}`;
+				if (ctx.hasUI) ctx.ui.notify(startedWith, "info");
+				else console.error(startedWith);
+			} catch {
+				// The startup switch stays best-effort: a staled context or a
+				// reporting failure never aborts the remaining startup work.
+			}
+		}
 		readSessionProfileAuthority(ctx.sessionManager);
 		if (ctx.hasUI) notifySessionProfileProblem(ctx);
 		auto.reset();
@@ -13123,6 +13359,8 @@ function createGentleAiExtensionForTesting(
 		const sensitivePathDenied = evaluateSensitivePathTool(
 			event.toolName,
 			event.input,
+			permissionEnvironment,
+			typeof ctx.cwd === "string" && ctx.cwd.length > 0 ? ctx.cwd : undefined,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
 		const surfaceDenied = evaluateExecutionSurfaceTool(event.toolName, event.input);
@@ -13233,6 +13471,28 @@ function createGentleAiExtensionForTesting(
 		handler: async (args, ctx) => {
 			await handleProfilesCommand(ctx, pi, typeof args === "string" ? args : "");
 		},
+	});
+
+	// Desktop's apply_profile reaches the screen's own apply through this
+	// versioned, adapter-shaped seam; there is no second apply implementation.
+	// Hosts without an event bus (some embedders and test hosts) skip the seam.
+	if (typeof pi.events?.on === "function") pi.events.on(DESKTOP_PROFILES_SERVICE_CHANNEL, (payload: unknown) => {
+		if (!payload || typeof payload !== "object") return;
+		const request = payload as Partial<{ context: ExtensionContext; respond(service: DesktopProfilesService): void }>;
+		if (typeof request.respond !== "function" || !request.context) return;
+		const ctx = request.context;
+		try {
+			let disposed = false;
+			request.respond({
+				schema: DESKTOP_PROFILES_SERVICE_SCHEMA,
+				apply: (applyRequest) => (disposed ? Promise.resolve({ status: "not_applied", notes: [] }) : applyDesktopProfile(ctx, pi, applyRequest)),
+				dispose: () => {
+					disposed = true;
+				},
+			});
+		} catch {
+			/* obsolete trusted context: discovery expires closed */
+		}
 	});
 
 	pi.registerCommand("gentle:persona", {
@@ -13547,6 +13807,69 @@ function createGentleAiExtensionForTesting(
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},
+	});
+
+	// Desktop's get_review_mode/set_review_mode (#3324) reach this same switch
+	// through a versioned, adapter-shaped seam: every read and write goes
+	// through executeReviewMode and the native adapter, exactly like
+	// /gentle:review-mode. The Desktop bridge owns the confirmation step; this
+	// owner only reads (bounded, fail closed) and writes then re-reads. Raw
+	// native errors never leave: they are classified as unavailable (gentle-ai
+	// missing or the command unsupported), unknown, or failed. Subagent
+	// children never answer, and hosts without an event bus skip the seam.
+	const DESKTOP_REVIEW_WRITE_TIMEOUT_MS = 10_000;
+	const reviewModeUnavailable = (error: unknown): boolean => {
+		const code = asNativeReviewCliError(error)?.code;
+		return code === NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE || code === NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE ||
+			code === NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING || code === NATIVE_REVIEW_ERROR_CODE.UNSUPPORTED_TRANSITION_OPERATION;
+	};
+	const boundedReviewMode = async (request: NativeReviewModeRequest, ctx: ExtensionContext, timeoutMs: number) => {
+		const signal = AbortSignal.timeout(timeoutMs);
+		return await Promise.race([executeReviewMode({ ...request, signal }, ctx), rddAbortRejection(signal)]);
+	};
+	if (typeof pi.events?.on === "function") pi.events.on(DESKTOP_REVIEW_SERVICE_CHANNEL, (payload: unknown) => {
+		if (!payload || typeof payload !== "object") return;
+		const request = payload as Partial<{ context: ExtensionContext; respond(service: DesktopReviewService): void }>;
+		if (typeof request.respond !== "function" || !request.context) return;
+		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return;
+		const ctx = request.context;
+		let disposed = false;
+		const read = async (): Promise<DesktopReviewOwnerRead> => {
+			if (disposed || nativeReviewCli?.reviewMode === undefined) return { kind: "unavailable" };
+			try {
+				const result = await boundedReviewMode({ cwd: ctx.cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS }, ctx, resolveRddStatusTimeoutMs(permissionEnvironment));
+				if (result.operation !== NATIVE_REVIEW_MODE_OPERATION.STATUS || !isValidRddModeStatus(result.status)) return { kind: "unknown" };
+				const { global, cloneLocal, effective, source, revision } = result.status;
+				return { kind: "status", status: { global, cloneLocal, effective, source, ...(revision === undefined ? {} : { revision }) } };
+			} catch (error) {
+				return reviewModeUnavailable(error) ? { kind: "unavailable" } : { kind: "unknown" };
+			}
+		};
+		try {
+			request.respond({
+				schema: DESKTOP_REVIEW_SERVICE_SCHEMA,
+				read,
+				async write({ enabled, scope }): Promise<DesktopReviewOwnerWrite> {
+					if (disposed || nativeReviewCli?.reviewMode === undefined) return { kind: "unavailable" };
+					const operation = enabled ? NATIVE_REVIEW_MODE_OPERATION.ENABLE : NATIVE_REVIEW_MODE_OPERATION.DISABLE;
+					try {
+						const result = await boundedReviewMode({ cwd: ctx.cwd, operation, scope }, ctx, DESKTOP_REVIEW_WRITE_TIMEOUT_MS);
+						if (result.operation !== operation) return { kind: "failed" };
+					} catch (error) {
+						// A write that could not start changed nothing; any other failure
+						// has an unknown outcome and is never retried.
+						return reviewModeUnavailable(error) ? { kind: "unavailable" } : { kind: "failed" };
+					}
+					// Report the owner's state re-read after the write, not the write's echo.
+					return await read();
+				},
+				dispose: () => {
+					disposed = true;
+				},
+			});
+		} catch {
+			/* obsolete trusted context: discovery expires closed */
+		}
 	});
 
 	// gentle-pi#677: gentle-ai owns telemetry end to end (status, the opt-out
