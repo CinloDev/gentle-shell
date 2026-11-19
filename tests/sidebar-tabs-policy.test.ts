@@ -132,3 +132,43 @@ test("MEM card toggles default on for legacy preferences and persist independent
  writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"maybe","memCloud":"on"}');
  assert.equal(resolveSidebarTabs(options).malformed, true);
 });
+
+test("STAT defaults off for every earlier preference shape and persists independently", t => {
+ const home = mkdtempSync(join(tmpdir(), "sidebar-tabs-stat-"));
+ t.after(() => rmSync(home, { recursive: true, force: true }));
+ const options = { gentlePiConfigHome: home };
+ const path = join(home, "sidebar-tabs.json");
+ for (const raw of [
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"off","git":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"off","diff":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"on"}',
+  '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"on","memCloud":"off"}',
+ ]) {
+  writeFileSync(path, raw);
+  const result = resolveSidebarTabs(options);
+  assert.deepEqual([result.stats, result.malformed], ["off", false], raw);
+ }
+ writeSidebarTabs("on", options, { main: "on", git: "on", stats: "on" });
+ assert.equal(resolveSidebarTabs(options).stats, "on");
+ writeSidebarTabs("off", options);
+ assert.deepEqual([resolveSidebarTabs(options).policy, resolveSidebarTabs(options).stats], ["off", "on"]);
+ writeSidebarTabs("on", options, { main: "on", git: "on", stats: "off" });
+ assert.equal(resolveSidebarTabs(options).stats, "off");
+ // The file the new build writes carries every earlier key unchanged: the last
+ // legacy shape above is the one it started from, and only stats changed.
+ const written = JSON.parse(readFileSync(path, "utf8"));
+ assert.deepEqual([written.stats, written.memCloud, written.memLocal, written.mem, written.profile, written.tree, written.diff, written.gitHistory, written.git, written.main], ["off", "off", "on", "on", "on", "on", "on", "on", "on", "on"]);
+ // A malformed stats value rejects the whole file.
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"on","memCloud":"on","stats":"maybe"}');
+ assert.equal(resolveSidebarTabs(options).malformed, true);
+ // An unknown key is still rejected: the ladder has no room for additions.
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"on","memCloud":"on","stats":"on","future":"on"}');
+ assert.equal(resolveSidebarTabs(options).malformed, true);
+ // Gaps in the ladder stay malformed, exactly as before this destination.
+ writeFileSync(path, '{"schema":"gentle-pi.sidebar-tabs/v1","policy":"on","main":"on","git":"on","gitHistory":"on","diff":"on","tree":"on","profile":"on","mem":"on","memLocal":"on","stats":"on"}');
+ assert.equal(resolveSidebarTabs(options).malformed, true);
+});

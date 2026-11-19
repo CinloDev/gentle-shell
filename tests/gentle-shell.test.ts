@@ -4906,12 +4906,14 @@ test("customize Layout persists global Tabs and preserves Task summary", async (
 	assert.ok(findCustomizeRow(ui, "Configure tabs"));
 	ui.overlayView!.handleInput("\r");
 	frame = ui.overlayView!.render(90).join("\n");
-	for (const name of ["MAIN", "GIT", "TREE", "PROFILE", "MEMORY", "STATS"]) assert.match(frame, new RegExp(name));
+	for (const name of ["MAIN", "GIT", "TREE", "PROFILE", "MEM", "STAT"]) assert.match(frame, new RegExp(name));
+	assert.doesNotMatch(frame, /MEMORY · coming soon|STATS · coming soon/);
 	assert.match(frame, /MAIN\s+● on\s+○ off/);
 	assert.match(frame, /GIT\s+● on\s+○ off/);
 	assert.match(frame, /TREE\s+○ on\s+● off[\s\S]*PROFILE\s+○ on\s+● off/);
 	assert.match(frame, /\[x\] Git history/);
 	assert.match(frame, /\[x\] Diff/);
+	assert.match(frame, /MEM\s+○ on\s+● off[\s\S]*STAT\s+○ on\s+● off/);
 	ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput("\x1b[B"); ui.overlayView!.handleInput(" ");
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).gitHistory, "off");
@@ -4934,6 +4936,35 @@ test("customize Layout persists global Tabs and preserves Task summary", async (
 	await customizeAction(ui, "Tabs: hidden");
 	assert.equal(JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8")).policy, "off");
 	assert.doesNotMatch(ui.overlayView!.render(90).join("\n"), /Configure tabs/);
+	ui.overlayView!.handleInput("\x1b"); await pending;
+});
+
+test("customize Layout carries STAT as the last destination and persists its own preference", async (t) => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home });
+	const { ctx, ui, overlayReady } = fakeContext();
+	const pending = commands.get("gentle:customize")!.handler("", ctx);
+	await overlayReady;
+	await customizeAction(ui, "Tabs: shown");
+	assert.ok(findCustomizeRow(ui, "Configure tabs"));
+	ui.overlayView!.handleInput("\r");
+	// STAT is off for a preference written before it existed, and it is the last row.
+	const frame = ui.overlayView!.render(90).join("\n");
+	assert.match(frame, /STAT\s+○ on\s+● off/);
+	assert.doesNotMatch(frame, /coming soon/);
+	const renderedDestinations = frame.split("\n")
+		.map(line => /(?:^|│)\s*(?:▸\s*)?(MAIN|GIT|TREE|PROFILE|MEM|STAT)\s+[●○›]/.exec(stripAnsi(line))?.[1])
+		.filter(name => name !== undefined);
+	assert.deepEqual(renderedDestinations, ["MAIN", "GIT", "TREE", "PROFILE", "MEM", "STAT"], "STAT closes the destination list");
+	assert.ok(findCustomizeRow(ui, "STAT: on"));
+	// focus selects the on choice without applying it; Enter applies that choice.
+	ui.overlayView!.handleInput("\r");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.match(ui.overlayView!.render(90).join("\n"), /STAT\s+● on\s+○ off/);
+	const saved = JSON.parse(readFileSync(join(home, "sidebar-tabs.json"), "utf8"));
+	assert.deepEqual([saved.stats, saved.mem, saved.policy], ["on", "off", "on"]);
+	ui.overlayView!.handleInput("\x1b"); // Leave the nested destination settings.
 	ui.overlayView!.handleInput("\x1b"); await pending;
 });
 
@@ -10101,4 +10132,81 @@ test("Git and TREE selectors and cards share geometry", async t => {
    const git=await geometry("GIT"), tree=await geometry("TREE"); assert.deepEqual(tree,git,`${surface}/${style} TREE versus GIT`);
   } finally {footer.dispose(); await fire(handlers,"session_shutdown",ctx);}
  }
+});
+
+test("independent STAT public lifecycle: results, cache, subscription, folding and MAIN preservation", async (t) => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "off", gitHistory: "on", diff: "on", tree: "off", profile: "off", mem: "off", memLocal: "on", memCloud: "on", stats: "on" }));
+	const { pi, handlers } = fakePi();
+	pi.getAllTools = () => [];
+	let network = 0;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+		activeProfile: () => undefined,
+		fetch: async () => { network++; assert.fail("no integration must not request health"); },
+	});
+	const entries = [
+		{ type: "message", message: { role: "assistant", model: "provider/model", usage: { input: 100, output: 20, cacheRead: 600, cacheWrite: 300, cost: { total: 1.5 } } } },
+		{ type: "message", message: { role: "toolResult", toolName: "bash", isError: true } },
+	];
+	const { ctx, ui } = fakeContext({ entries });
+	let oauth = true;
+	let leaf = "a";
+	ctx.modelRegistry.isUsingOAuth = () => oauth;
+	(ctx.sessionManager as any).getLeafId = () => leaf;
+	(ctx.sessionManager as any).getEntryCount = () => entries.length;
+	await fire(handlers, "session_start", ctx);
+	const root = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 60, columns: 160 }, layoutRoot: root, requestRender() {} };
+	const footer = (ui.footerFactory as any)(host, plainTheme, {
+		getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {},
+	});
+	const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+	const frame = () => renderLayoutFrame(root, 160, 60, () => {});
+	const scroll = () => boxes(frame().root).find(box => typeof box.component.getContentWidth === "function").component;
+	const rows = (): string[] => scroll().render(50).map(stripAnsi);
+	const text = () => rows().join("\n");
+	const select = (label: string) => {
+		const box = boxes(frame().root).find(box => box.children.length === 0 && stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("STAT"));
+		assert.ok(box);
+		const x = stripAnsi(box.component.render(box.rect.width)[0]).indexOf(label);
+		assert.ok(x >= 0);
+		box.component.handleMouse({ type: "click", button: "left", x, y: 0, width: 50, height: 3 });
+	};
+	try {
+		const main = text();
+		select("STAT"); frame();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.match(text(), /SESSION[\s\S]*TOOLS[\s\S]*ECOSYSTEM/);
+		assert.doesNotMatch(text(), /HISTORY|Scanning/);
+		assert.match(text(), /60% hit · 600 read/);
+		assert.match(text(), /bash\s+1 call · 1 failed/);
+		assert.match(text(), /\$1\.50 sub/);
+		assert.match(text(), /Pi\s+\d+\.\d+\.\d+\s+runtime/);
+		assert.doesNotMatch(text(), /Engram/);
+		oauth = false;
+		assert.doesNotMatch(text(), / sub/);
+		assert.match(text(), /\$1\.50/);
+		// Only identity changes: aggregate tool calls and failures remain equal.
+		entries[1].message.toolName = "provider/failure";
+		leaf = "b";
+		assert.match(text(), /provider\/failure/);
+		assert.doesNotMatch(text(), /bash/);
+		const y = rows().findIndex(row => /▾ TOOLS/.test(row));
+		assert.ok(y >= 0);
+		scroll().handleMouse({ type: "move", button: "none", x: 4, y, width: 50, height: 55 });
+		scroll().handleMouse({ type: "click", button: "left", x: 4, y, width: 50, height: 55 });
+		assert.match(text(), /▸ TOOLS/);
+		assert.doesNotMatch(text(), /provider\/failure/);
+		select("MAIN");
+		oauth = true;
+		entries[1].message.toolName = "bash";
+		leaf = "c";
+		assert.equal(text(), main);
+		select("STAT");
+		assert.match(text(), /▸ TOOLS/);
+		assert.equal(network, 0);
+	} finally {
+		footer.dispose();
+		await fire(handlers, "session_shutdown", ctx);
+	}
 });

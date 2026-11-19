@@ -14,6 +14,11 @@ export interface ModelStats {
 	tokens: number;
 	cost: number;
 }
+export interface ToolStats {
+	name: string;
+	calls: number;
+	errors: number;
+}
 export interface SessionStats {
 	cost: number;
 	input: number;
@@ -24,6 +29,8 @@ export interface SessionStats {
 	turns: number;
 	toolCalls: number;
 	toolErrors: number;
+	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. */
+	tools: ToolStats[];
 	/** From the first to the last dated entry. */
 	spanMs: number;
 	/** Cache reads over every prompt token, or undefined before the first prompt. */
@@ -40,6 +47,7 @@ type StatsEntry = {
 	message?: {
 		role?: string;
 		model?: unknown;
+		toolName?: unknown;
 		isError?: unknown;
 		usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } };
 	};
@@ -48,8 +56,9 @@ type StatsEntry = {
 const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
 
 export function collectSessionStats(entries: readonly unknown[]): SessionStats {
-	const stats: SessionStats = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, spanMs: 0, cacheHitRate: undefined, models: [] };
+	const stats: SessionStats = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, spanMs: 0, cacheHitRate: undefined, models: [], tools: [] };
 	const models = new Map<string, ModelStats>();
+	const tools = new Map<string, ToolStats>();
 	let first = Infinity;
 	let last = -Infinity;
 	for (const raw of entries) {
@@ -64,6 +73,11 @@ export function collectSessionStats(entries: readonly unknown[]): SessionStats {
 		if (message?.role === "toolResult") {
 			stats.toolCalls++;
 			if (message.isError === true) stats.toolErrors++;
+			const name = (typeof message.toolName === "string" ? sanitizeTerminalText(message.toolName).replace(/[\x00-\x1f\x7f]/g, "").trim() : "") || "unknown";
+			const tool = tools.get(name) ?? { name, calls: 0, errors: 0 };
+			tool.calls++;
+			if (message.isError === true) tool.errors++;
+			tools.set(name, tool);
 			continue;
 		}
 		if (message?.role !== "assistant") continue;
@@ -92,6 +106,7 @@ export function collectSessionStats(entries: readonly unknown[]): SessionStats {
 	const prompt = stats.input + stats.cacheRead + stats.cacheWrite;
 	stats.cacheHitRate = prompt > 0 ? stats.cacheRead / prompt : undefined;
 	stats.spanMs = last > first ? last - first : 0;
+	stats.tools = [...tools.values()];
 	stats.models = [...models.values()].sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
 	return stats;
 }
@@ -101,7 +116,7 @@ type StatsTheme = { fg(role: string, text: string): string };
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** The Stats section rows: totals first, then one row per model. */
-export function renderStatsRows(stats: SessionStats, theme: StatsTheme, width: number, subscription = false): string[] {
+export function renderStatsRows(stats: SessionStats, theme: StatsTheme, width: number, subscription = false, options: { includeTools?: boolean } = {}): string[] {
 	const label = (text: string) => theme.fg("muted", text.padEnd(7));
 	const value = (text: string) => theme.fg("text", text);
 	const muted = (text: string) => theme.fg("muted", text);
@@ -111,7 +126,7 @@ export function renderStatsRows(stats: SessionStats, theme: StatsTheme, width: n
 	];
 	if (stats.cacheHitRate !== undefined) rows.push(renderPanelRow(width, `${label("cache")}${value(`${Math.round(stats.cacheHitRate * 100)}% hit · ${formatTokens(stats.cacheRead)} read`)}`));
 	const failed = stats.toolErrors ? ` · ${theme.fg("warning", `${stats.toolErrors} failed`)}` : "";
-	rows.push(renderPanelRow(width, `${label("tools")}${value(plural(stats.toolCalls, "call"))}${failed}`));
+	if (options.includeTools !== false) rows.push(renderPanelRow(width, `${label("tools")}${value(plural(stats.toolCalls, "call"))}${failed}`));
 	if (stats.subagents) rows.push(renderPanelRow(width, `${label("agents")}${value(`${plural(stats.subagents.runs, "run")} · ${formatTokens(stats.subagents.tokens)} · ${formatCost(stats.subagents.cost, subscription)}`)}`));
 	for (const model of stats.models) {
 		const numbers = `${plural(model.turns, "turn")} · ${formatTokens(model.tokens)} · ${formatCost(model.cost, subscription)}`;

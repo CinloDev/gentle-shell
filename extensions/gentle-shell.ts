@@ -1,6 +1,6 @@
 import { sharedCooldown, syncUsageCooldown } from "../lib/model-fallback-policy.ts";
 import { collectQuotaWarnings, type QuotaThresholdState } from "../lib/quota-threshold.ts";
-import { CustomEditor, keyHint, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, VERSION as PI_VERSION, keyHint, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { isHomeOrBroadUserDirectory } from "../lib/bounded-writer-admission.ts";
 import { Editor, Image, Key, decodeKittyPrintable, getCapabilities, isKeyRelease, matchesKey, parseKey, truncateToWidth, visibleWidth, type Component, type EditorTheme, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { readClipboardImage, type ClipboardImage } from "../lib/clipboard-image.ts";
@@ -49,7 +49,9 @@ import { isInteractiveMode } from "../lib/rpc-host.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { resolveAnimationPolicy, writeAnimationPolicy, type AnimationPolicy } from "../lib/animation-policy.ts";
 import { resolveVimPolicy, writeVimPolicy, type VimPolicy } from "../lib/vim-policy.ts";
-import { resolveSidebarTabs, writeSidebarTabs } from "../lib/sidebar-tabs-policy.ts";
+import { resolveSidebarTabs, writeSidebarTabs, type SidebarTabsDestination } from "../lib/sidebar-tabs-policy.ts";
+import { buildStatsCards, type StatsCardId, type StatsCardsFrame, type StatsCardsSnapshot } from "../lib/stats-cards.ts";
+import { describeEcosystemVersions, detectEcosystemVersions, isEngramIntegrationEnabled, parseEngramHealthVersion, type EcosystemVersionRow } from "../lib/ecosystem-versions.ts";
 import { SidebarTree, SidebarTreeSession } from "../lib/sidebar-tree.ts";
 import { readTreeFilePreview } from "../lib/tree-file-preview.ts";
 import { TreeFileView } from "../lib/tree-file-view.ts";
@@ -3498,7 +3500,82 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			});
 			const engramRail: SidebarRail = Object.assign(engramRegion, { surface: engramCard.surface, digest: engramCard.digest, cardGroups: engramCard.cardGroups });
-			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROF", rail: profileRail }] : []), ...(tabsSettings.mem === "on" && (tabsSettings.memLocal === "on" || tabsSettings.memCloud === "on") ? [{ id: "mem", label: "MEM", rail: engramRail }] : [])] : [], id => {
+			// STAT tab: the live session, tools and ecosystem versions. The host hands
+			// the painter memoized session stats and versions read once per activation.
+			// No render path touches disk.
+			let statsActive = false;
+			let statsEpoch = 0;
+			let statsEcosystem: EcosystemVersionRow[] | undefined;
+			const statsCollapsed = new Set<StatsCardId>();
+			let statsHover: StatsCardId | undefined;
+			let statsFrame: { width: number; frame: StatsCardsFrame } | undefined;
+			const loadStatsDestination = async (epoch: number) => {
+				// Versions are a few local metadata reads and paint at once, so the card
+				// never waits on the daemon's health timeout; enabled Engram stays
+				// unavailable until its daemon reports an actual core version.
+				const engramEnabled = isEngramIntegrationEnabled(pi.getAllTools());
+				const detection = detectEcosystemVersions({ engramEnabled, piVersion: PI_VERSION });
+				statsEcosystem = describeEcosystemVersions(detection);
+				invalidateSidebar(tui); tui.requestRender();
+				const running = engramEnabled ? parseEngramHealthVersion(await engramFetchJson("/health")) : undefined;
+				if (!statsActive || epoch !== statsEpoch) return;
+				if (running !== undefined) {
+					statsEcosystem = describeEcosystemVersions({ ...detection, engramRunningVersion: running });
+					invalidateSidebar(tui); tui.requestRender();
+				}
+			};
+			const statsRailSnapshot = (): StatsCardsSnapshot => ({ session: { stats: { ...currentStats(), subagents: subagentSpend() }, subscription: footerModel().subscription }, ecosystem: statsEcosystem });
+			const statsCard: SidebarRail = {
+				// The same digest discipline as the other rails: every painted fact rides in
+				// the key, so an unchanged frame re-renders nothing.
+				digest: () => {
+					const stats = currentStats();
+					const spend = subagentSpend();
+					return JSON.stringify([
+						stats.turns, stats.toolCalls, stats.toolErrors, stats.cost, stats.spanMs, stats.input, stats.output, stats.cacheRead, stats.cacheWrite,
+						stats.models.map(model => `${model.model}:${model.turns}:${model.tokens}:${model.cost}`).join(";"),
+						stats.tools.map(tool => [tool.name, tool.calls, tool.errors]),
+						spend?.runs, spend?.tokens, spend?.cost, footerModel().subscription,
+						statsEcosystem?.map(row => `${row.id}:${row.version ?? ""}:${row.source}`).join(";") ?? "",
+						visualSettings.density, [...statsCollapsed], statsHover ?? "",
+					]);
+				},
+				surface: "panel",
+				cardGroups: width => ({ groups: statsFrame?.width === width ? statsFrame.frame.groups : [] }),
+				render(width) {
+					const frame = buildStatsCards(statsRailSnapshot(), theme, width, visualSettings.density, { collapsed: statsCollapsed, hovered: statsHover });
+					statsFrame = { width, frame };
+					return frame.rows;
+				},
+				invalidate() {},
+			};
+			const statsTarget = (y: number, width: number) => statsFrame?.width === width ? statsFrame.frame.headers.find(header => header.row === y)?.id : undefined;
+			const statsRegion = new NativePointerRegion(statsCard, {
+				onHover(event) {
+					const next = statsTarget(event.y, event.width);
+					if (next) setSidebarHover(tui, statsRegion, () => statsRegion.clearHover());
+					else setSidebarHover(tui);
+					if (next === statsHover) return { handled: true };
+					statsHover = next;
+					return { handled: true, render: true };
+				},
+				onLeave() {
+					releaseSidebarHover(tui, statsRegion);
+					if (!statsHover) return;
+					statsHover = undefined;
+					tui.requestRender();
+				},
+				onClick(event) {
+					if (event.button !== "left") return undefined;
+					const id = statsTarget(event.y, event.width);
+					if (!id) return undefined;
+					if (statsCollapsed.has(id)) statsCollapsed.delete(id);
+					else statsCollapsed.add(id);
+					return { handled: true, render: true };
+				},
+			});
+			const statsRail: SidebarRail = Object.assign(statsRegion, { surface: statsCard.surface, digest: statsCard.digest, cardGroups: statsCard.cardGroups });
+			const uninstall = installSidebar(tui, theme, () => visualSettings.statusPlacement, () => visualSettings.headerPlacement, () => visualSettings.density, () => tabsSettings.policy === "on" ? [...(tabsSettings.main === "on" ? [{ id: "main", label: "MAIN" }] : []), ...(hasGitRoot && tabsSettings.git === "on" && (tabsSettings.gitHistory === "on" || tabsSettings.diff === "on") ? [{ id: "git", label: "GIT", rail: gitCards }] : []), ...(tabsSettings.tree === "on" ? [{ id: "tree", label: "TREE", rail: treeRail }] : []), ...(tabsSettings.profile === "on" ? [{ id: "profile", label: "PROF", rail: profileRail }] : []), ...(tabsSettings.mem === "on" && (tabsSettings.memLocal === "on" || tabsSettings.memCloud === "on") ? [{ id: "mem", label: "MEM", rail: engramRail }] : []), ...(tabsSettings.stats === "on" ? [{ id: "stats", label: "STAT", rail: statsRail }] : [])] : [], id => {
 				if (id !== "profile" || profileWidth !== tui.terminal?.columns) profileRegion.clearHover();
 				profileWidth = tui.terminal?.columns;
 				if (id === "tree" && !treeActive) {
@@ -3515,6 +3592,15 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 						});
 					});
 				} else if (id !== "tree" && treeActive) { treeActive = false; treeEpoch++; treeSession.setActive(false); }
+				// STAT detects ecosystem versions on activation; leaving invalidates the
+				// epoch so a stale health response never repaints an inactive tab.
+				if (id === "stats") {
+					if (!statsActive) {
+						statsActive = true;
+						const epoch = ++statsEpoch;
+						queueMicrotask(() => { if (statsActive && epoch === statsEpoch) void loadStatsDestination(epoch); });
+					}
+				} else if (statsActive) { statsActive = false; statsEpoch++; }
 				// MEM polling lives only while the tab is visible: the activation runs
 				// an immediate probe and starts the ~2s refresh; leaving stops the
 				// timer and drops the snapshot so nothing keeps probing in background.
@@ -3592,6 +3678,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				disposed = true;
 				aliveGit = false; gitActive = false; generation++; gitCardsState.dispose();
 				treeActive = false; treeEpoch++; disposeTreePreview?.(); treeSession.dispose();
+				statsActive = false; statsEpoch++;
 				if (refreshSidebarTree === refreshTree) refreshSidebarTree = undefined;
 				if (disposeFooter === dispose) disposeFooter = undefined;
 				clearInterval(jobsTimer);
@@ -4129,22 +4216,25 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				layoutChoice("Density", value, () => visual().density === value, "Spacing: comfortable adds gaps between rail sections and a padding row under a top header; compact removes them; minimal also drops the brand and the key hints"));
 			for (const value of Object.values(CHROME_SURFACE)) add(() => `Surface: ${value}${visual().surface === value ? " (current)" : ""}`, pending, () => updateVisual((settings) => ({ ...settings, surface: value })), () => layoutPreview({ ...visual(), surface: value }),
 				layoutChoice("Surface", value, () => visual().surface === value, "Chrome background: transparent (default) lets the terminal background show through; tinted paints the rail, header rows and panel"));
-			const saveTabs = (policy: "on" | "off", destination?: "main" | "git" | "gitHistory" | "diff" | "tree" | "profile" | "mem" | "memLocal" | "memCloud") => {
+			const saveTabs = (policy: "on" | "off", destination?: SidebarTabsDestination) => {
 				const current = resolveSidebarTabs(animationOptions);
-				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree, profile: destination === "profile" ? policy : current.profile, mem: destination === "mem" ? policy : current.mem, memLocal: destination === "memLocal" ? policy : current.memLocal, memCloud: destination === "memCloud" ? policy : current.memCloud });
+				writeSidebarTabs(destination ? current.policy : policy, animationOptions, { main: destination === "main" ? policy : current.main, git: destination === "git" ? policy : current.git, gitHistory: destination === "gitHistory" ? policy : current.gitHistory, diff: destination === "diff" ? policy : current.diff, tree: destination === "tree" ? policy : current.tree, profile: destination === "profile" ? policy : current.profile, mem: destination === "mem" ? policy : current.mem, memLocal: destination === "memLocal" ? policy : current.memLocal, memCloud: destination === "memCloud" ? policy : current.memCloud, stats: destination === "stats" ? policy : current.stats });
 				tabsSettings = resolveSidebarTabs(animationOptions);
 				if (destination === "diff" && current.diff !== tabsSettings.diff) toggleSidebarDiff?.();
 				if (destination === "gitHistory" && current.gitHistory !== tabsSettings.gitHistory) toggleSidebarHistory?.();
 				if (sidebarTui) { invalidateSidebar(sidebarTui); sidebarTui.requestRender(); }
 			};
+			// Every destination the rail can show, in rail order. STAT closes the row:
+			// it is the last tab and the last setting in this list.
+			const tabDestinations = ["main", "git", "tree", "profile", "mem", "stats"] as const;
+			const tabName = (destination: SidebarTabsDestination) => destination === "stats" ? "STAT" : destination.toUpperCase();
 			for (const [label, policy] of [["shown", "on"], ["hidden", "off"]] as const) add(
 				() => `Tabs: ${label}`, pending, () => saveTabs(policy),
 				() => { const result = resolveSidebarTabs(animationOptions); return { title: "Tabs · global", sample: result.malformed ? "Malformed or unreadable Tabs preference; not overwritten." : `Preference: ${result.policy}. Destinations appear only when real content is available.` }; },
 				explicitChoice("Tabs", label, () => resolveSidebarTabs(animationOptions).policy === policy),
 			);
 			rows.push({ category, label: "Configure tabs", indent: 2, visible: () => { const result = resolveSidebarTabs(animationOptions); return !result.malformed && result.policy === "on"; }, action: () => {}, children: [
-				...(["main", "git", "tree", "profile", "mem"] as const).flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${destination.toUpperCase()}: ${policy}`, choice: { setting: destination.toUpperCase(), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : destination === "mem" ? (["memLocal", "memCloud"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "memLocal" ? "Engram local" : "Engram cloud"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).mem === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
-				...["MEMORY", "STATS"].map(name => ({ label: `${name} · coming soon`, inert: true, action: () => {} })),
+				...tabDestinations.flatMap(destination => (["on", "off"] as const).map(policy => ({ label: `${tabName(destination)}: ${policy}`, choice: { setting: tabName(destination), value: policy, current: () => resolveSidebarTabs(animationOptions)[destination] === policy }, action: () => saveTabs(policy, destination) })).concat(destination === "git" ? (["gitHistory", "diff"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "diff" ? "Diff" : "Git history"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).git === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : destination === "mem" ? (["memLocal", "memCloud"] as const).map(key => ({ label: () => `[${resolveSidebarTabs(animationOptions)[key] === "on" ? "x" : " "}] ${key === "memLocal" ? "Engram local" : "Engram cloud"}`, indent: 2, visible: () => resolveSidebarTabs(animationOptions).mem === "on", action: () => saveTabs(resolveSidebarTabs(animationOptions)[key] === "on" ? "off" : "on", key) })) as never[] : [])),
 			] });
 			category = "Cards";
 			// One live style for conversation cards, panels, header/footer and prompt.
