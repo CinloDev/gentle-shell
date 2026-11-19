@@ -29,7 +29,7 @@ export interface SessionStats {
 	turns: number;
 	toolCalls: number;
 	toolErrors: number;
-	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. Absent in aggregates that do not track per-tool detail (for example the desktop feed). */
+	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. Absent when the stats come from a fold that does not track tools (the Desktop feed). */
 	tools?: ToolStats[];
 	/** From the first to the last dated entry. */
 	spanMs: number;

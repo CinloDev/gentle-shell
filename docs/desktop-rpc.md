@@ -62,12 +62,12 @@ Returns the currently implemented contract; clients must not infer support from 
   "schema": "gentle-shell.desktop-rpc/v1",
   "command": "gentle:desktop",
   "widget": "gentle-desktop-rpc",
-  "methods": ["capabilities", "get_snapshot", "get_config", "set_config", "get_permission_mode", "set_permission_mode", "get_subscription_usage", "refresh_subscription_usage", "get_design_canvas", "list_jobs", "cancel_job", "get_job_output", "apply_profile", "list_subagents", "cancel_subagent", "get_subagent_thread", "list_sessions", "switch_session", "get_changes", "get_change_diff", "get_review_mode", "set_review_mode"],
+  "methods": ["capabilities", "get_snapshot", "get_config", "set_config", "get_permission_mode", "set_permission_mode", "get_subscription_usage", "refresh_subscription_usage", "get_design_canvas", "list_jobs", "cancel_job", "get_job_output", "apply_profile", "list_subagents", "cancel_subagent", "get_subagent_thread", "list_sessions", "switch_session", "get_changes", "get_change_diff", "get_review_mode", "set_review_mode", "get_usage_stats", "get_update_status"],
   "events": ["config_changed", "permission_mode_changed", "rate_limit", "design_canvas", "jobs_update", "profile_applied", "agents_update", "review_mode_changed", "session_snapshot"]
 }
 ```
 
-The permission methods, the bounded config read and write, the subscription-usage read and refresh, the design-canvas read, the background-jobs list, cancel, and output read, the profile apply, the subagents list, cancel, and thread read, the review-mode read and change, and the `config_changed`, `permission_mode_changed`, `rate_limit`, `design_canvas`, `jobs_update`, `profile_applied`, `agents_update`, and `review_mode_changed` events are advertised because this extension wires them. `set_config` and `config_changed` are advertised only because the config bridge actually implements that writer — advertising is not a forward-looking wish list. The design slice advertises exactly its one read method and its one transition event, not the canvas `open`/`stop` actions, which stay the `gentle_design` tool's job. The jobs slice advertises exactly its list, cancel, and output-read methods and its one registry-change event, not the `bash_background`/`monitor` start tools, which stay agent tools. The profiles slice advertises exactly its one apply method and its one applied event; profile edits stay `set_config`. The subagents slice advertises exactly its list, cancel, and thread-read methods and its one transition event, not the agent dispatch tools, which stay agent tools. `session_snapshot` is the one entry that depends on the session: it is listed only while the feed owner seam (`extensions/gentle-desktop-feed.ts`) is wired for this session, and absent otherwise; the `get_snapshot` method itself is always listed. The review slice advertises exactly its read and change methods and its one change event; review start, skip, and consent stay terminal-only. Method availability is not a claim that every dependency is loaded — see [Permission limits](#permission-limits), [Configuration limits](#configuration-limits), [Usage limits](#usage-limits), [Design limits](#design-limits), [Jobs limits](#jobs-limits), [Profiles limits](#profiles-limits), [Subagents limits](#subagents-limits), and [Review limits](#review-limits).
+The permission methods, the bounded config read and write, the subscription-usage read and refresh, the design-canvas read, the background-jobs list, cancel, and output read, the profile apply, the subagents list, cancel, and thread read, the review-mode read and change, the cross-session usage-stats read, the update-status read, and the `config_changed`, `permission_mode_changed`, `rate_limit`, `design_canvas`, `jobs_update`, `profile_applied`, `agents_update`, and `review_mode_changed` events are advertised because this extension wires them. `set_config` and `config_changed` are advertised only because the config bridge actually implements that writer — advertising is not a forward-looking wish list. The design slice advertises exactly its one read method and its one transition event, not the canvas `open`/`stop` actions, which stay the `gentle_design` tool's job. The jobs slice advertises exactly its list, cancel, and output-read methods and its one registry-change event, not the `bash_background`/`monitor` start tools, which stay agent tools. The profiles slice advertises exactly its one apply method and its one applied event; profile edits stay `set_config`. The subagents slice advertises exactly its list, cancel, and thread-read methods and its one transition event, not the agent dispatch tools, which stay agent tools. `session_snapshot` is the one entry that depends on the session: it is listed only while the feed owner seam (`extensions/gentle-desktop-feed.ts`) is wired for this session, and absent otherwise; the `get_snapshot` method itself is always listed. The review slice advertises exactly its read and change methods and its one change event; review start, skip, and consent stay terminal-only. The stats slice advertises exactly its one read method and no event: usage stats are an explicit read. The updates slice advertises exactly its one read method and no event; running an update stays the launcher's job. Method availability is not a claim that every dependency is loaded — see [Permission limits](#permission-limits), [Configuration limits](#configuration-limits), [Usage limits](#usage-limits), [Design limits](#design-limits), [Jobs limits](#jobs-limits), [Profiles limits](#profiles-limits), [Subagents limits](#subagents-limits), [Review limits](#review-limits), [Stats limits](#stats-limits), and [Updates limits](#updates-limits).
 
 ### `get_snapshot`
 
@@ -960,6 +960,57 @@ Only the `id` and `sinceVersion` keys are accepted; any other key, a non-string 
 
 Tool args and output are the subagent's own data: they contain whatever its tools received and printed, which can include file contents, command output, or anything else the subagent read. They are bounded, not redacted. Text, thinking, and note items are likewise the subagent's own output (a note can carry an error message). Prompt text, the working directory, the session path, the tool call id, and the result are not part of a thread item.
 
+### `get_usage_stats`
+
+Reads cross-session usage — the same history `/gentle:stats` shows — through the stats owner's own loader and the same `aggregateStats` aggregation the panel runs, so the panel and Desktop never disagree. Params are optional `range` and `scope`.
+
+```json
+{ "schema": "gentle-shell.desktop-rpc/v1", "requestId": "desktop-61", "method": "get_usage_stats", "params": { "range": "30d", "scope": "all" } }
+```
+
+| Param | Required | Values | Meaning |
+| --- | --- | --- | --- |
+| `range` | no | `7d` (default), `30d`, `all` | The local calendar days counted: the last 7 or 30 days including today, or everything. |
+| `scope` | no | `project` (default), `all` | `project` counts only sessions whose working directory is this session's; `all` counts every session. |
+
+Any other key, or any other value (including `null`), is rejected as `invalid_request` before the owner is asked. A read has no side effect: it never writes, and never emits an event.
+
+Success:
+
+```json
+{
+  "schema": "gentle-shell.desktop-rpc/v1",
+  "kind": "response",
+  "requestId": "desktop-61",
+  "ok": true,
+  "data": {
+    "range": "30d",
+    "scope": "all",
+    "totals": { "sessions": 3, "messages": 4, "inputTokens": 1310, "outputTokens": 155, "cacheReadTokens": 1000, "cacheWriteTokens": 200, "totalTokens": 2665, "cost": 1.76 },
+    "byModel": [
+      { "model": "claude-opus-5-5", "messages": 2, "tokens": 1365, "cost": 0.51, "share": 0.512 },
+      { "model": "gpt-5.5", "messages": 2, "tokens": 1300, "cost": 1.25, "share": 0.488 }
+    ],
+    "byDay": [{ "day": "2026-09-20", "tokens": 1000 }, { "day": "2026-10-08", "tokens": 300 }, { "day": "2026-10-09", "tokens": 1365 }],
+    "byProject": [
+      { "name": "alpha", "sessions": 2, "messages": 3, "tokens": 2365, "cost": 1.51 },
+      { "name": "beta", "sessions": 1, "messages": 1, "tokens": 300, "cost": 0.25 }
+    ],
+    "truncated": { "byModel": false, "byDay": false, "byProject": false }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `totals` | Sessions with at least one assistant usage record in range, those records (`messages`), their token counts, `totalTokens` (each record's own total, or the sum of its parts when it has none), and `cost` in the provider's currency units. Totals always cover the whole range, even when an array below is truncated. |
+| `byModel` | One row per model id, largest `tokens` first; `share` is the model's fraction of `totals.totalTokens`. At most 50 rows. |
+| `byDay` | Tokens per local calendar day (`YYYY-MM-DD`) with any usage, oldest first. At most 400 rows: the most recent days are kept. |
+| `byProject` | Present only for `scope: "all"`. One row per working directory, shown by its display name (the last path segment, never the path), largest `tokens` first. Two directories with the same last segment stay two rows. At most 50 rows. |
+| `truncated` | `true` for each array that had more rows than its bound. `byProject` appears only with `byProject`. |
+
+Model ids and project names longer than 128 characters are cut. No session id, path, provider, prompt, or message text ever crosses the wire. The panel's other figures (streaks, most active day, longest session) are not part of this answer. When no sessions root can be read, or the stats owner is not loaded, the answer is `stats_unavailable` — never a fabricated zero.
+
 ### `apply_profile`
 
 Applies one saved profile through the `/gentle:profiles` screen's own actions: `mode: "default"` runs **Make default for new sessions**, and `mode: "session"` runs **Use in this session**. There is no second apply implementation, so the diff confirmation, the pinned-repository rule, and the rollback are the screen's own.
@@ -1269,6 +1320,64 @@ The semantics are the owner's own. A machine-wide off wins over a repository set
 
 Only one `set_review_mode` runs at a time in a Pi process. A request that arrives while another is running answers `review_mode_busy` and changes nothing. `get_review_mode` is never blocked.
 
+### `get_update_status`
+
+Reports whether Gentle Shell, Pi, and Pi's packages have updates, from the sources that already own those answers: Gentle Shell's own channel and version resolution, the release lookup `gentle-shell upgrade` uses, and Pi's own package update check (the one behind its "Package updates are available" notice). The only param is an optional `refresh`.
+
+```json
+{ "schema": "gentle-shell.desktop-rpc/v1", "requestId": "desktop-71", "method": "get_update_status", "params": { "refresh": true } }
+```
+
+| Param | Required | Values | Meaning |
+| --- | --- | --- | --- |
+| `refresh` | no | `false` (default), `true` | `false` answers from what is already known and does no network work: the launcher's recorded release lookup (`startupReleaseCheck` in the launcher config) and the result of an earlier refresh in this Pi process. `true` runs the lookups once, all bounded by one 15-second deadline; concurrent refreshes share one run. |
+
+Any other key, or a non-boolean `refresh` (including `null`), is rejected as `invalid_request` before anything is read. A read has no side effect: a refresh result lives only in this process's memory, nothing is written (not even the launcher's cache), and no event is emitted.
+
+Success:
+
+```json
+{
+  "schema": "gentle-shell.desktop-rpc/v1",
+  "kind": "response",
+  "requestId": "desktop-71",
+  "ok": true,
+  "data": {
+    "refreshed": true,
+    "offline": false,
+    "gentleShell": { "current": "4.8.0", "latest": "4.9.0", "channel": "release", "state": "update_available", "command": "gentle-shell upgrade", "checkedAt": "2026-11-17T12:00:00.000Z" },
+    "pi": { "current": "1.5.2", "latest": null, "state": "unknown", "command": "gentle-shell update", "checkedAt": null },
+    "packages": {
+      "available": true,
+      "items": [
+        { "name": "pi-web-access", "kind": "npm", "scope": "user", "current": "1.4.0", "latest": null, "pinned": false, "state": "update_available" },
+        { "name": "github.com/user/repo", "kind": "git", "scope": "project", "current": null, "latest": null, "pinned": true, "state": "skipped" }
+      ],
+      "truncated": false,
+      "command": "gentle-shell update --extensions",
+      "checkedAt": "2026-11-17T12:00:00.000Z"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `refreshed` | `true` only when this answer ran the lookups (`refresh: true` and not offline). |
+| `offline` | `PI_OFFLINE` is set (any value). Then nothing is looked up, even with `refresh: true`, and every looked-up item of a refresh answers `unknown`. A plain read still shows earlier answers with their `checkedAt`. |
+| `gentleShell.channel` | `bundled` (a bundled prefix install), `gentle-ai-managed` (gentle-pi loaded as the `npm:gentle-pi` Pi package, the way the Gentle AI managed stack declares it), `main` or `release` (the channel record `gentle-shell upgrade` keeps; no record means `release`), or `unknown` when that record cannot be read. |
+| `gentleShell.latest` | The latest stable `gentle-pi` release; for `main`, the first 12 characters of the latest `main` commit. `null` when unknown. |
+| `gentleShell.command`, `pi.command`, `packages.command` | Fixed text for that kind of install: `gentle-shell upgrade` (`release`, `bundled`), `gentle-shell upgrade --channel main` (`main`), `gentle-shell update --extensions` (`gentle-ai-managed`, and packages), and `gentle-shell update` (Pi). `null` for an `unknown` channel. Never built from user input. |
+| `state` (Gentle Shell, Pi) | `update_available` when the latest version is newer (the launcher's own stable-version comparison; for `main`, the running version does not carry the latest commit), `up_to_date` only when a successful lookup returned exactly the running version, otherwise `unknown`: never looked up, offline, failed, timed out, or not comparable (a prerelease or a newer local build). |
+| `pi.latest` | Only a bundled install can name the latest Pi (its own `publishedPi` lookup). Elsewhere the latest Pi is resolved only through the package manager that owns it while `gentle-shell update` runs, so it stays `null` and `unknown`. |
+| `packages.items` | One row per configured Pi package (Pi's own listing), in Pi's order, at most 100. `name` is Pi's display name (npm name or `host/path`) or a local package's last path segment; `current` is an installed npm package's version. |
+| `packages.items[].state` | `update_available` when Pi's check reports a newer version; `no_update_reported` when it did not (Pi's check treats a failed lookup like "no update", so this is never claimed as up to date); `skipped` for a package Pi never checks (pinned, local, or not installed); `unknown` when not checked yet, offline, the check failed or timed out, or Pi's parser could not classify the source. |
+| `packages.items[].latest` | Pi's check reports only that a newer version exists, not which one: always `null`. |
+| `packages.available` | `false` when Pi's package listing could not be read; `items` is then empty. |
+| `checkedAt` | When the answer shown was looked up (ISO 8601), per item: a refresh's time, or the launcher's recorded lookup time. `null` when no lookup backs the answer. |
+
+No absolute path, raw package source, registry URL, token, command line, or lookup output crosses the wire. A failed lookup is reported as `unknown`, never by its message. Running an update is out of scope: the client shows the command, and the launcher runs it. `updates_unavailable` answers only when the session is not bound or was replaced during the read, or a source fails unexpectedly.
+
 ## Responses
 
 Success:
@@ -1298,7 +1407,7 @@ Failure:
 }
 ```
 
-Current error codes are `invalid_request`, `unknown_store`, `read_only`, `invalid_data`, `revision_conflict`, `write_failed`, `unsupported_method`, `permission_unavailable`, `permission_denied`, `config_unavailable`, `usage_unavailable`, `design_unavailable`, `jobs_unavailable`, `agents_unavailable`, `profiles_unavailable`, `unknown_profile`, `profile_apply_busy`, `sessions_unavailable`, `session_switching`, `review_unavailable`, `review_mode_busy`, `not_found`, and `internal_error`. A request that cannot supply a valid correlation ID uses `requestId: null`. State/provider failures use the generic `internal_error` message rather than exposing raw paths, credentials, or provider errors. Transport failures from `setWidget` are never retried as a second response.
+Current error codes are `invalid_request`, `unknown_store`, `read_only`, `invalid_data`, `revision_conflict`, `write_failed`, `unsupported_method`, `permission_unavailable`, `permission_denied`, `config_unavailable`, `usage_unavailable`, `design_unavailable`, `jobs_unavailable`, `agents_unavailable`, `profiles_unavailable`, `unknown_profile`, `profile_apply_busy`, `sessions_unavailable`, `session_switching`, `review_unavailable`, `review_mode_busy`, `stats_unavailable`, `not_found`, and `internal_error`. A request that cannot supply a valid correlation ID uses `requestId: null`. State/provider failures use the generic `internal_error` message rather than exposing raw paths, credentials, or provider errors. Transport failures from `setWidget` are never retried as a second response.
 
 | Code | Meaning |
 | --- | --- |
@@ -1324,6 +1433,7 @@ Current error codes are `invalid_request`, `unknown_store`, `read_only`, `invali
 | `session_switching` | A `switch_session` was in flight when this request arrived (or the switch tore the session down while this request waited on an owner). Nothing was done; retry after the switch answers. |
 | `review_unavailable` | The review-mode owner did not answer for this session (extension not loaded, subagent child, or no Desktop command bound a session context), `gentle-ai` is not installed or does not support `review mode`, `set_review_mode` could not read the current state, or a write's outcome is unknown. The message says which; it never carries a path, CLI output, or a command line. |
 | `review_mode_busy` | A `set_review_mode` is still running. Nothing was written by this request. |
+| `stats_unavailable` | No sessions root could be read, or the stats owner did not answer for this session (the owning extension is not loaded, or the session changed). Nothing was read. |
 | `not_found` | `cancel_job` or `get_job_output` named a job id, or `cancel_subagent` or `get_subagent_thread` named a subagent id, that does not exist, belongs to another session, or was already evicted by the store; or `switch_session` named an id that does not resolve in the requested scope; or `get_change_diff` named a root and path that are not a file in the owner's current change set. Nothing was stopped, read, or switched. |
 | `internal_error` | Unexpected failure; message stays generic. |
 
@@ -1632,7 +1742,7 @@ Follows a confirmed `set_review_mode` whose re-read state differs from the state
 - The methods delegate to the Gentle AI extension's permission owner in the same Pi process. When that extension is not loaded, both methods answer `permission_unavailable` instead of guessing state.
 - Session changes require the owner's interactive-host admission: the TUI, or an RPC process with `GENTLE_SHELL_INTERACTIVE_HOST=1`. Headless RPC children and subagent children stay closed exactly as before.
 - Permission control is never an agent-callable tool; only `/gentle:desktop` over the interactive RPC channel reaches it.
-- Permission state adds no filesystem watcher and no second store: external `permission_mode_changed` events follow the owner's in-process observer. Config is limited to the `get_config` and `set_config` contract in [Configuration limits](#configuration-limits); subscription usage is limited to the `get_subscription_usage` and `refresh_subscription_usage` contract in [Usage limits](#usage-limits); background jobs are limited to the `list_jobs`, `cancel_job`, and `get_job_output` contract in [Jobs limits](#jobs-limits); subagents are limited to the `list_subagents`, `cancel_subagent`, and `get_subagent_thread` contract in [Subagents limits](#subagents-limits); changed files are limited to the `get_changes` and `get_change_diff` contract in [Changes limits](#changes-limits); music and any Desktop client change are not implemented.
+- Permission state adds no filesystem watcher and no second store: external `permission_mode_changed` events follow the owner's in-process observer. Config is limited to the `get_config` and `set_config` contract in [Configuration limits](#configuration-limits); subscription usage is limited to the `get_subscription_usage` and `refresh_subscription_usage` contract in [Usage limits](#usage-limits); background jobs are limited to the `list_jobs`, `cancel_job`, and `get_job_output` contract in [Jobs limits](#jobs-limits); subagents are limited to the `list_subagents`, `cancel_subagent`, and `get_subagent_thread` contract in [Subagents limits](#subagents-limits); changed files are limited to the `get_changes` and `get_change_diff` contract in [Changes limits](#changes-limits); cross-session usage is limited to the `get_usage_stats` read in [Stats limits](#stats-limits); update status is limited to the `get_update_status` read in [Updates limits](#updates-limits); music and any Desktop client change are not implemented.
 - Requests are not queued. Pi's own RPC loop dispatches prompts concurrently, so overlapping `set_permission_mode` calls reach the owner in whatever order their own reads finish, and one can apply right after the other. What stays guaranteed: every request gets exactly one correlated response, responses never cross, and each response and its optional event are published as an adjacent pair with a monotonic `seq`. Send permission requests one at a time and correlate with `requestId`; the maintainer probe does exactly that.
 
 ### Trust boundary
@@ -1735,6 +1845,25 @@ Follows a confirmed `set_review_mode` whose re-read state differs from the state
 - **A reset never writes late.** When the session is replaced or shut down while a confirmed `set_review_mode` is still discovering the owner or reading the current state, the write is not attempted and no event is emitted. That request gets no answer, because the router drops outcomes for a superseded session. A client that got no answer re-reads with `get_review_mode` and asks again.
 - **Truthful absence.** When the owning extension is not loaded, both methods answer `review_unavailable` rather than inventing a mode.
 
+## Stats limits
+
+- **One owner, one loader, one aggregation.** `get_usage_stats` reaches the `/gentle:stats` owner in `extensions/gentle-stats.ts` through a defensive, versioned owner-service adapter, the stats analogue of the jobs seam. The owner reads the same sessions roots as the panel (the active home and the user's original Pi home) with the panel's own loader instance, so both share one size/mtime cache: an unchanged session file is never re-read. Totals, models, and days come from the panel's `aggregateStats` with the requested range and scope; each project row is that same aggregation scoped to one project. There is no second parser, cache, or store.
+- **Shared in-flight load.** The loader answers concurrent loads of the same roots with one in-flight scan, so overlapping Desktop requests (or a request while the panel is loading) read the history once. The scan is asynchronous and streams files line by line; nothing is persisted.
+- **Read only, no event.** This slice has exactly one method and no event. History changes as sessions run; a client re-reads when it wants fresh numbers.
+- **Safe, bounded projection.** The wire carries counts, token sums, costs, model ids, day keys, and project display names only. Arrays are capped (models 50, days 400, projects 50) with a `truncated` flag per array; totals stay complete. A session's id, path, provider, or message text never crosses, and a raw read failure is answered with the fixed `stats_unavailable` message.
+- **Truthful absence.** When no sessions root can be read, or the owner is not loaded, the answer is `stats_unavailable`. A readable root with no usage answers zeros, which is the truth.
+- **Same numbers as the panel, including its gaps.** Records the panel counts are counted here too: an assistant record with zero usage still counts as a message (see #1921). This slice does not change what the aggregation counts.
+
+## Updates limits
+
+- **One source of truth.** Every fact comes from an existing resolver or check, imported, never copied: `runningBundledPrefix`, Pi's `DefaultPackageManager` listing, and `readChannel` for the channel; `latestRelease` and `resolveMainCommit` (the lookups `gentle-shell upgrade` uses) for Gentle Shell; the launcher's `startupReleaseCheck` record through `parseStartupReleaseCache` for the cached release; `findStartupUpdate`'s stable-version comparison; Pi's exported `VERSION`; `publishedPi` for a bundled Pi; and Pi's own `checkForAvailableUpdates` for packages. Pi's source parser (`parseSource`) is not part of Pi's typed surface; it is called defensively, and a parser that is missing or changed reports the package as `unknown`.
+- **Cache only without `refresh`.** A plain read never reaches the network. It reads the launcher config, the channel record, Pi's settings, and installed packages' `package.json`. Pi's listing may ask npm for its global root once when a user package is not in Pi's own install folder, exactly as `pi list` does.
+- **Bounded refresh.** One deadline (15 seconds) bounds every lookup; a lookup that ignores cancellation (Pi's package check cannot be cancelled) is dropped when the deadline passes and reported `unknown`. Concurrent refreshes share one run.
+- **Never "up to date" by default.** Only a successful lookup that returned exactly the running version is `up_to_date`. Failed, offline, timed-out, or incomparable answers are `unknown`, and a package Pi's check did not list is `no_update_reported`, because Pi's check cannot tell a failed lookup from no update.
+- **Memory only.** A refresh result is kept in this Pi process's memory and answers later plain reads (across a session switch too); it is never written, so the launcher's own cache and its startup notice are unchanged.
+- **Gaps stated.** Pi's latest version is known only in a bundled install. Package `latest` is always `null`. A git package has no `current`. `gentle-ai-managed` is detected only when the running gentle-pi is the `npm:gentle-pi` package Pi installed.
+- **Read only, no event.** This slice has exactly one method and no event, and it never runs an update.
+
 ## Verification
 
 ```sh
@@ -1753,6 +1882,8 @@ node --experimental-strip-types --test \
   tests/desktop-rpc-changes.test.ts \
   tests/change-diff.test.ts \
   tests/desktop-rpc-review.test.ts \
+  tests/desktop-rpc-stats.test.ts \
+  tests/desktop-rpc-updates.test.ts \
   tests/maintainer/desktop-rpc.maintest.ts
 ```
 
@@ -1774,6 +1905,10 @@ The profiles tests use a fake owner service only: they cover param validation, o
 
 The review tests use a fake owner service and a fake native review adapter only; they never run `gentle-ai`, so nothing on the machine is toggled. They cover the wire projection of every source and scope, fail-closed `unknown` on a failed, timed-out, malformed, or throwing read, `review_unavailable` for a missing owner, host, adapter, or unsupported command, strict params rejected before discovery, the first call writing nothing, a matching token writing then re-reading, wrong and stale tokens asking again with a fresh token, the process-wide single-flight gate, clone enable under a global off (dialog text and a `changed: false` no-op), a scope-only change emitting the event, failed writes emitting nothing and carrying no CLI detail, the response-before-event order over the transport, and the versioned adapter discovery. They also load the real `extensions/gentle-ai.ts` owner over a fake adapter to prove the STATUS, write-with-scope, re-read call sequence, the error classification, the bounded read, and that a subagent child never answers.
 
+The stats tests write session files into a temporary sessions root outside the worktree and load the real `gentle-stats` owner with the real Desktop transport: they cover the advertised method with no new event, the 7-day/current-project defaults, every range and scope against `aggregateStats`, project display names and the absence of paths, session ids, providers, and message text, the model/day/project bounds with `truncated` and complete totals, reads through the owner's single loader with concurrent requests sharing one load, invalid params rejected before any load, `stats_unavailable` for unreadable roots and for an absent owner, the owner leaving the bus on shutdown, a session reset dropping an in-flight read, throwing or malformed owner reads, and the versioned adapter discovery. `tests/stats-collector.test.ts` pins the shared in-flight load and the readable-root check.
+
+The update-status tests drive the real Desktop transport with injected sources that count every lookup that would reach the network: they cover the advertised method with no new event, plain reads answering from the launcher's recorded lookup with no network work, a refresh running each lookup once with its check time and later plain reads answering from it, `up_to_date` only for an exact match after a successful lookup, newer local builds and prereleases staying `unknown`, failed lookups answering `unknown` with no error text on the wire while plain reads keep the last good result, the refresh deadline with lookups that never settle, concurrent refreshes sharing one run, `PI_OFFLINE` doing no lookup and claiming nothing, the main-channel commit comparison, each channel's fixed command, Pi without a reachable latest source, every package state, the 100-row bound with `truncated`, an unreadable listing, display names free of paths, URLs, and credentials, params rejected before any source work, and `updates_unavailable` for an unbound session, a throwing source, and a read a reset superseded. Two tests run the real sources against a temporary agent dir, launcher config, channel record, and a fake fetch: Pi's own listing and parser, the launcher's release record, the channel record (missing, `main`, malformed), Pi's `VERSION`, the release lookup's single request, and Pi's own package check reporting nothing under `PI_OFFLINE`.
+
 The config tests build six stores in a temporary root and inject the worktree identity, so no real user config, agent home, or repository pin is read. On the read side they cover every store, current path precedence, missing and malformed layers, revision stability and change, the read-only split, rejected stores/params/paths, the bounded snapshot projection, and a byte-and-mtime comparison proving a read never mutates a store. On the write side they cover a valid write for each writable store and both pin layers, clearing either pin layer and observing the winner fall back, clearing an already-missing layer as a no-op, clearing and replacing an unreadable layer, creating a missing store, a stale or missing `expectedRevision` (including on a clear), the documented rejection order (envelope, then store identity, then mutability, then revision, then payload), data the owner would drop, malformed pin clear shapes, extra and physical-path keys, every read-only store, a forced owner write failure (the store path is a directory) answering `write_failed` with no path, OS code, or event and an unchanged tree, the no-op path with untouched bytes and mtime, the resulting disk bytes, revision movement and its invalid-state coarseness, the response-then-event order over the real transport, and that a stopped session neither answers nor writes. They also re-check that the config dispatcher still falls through to the permission bridge.
 
 The external-change tests inject the directory watcher factory and a fake clock, so no assertion depends on real filesystem notification timing. They cover debounce coalescing and window restart, name filtering in shared directories, the real `fs.watch` watcher closing itself when its directory is removed (on Windows a removed directory otherwise keeps the process alive), watcher-creation failure (one directory and every directory) leaving `get_config`, `get_snapshot`, and `set_config` working with no error and no event, an external `profiles` edit producing one `config_changed` with `source: "external"` and no content or path, unchanged recomputed revisions (reformatting, change-and-undo) emitting nothing, a Desktop `set_config` never echoed as external, pin layers watched in the session worktree and re-targeted when the cwd changes, the cwd-dependent stores re-read and announced once on a re-target, a change still debounced when the cwd moves flushed rather than lost, a removed owner directory re-armed through its ancestor with exactly one event after it is recreated and written, a Desktop `profiles` write that makes a pin stale reported as one external `pins` event, a missing owner directory watched through its nearest existing ancestor and upgraded step by step (and closed on dispose), real `fs.watch` runs (rename-replace, Desktop write without echo, delete, recreate, a late `.pi/` directory, a local pin written into a fresh `<git-common-dir>/gentle-ai/`, nothing after reset), disposal on session shutdown and session switch (watchers closed, pending recompute cancelled, nothing published), no watcher and no owner subscription for TUI or headless hosts, `/gentle:mode` and `/gentle:mode default` producing external `permission_mode_changed` events over the real `registerYoloSessionPolicy` owner, a Desktop `set_permission_mode` never echoed (including an owner window that closes while the set is in flight), an external change right after a Desktop set's response still reported, a throwing emitter never propagating, a re-read in flight across a reset never emitting, `wire()` never rejecting when the owner throws, observation stopping on shutdown and restarting with a fresh sequence, and a missing permission owner leaving config events intact.
@@ -1791,5 +1926,6 @@ The maintainer probes run the installed Pi runtime with isolated HOME, agent hom
 7. jobs owner — the real `extensions/gentle-agents.ts` jobs owner is loaded alongside this extension, and the probe reads `list_jobs` and observes the truthful owner-loaded empty list (`jobs: []`) with no event and no command or output path on the wire. It never starts a job;
 8. subagents owner — the real `extensions/gentle-agents.ts` subagents owner is loaded alongside this extension, and the probe reads `list_subagents` and observes the truthful owner-loaded empty list (`agents: []`) with no event and no prompt text, session path, or working directory on the wire. It never starts a child;
 9. sessions — with a session pre-seeded in the probe's `--session-dir`, the probe lists it through `list_sessions`, switches to it by id, receives the correlated response from the replacement session, reads `get_snapshot` at sequence 0, sees the session listed as `current`, gets `changed: false` for a second switch, and reads the seeded conversation through Pi's `get_messages`. No session file or absolute path appears on the wire. Three more probes send requests back to back right after a `switch_session` and check that each gets exactly one response and that the session then listed as current matches the switch that answered `changed: true`: another switch plus `list_sessions` (each `session_switching` or a real answer); a second switch to the same id (`session_switching`, final session unchanged); and `get_snapshot`, `capabilities`, and `list_jobs` (each `session_switching`).
+10. update status — with `PI_OFFLINE=1`, the probe reads `get_update_status` plainly and with `refresh: true`, and observes `offline: true`, `refreshed: false`, the `release` channel and its fixed command, Pi's real version with an `unknown` latest, an empty package list, no `up_to_date` claim, no event, and no absolute path on the wire. It never reaches the network.
 
 What this does not prove: a live Desktop conversation approving the request. The probe writes RPC stdin itself, so it demonstrates that the production owner accepts the change and reports it truthfully, not that a person consented. It also does not cover `persist: true` end to end; persistence is covered by the owner and focused unit tests. Nothing in this slice proves a cross-process guarantee either: the probes use one process, which is exactly the scope `expectedRevision` provides. The design probe does not prove a live browser canvas: it only proves the owner-loaded stopped state without starting a server, while open/refresh/stop transitions and URL trust are covered by the injected-canvas unit tests. The jobs probe does not prove a live job or a live `cancel_job` kill: it only proves the owner-loaded empty list without starting a job, while the stop path, terminal idempotency, and events are covered by the fake-registry unit tests. The subagents probe does not prove a live subagent or a live `cancel_subagent` of a running child: it only proves the owner-loaded empty list without starting a child, while the runner cancel path, terminal idempotency, and events are covered by the fake-runner unit tests.
