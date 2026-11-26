@@ -3,9 +3,9 @@
 // one instead of re-walking the whole history. Per-entry rules stay in
 // collectSessionStats (lib/shell-stats.ts), which folds each new slice; this
 // module only adds the slices together, so the result is the same as one
-// collectSessionStats over every entry.
+// collectSessionStats over every entry, without the terminal-only tool breakdown.
 
-import { collectSessionStats, type ModelStats, type SessionStats, type ToolStats } from "./shell-stats.ts";
+import { collectSessionStats, type ModelStats, type SessionStats } from "./shell-stats.ts";
 
 interface Totals {
 	cost: number;
@@ -19,10 +19,11 @@ interface Totals {
 	first: number;
 	last: number;
 	models: Map<string, ModelStats>;
-	tools: Map<string, ToolStats>;
 }
 
-const empty = (): Totals => ({ tools: new Map(), cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, first: Infinity, last: -Infinity, models: new Map() });
+const desktopStatsOptions = { includeToolBreakdown: false };
+
+const empty = (): Totals => ({ cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, first: Infinity, last: -Infinity, models: new Map() });
 
 // The same dating rule collectSessionStats applies to every entry (for the session span).
 function entryTime(entry: unknown): number {
@@ -40,11 +41,6 @@ function add(totals: Totals, part: SessionStats): void {
 	totals.turns += part.turns;
 	totals.toolCalls += part.toolCalls;
 	totals.toolErrors += part.toolErrors;
-	for (const tool of part.tools ?? []) {
-		const known = totals.tools.get(tool.name);
-		if (known) { known.calls += tool.calls; known.errors += tool.errors; }
-		else totals.tools.set(tool.name, { ...tool });
-	}
 	for (const model of part.models) {
 		const known = totals.models.get(model.model);
 		if (known) { known.turns += model.turns; known.tokens += model.tokens; known.cost += model.cost; }
@@ -74,7 +70,8 @@ export function createSessionStatsFold(): SessionStatsFold {
 			const slice = entries.slice(count);
 			// One entry at a time after the first walk: sums keep the order of a full walk, so the
 			// floating-point totals are the same ones collectSessionStats gives.
-			for (const part of count === 0 ? [collectSessionStats(slice)] : slice.map((entry) => collectSessionStats([entry]))) add(totals, part);
+			if (count === 0) add(totals, collectSessionStats(slice, desktopStatsOptions));
+			else for (const entry of slice) add(totals, collectSessionStats([entry], desktopStatsOptions));
 			for (const entry of slice) {
 				const at = entryTime(entry);
 				if (Number.isFinite(at)) {
@@ -97,7 +94,6 @@ export function createSessionStatsFold(): SessionStatsFold {
 				spanMs: totals.last > totals.first ? totals.last - totals.first : 0,
 				cacheHitRate: prompt > 0 ? totals.cacheRead / prompt : undefined,
 				models: [...totals.models.values()].map((model) => ({ ...model })).sort((a, b) => b.cost - a.cost || b.tokens - a.tokens),
-				tools: [...totals.tools.values()].map((tool) => ({ ...tool })),
 			};
 			return result;
 		},

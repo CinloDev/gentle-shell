@@ -715,13 +715,13 @@ test("regenerateRegistry carries a skill resolved from a non-default PI_CODING_A
 	const cwd = join(tmpdir(), `gentle-pi-agentdir-cwd-${Date.now()}`);
 	const isolatedHome = join(tmpdir(), `gentle-pi-agentdir-home-${Date.now()}`);
 	const agentDir = join(tmpdir(), `gentle-pi-agentdir-root-${Date.now()}`);
-	const skillPath = join(agentDir, "skills", "codegraph", "SKILL.md");
+	const skillPath = join(agentDir, "skills", "external-tool", "SKILL.md");
 	mkdirSync(dirname(skillPath), { recursive: true });
-	writeFileSync(skillPath, "---\nname: codegraph\ndescription: Trigger: agent-dir skill.\n---\n");
+	writeFileSync(skillPath, "---\nname: external-tool\ndescription: Trigger: agent-dir skill.\n---\n");
 
 	const resolved: ResolvedSkill[] = [
 		{
-			name: "codegraph",
+			name: "external-tool",
 			description: "Trigger: agent-dir skill.",
 			filePath: skillPath,
 			sourceInfo: { scope: "user" },
@@ -1957,7 +1957,7 @@ test("P2 the skill-registry skill names only existing references and no runtime 
 	const root = join(import.meta.dirname, "..");
 	const skill = readFileSync(join(root, "skills", "skill-registry", "SKILL.md"), "utf8");
 	const references = skill.slice(skill.indexOf("## References"));
-	for (const [, path] of references.matchAll(/`([^`]+\.md)`/g)) assert.ok(existsSync(join(root, path)), `missing reference: ${path}`);
+	for (const [, path] of references.matchAll(/`([^`]+\.md)`/g)) assert.ok(existsSync(join(root, "skills", "skill-registry", path)), `missing reference: ${path}`);
 	assert.doesNotMatch(skill, /systemPromptOptions|pi\.skills|node_modules/);
 	assert.match(skill, /`<available_skills>`/);
 });
