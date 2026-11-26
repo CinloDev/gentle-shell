@@ -29,7 +29,7 @@ export interface SessionStats {
 	turns: number;
 	toolCalls: number;
 	toolErrors: number;
-	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. Absent when the stats come from a fold that does not track tools (the Desktop feed). */
+	/** Persisted tool results, grouped by sanitized identity without dropping provider prefixes. Absent when the tool breakdown is not collected (the Desktop feed). */
 	tools?: ToolStats[];
 	/** From the first to the last dated entry. */
 	spanMs: number;
@@ -55,10 +55,10 @@ type StatsEntry = {
 
 const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
 
-export function collectSessionStats(entries: readonly unknown[]): SessionStats {
-	const stats: SessionStats = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, spanMs: 0, cacheHitRate: undefined, models: [], tools: [] };
+export function collectSessionStats(entries: readonly unknown[], { includeToolBreakdown = true } = {}): SessionStats {
+	const stats: SessionStats = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, spanMs: 0, cacheHitRate: undefined, models: [] };
 	const models = new Map<string, ModelStats>();
-	const tools = new Map<string, ToolStats>();
+	const tools = includeToolBreakdown ? new Map<string, ToolStats>() : undefined;
 	let first = Infinity;
 	let last = -Infinity;
 	for (const raw of entries) {
@@ -73,6 +73,7 @@ export function collectSessionStats(entries: readonly unknown[]): SessionStats {
 		if (message?.role === "toolResult") {
 			stats.toolCalls++;
 			if (message.isError === true) stats.toolErrors++;
+			if (!tools) continue;
 			const name = (typeof message.toolName === "string" ? sanitizeTerminalText(message.toolName).replace(/[\x00-\x1f\x7f]/g, "").trim() : "") || "unknown";
 			const tool = tools.get(name) ?? { name, calls: 0, errors: 0 };
 			tool.calls++;
@@ -106,7 +107,7 @@ export function collectSessionStats(entries: readonly unknown[]): SessionStats {
 	const prompt = stats.input + stats.cacheRead + stats.cacheWrite;
 	stats.cacheHitRate = prompt > 0 ? stats.cacheRead / prompt : undefined;
 	stats.spanMs = last > first ? last - first : 0;
-	stats.tools = [...tools.values()];
+	if (tools) stats.tools = [...tools.values()];
 	stats.models = [...models.values()].sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
 	return stats;
 }

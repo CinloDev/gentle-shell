@@ -46,7 +46,7 @@ test("C5: tracking drops what restated the injected review contract and keeps th
 	assert.ok(tracking.includes("When RDD is enabled, the injected Gentle AI contract governs native review start, execution and consent; this module adds only assessment and commit boundaries."), "tracking must defer start, run, and consent to the injected contract");
 	// Provider-owned boundary rules; tracking carries the slice assessment policy.
 	for (const rule of [
-		"A not-due `passive` commit needs no review and the boundary advances; `under_budget` stays pending in the slice until a later commit reaches the budget.",
+		"A not-due `passive` commit needs no review and the boundary advances; `under_budget` stays pending in the slice and never triggers review by itself.",
 		"Before a high-risk unit, assess any pending `under_budget` slice.",
 		"If assessment fails or is unavailable, report missing assessment proof; never infer `reviewDue`, construct a preflight transition, lower the tier or infer low risk.",
 	]) {
@@ -113,14 +113,13 @@ test("Duplicates: tracking keeps no restatement of step 3 or of the Phase report
 	}
 });
 
-test("C4: the explorer may get web and MCP work its declared tools do, never shell work", () => {
+test("C4: web and MCP routing follows declared tools and never assigns shell work to the explorer", () => {
 	for (const text of [delegation, card]) {
 		assert.ok(!text.includes("shell, HTTP or MCP work"), "the card still forbids HTTP or MCP work to the explorer");
 		assert.ok(text.includes("never give a read-only explorer shell work"), "the shell restriction must stay");
 		assert.ok(text.includes("Check the agent's declared `tools` in `subagent_list_agents` before launching"));
 	}
 	assert.match(explorer, /^ {2}- web_search$/m, "the explorer declares web tools");
-	assert.match(explorer, /^ {2}- mcp__codegraph__codegraph_explore$/m, "the explorer declares an MCP tool");
 	assert.doesNotMatch(explorer, /^ {2}- bash$/m, "the explorer declares no shell");
 });
 

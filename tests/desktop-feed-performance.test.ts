@@ -306,19 +306,33 @@ test("S13: pi's command registry is read once per session start, not per flush",
 
 test("S13: session stats fold new entries instead of re-walking the session", () => {
 	let reads = 0;
+	let toolNameReads = 0;
 	const counted = (entry: Record<string, unknown>) => new Proxy(entry, { get(target, key, receiver) { if (key === "type") reads += 1; return Reflect.get(target, key, receiver); } });
-	const entries: unknown[] = Array.from({ length: 1000 }, (_, i) => counted(i % 2 ? toolResult(i) : assistant(i)));
+	const namedToolResult = (i: number) => {
+		const entry = toolResult(i);
+		return { ...entry, message: { ...entry.message, get toolName() { toolNameReads += 1; return "provider/read"; } } };
+	};
+	const desktopTotals = (history: readonly unknown[]) => {
+		// Named tool rows belong to terminal STAT; the feed keeps both aggregate counters.
+		const { tools: _tools, ...totals } = collectSessionStats(history);
+		return totals;
+	};
+	const entries: unknown[] = Array.from({ length: 1000 }, (_, i) => counted(i % 2 ? namedToolResult(i) : assistant(i)));
 	const fold = createSessionStatsFold();
-	assert.deepEqual(fold.update(entries), collectSessionStats(entries));
+	const initial = fold.update(entries);
+	assert.equal(toolNameReads, 0, "the desktop fold does not read tool identities on the initial walk");
+	assert.deepEqual(initial, desktopTotals(entries));
 	reads = 0;
-	entries.push(counted(assistant(1000)), counted(toolResult(1001)));
+	toolNameReads = 0;
+	entries.push(counted(assistant(1000)), counted(namedToolResult(1001)));
 	const folded = fold.update([...entries]);
 	assert.ok(reads <= 4, `${reads} entries read for 2 new ones`);
-	assert.deepEqual(folded, collectSessionStats(entries));
+	assert.equal(toolNameReads, 0, "the desktop fold does not read tool identities on append");
+	assert.deepEqual(folded, desktopTotals(entries));
 	// A different history (a new or switched session) starts over.
 	const other = [assistant(1), toolResult(2)];
-	assert.deepEqual(fold.update(other), collectSessionStats(other));
-	assert.deepEqual(fold.update([]), collectSessionStats([]));
+	assert.deepEqual(fold.update(other), desktopTotals(other));
+	assert.deepEqual(fold.update([]), desktopTotals([]));
 });
 
 test("S13: untracked line counts are cached by path, size and mtime", async () => {

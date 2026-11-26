@@ -165,7 +165,10 @@ function createFixture(columns: number, rowCount: number, sidebar: boolean, work
 		return [...((tui as unknown as { previousScreen: string[] }).previousScreen ?? [])];
 	};
 	render(); // establish native viewport height and scroll bounds before sampling
-	return { columns, rowCount, sidebar, workload, counts, document, viewport, tui, repository, history, render, stop: () => { dispose(); tui.stop(); } };
+	// Pi >= 1.6 reuses the previous frame's component output for view-only
+	// renders (scroll). Older Pi has no such flag and always re-renders.
+	const markContentChanged = () => { (tui as unknown as { contentChanged?: boolean }).contentChanged = true; };
+	return { columns, rowCount, sidebar, workload, counts, document, viewport, tui, repository, history, render, markContentChanged, stop: () => { dispose(); tui.stop(); } };
 }
 
 function measure(fixture: Fixture, invalidate = false, anchors?: number[]) {
@@ -180,7 +183,10 @@ function measure(fixture: Fixture, invalidate = false, anchors?: number[]) {
 	for (let repeat = 0; repeat < 3; repeat++) {
 		for (const position of positions) {
 			fixture.viewport.transcript.scrollTo(position, { disableFollow: true });
-			if (invalidate) fixture.document.invalidate();
+			if (invalidate) {
+				fixture.document.invalidate();
+				fixture.markContentChanged(); // content changes always re-render the document, even where scroll frames reuse output
+			}
 			const cpuStart = process.cpuUsage();
 			const start = performance.now();
 			const rawScreen = fixture.render();
@@ -237,7 +243,10 @@ test("characterize settled native fullscreen scroll frames with and without the 
 				const result = results[i]!;
 				assert.equal(result.screens.length, result.positions.length * 3);
 				assert.equal(result.rawScreens.length, result.screens.length);
-				assert.equal(result.renderCalls.transcript, result.positions.length * 3, "every scroll traverses the settled document");
+				// Settled scroll never needs more than one document render per frame;
+				// Pi >= 1.6 reuses cached output and may render it zero times. Frame
+				// correctness is asserted below.
+				assert.ok(result.renderCalls.transcript <= result.positions.length * 3, "a scroll frame renders the settled document at most once");
 				for (const [frame, screen] of result.screens.entries()) {
 					assert.equal(screen.length, 24, "native fullscreen retains terminal height");
 					assert.ok(screen.some((line) => line.startsWith("╭─ editor")), "editor remains visible");
@@ -302,8 +311,8 @@ test("wrapped ANSI and native Markdown distinguish width composition from settle
 				for (let index = 0; index < fixtures.length; index++) {
 					const hit = hits[index]!;
 					const miss = misses[index]!;
-					assert.equal(hit.renderCalls.transcript, 15);
-					assert.equal(miss.renderCalls.transcript, 15);
+					assert.ok(hit.renderCalls.transcript <= 15, "settled scroll renders the document at most once per frame");
+					assert.equal(miss.renderCalls.transcript, 15, "changed content re-renders the document every frame");
 					assert.equal(hit.rawScreens.length, 15);
 					assert.equal(miss.rawScreens.length, 15);
 					assert.deepEqual(hit.rawScreens, miss.rawScreens, "invalidating only the document preserves frame bytes");
@@ -382,7 +391,7 @@ test("the GIT destination keeps the transcript and header byte-identical to the 
 		// never re-renders the shared header.
 		assert.equal(on.renderCalls.transcript, off.renderCalls.transcript);
 		assert.equal(on.renderCalls.header, off.renderCalls.header);
-		assert.equal(on.renderCalls.transcript, off.positions.length * 3);
+		assert.ok(on.renderCalls.transcript <= off.positions.length * 3, "settled scroll renders the document at most once per frame");
 		// MAIN's own sections are not even digested while GIT is the destination.
 		assert.equal(off.renderCalls.railDigest, off.positions.length * 3, "the control digests its MAIN section every frame");
 		assert.equal(on.renderCalls.railDigest, 0, "GIT never reads a MAIN section digest");
@@ -417,10 +426,10 @@ test("a Git refresh repaints only its own section and renders nothing by itself"
 		await settle();
 		const settledFrame = fixture.render();
 		assert.doesNotMatch(settledFrame.join("\n"), /9b0c4d2/, "the new commit is not painted before the refresh");
-		// Settled: two frames cost two transcript renders and no section work.
+		// Settled: two frames cost at most two transcript renders and no section work.
 		const settled = { ...fixture.counts };
 		const frames = [fixture.render(), fixture.render()];
-		assert.equal(fixture.counts.transcript - settled.transcript, 2);
+		assert.ok(fixture.counts.transcript - settled.transcript <= 2);
 		assert.deepEqual(sectionCounts(fixture.counts), sectionCounts(settled));
 		// A repository change publishes one fingerprint and only requests a render.
 		fixture.repository.lines = REFRESHED_HISTORY;
@@ -442,7 +451,7 @@ test("a Git refresh repaints only its own section and renders nothing by itself"
 		// The following frame is settled again: no section work at all.
 		const after = { ...fixture.counts };
 		fixture.render();
-		assert.equal(fixture.counts.transcript - after.transcript, 1, "the next frame renders the transcript once");
+		assert.ok(fixture.counts.transcript - after.transcript <= 1, "the next frame renders the transcript at most once");
 		assert.deepEqual(sectionCounts(fixture.counts), sectionCounts(after), "the next frame is settled again: no section work at all");
 	} finally {
 		fixture.stop();
@@ -499,7 +508,7 @@ test("the PROFILE destination keeps the transcript and header byte-identical to 
 		// never re-renders the shared header.
 		assert.equal(on.renderCalls.transcript, off.renderCalls.transcript);
 		assert.equal(on.renderCalls.header, off.renderCalls.header);
-		assert.equal(on.renderCalls.transcript, off.positions.length * 3);
+		assert.ok(on.renderCalls.transcript <= off.positions.length * 3, "settled scroll renders the document at most once per frame");
 		// Unrelated sections are not even digested while PROFILE is the tab.
 		assert.equal(on.renderCalls.railDigest, 0, "PROFILE never reads a MAIN section digest");
 		assert.equal(on.renderCalls.rail, 0, "PROFILE never renders a MAIN section");

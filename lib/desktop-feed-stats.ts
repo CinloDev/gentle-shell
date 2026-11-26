@@ -3,7 +3,7 @@
 // one instead of re-walking the whole history. Per-entry rules stay in
 // collectSessionStats (lib/shell-stats.ts), which folds each new slice; this
 // module only adds the slices together, so the result is the same as one
-// collectSessionStats over every entry.
+// collectSessionStats over every entry, without the terminal-only tool breakdown.
 
 import { collectSessionStats, type ModelStats, type SessionStats } from "./shell-stats.ts";
 
@@ -20,6 +20,8 @@ interface Totals {
 	last: number;
 	models: Map<string, ModelStats>;
 }
+
+const desktopStatsOptions = { includeToolBreakdown: false };
 
 const empty = (): Totals => ({ cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, toolCalls: 0, toolErrors: 0, first: Infinity, last: -Infinity, models: new Map() });
 
@@ -68,7 +70,8 @@ export function createSessionStatsFold(): SessionStatsFold {
 			const slice = entries.slice(count);
 			// One entry at a time after the first walk: sums keep the order of a full walk, so the
 			// floating-point totals are the same ones collectSessionStats gives.
-			for (const part of count === 0 ? [collectSessionStats(slice)] : slice.map((entry) => collectSessionStats([entry]))) add(totals, part);
+			if (count === 0) add(totals, collectSessionStats(slice, desktopStatsOptions));
+			else for (const entry of slice) add(totals, collectSessionStats([entry], desktopStatsOptions));
 			for (const entry of slice) {
 				const at = entryTime(entry);
 				if (Number.isFinite(at)) {
