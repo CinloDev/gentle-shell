@@ -187,20 +187,21 @@ async function fire(handlers: Map<string, Array<(event: unknown, ctx: ExtensionC
 	for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 }
 
-function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): string }; hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
+function fakeContext(options: { cwd?: string; theme?: typeof plainTheme & { getBgAnsi?(): string }; hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
 	const ui: FakeUi = { footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined, customOptions: [] };
 	let resolveOverlay: () => void;
 	const overlayReady = new Promise<void>((resolve) => { resolveOverlay = resolve; });
 	const entries = options.entries ?? [];
+	const cwd = options.cwd ?? "/repo";
 	const ctx = {
 		hasUI: options.hasUI ?? true,
 		mode: "tui",
 		hasPendingMessages: () => options.pending ?? false,
 		isIdle: () => options.idle ?? true,
-		cwd: "/repo",
+		cwd,
 		model: { id: "gpt-5.5", provider: "openai-codex", reasoning: true, contextWindow: 272_000 },
 		sessionManager: {
-			getCwd: () => "/repo",
+			getCwd: () => cwd,
 			getSessionName: () => "Release notes",
 			getEntries: () => entries,
 			getSessionId: () => "shell-session",
@@ -503,6 +504,90 @@ test("GIT tab loads bounded HEAD history only while selected", async t => {
   const log = calls.find(c => c.args[0] === "-c")!;
   assert.equal(log.cwd, ctx.cwd); assert.equal(log.limit, 1024 * 1024); assert.equal(log.args.at(-1), "HEAD");
  } finally { footer.dispose(); await fire(handlers, "session_shutdown", ctx); }
+});
+
+test("Sidebar mounts, queries Git, and handles root switching using session git runner without gitRunner override", async t => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-sidebar-no-override-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]);
+	git("init", "-q", "--initial-branch=main");
+	git("commit", "-q", "--allow-empty", "-m", "init: real commit");
+	writeFileSync(join(root, "file.txt"), "hello\n");
+	const wtPath = join(root, "wt");
+	git("worktree", "add", "-q", "-b", "feature", wtPath);
+	writeFileSync(join(wtPath, "feature.txt"), "feature\n");
+
+	const home = scopedDoubleEscCancelConfigHome(t);
+	writeFileSync(join(home, "sidebar-tabs.json"), JSON.stringify({ schema: "gentle-pi.sidebar-tabs/v1", policy: "on", main: "on", git: "on", gitHistory: "on", diff: "on", tree: "on" }));
+
+	const { pi, handlers } = fakePi();
+	installGentleShell(pi, isolatedEnv({ GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }), {
+		activeProfile: () => undefined,
+		resolveWorktree: (p) => ({ root: p.startsWith(wtPath) ? wtPath : root, commonDir: join(root, ".git") }),
+		rootExists: (r) => r === root || r === wtPath || existsSync(join(r, ".git")),
+	});
+	const { ctx, ui } = fakeContext({ cwd: wtPath });
+	const layoutRoot = new VStack([{ component: { render: () => ["TRANSCRIPT"], invalidate() {} }, basis: 0, grow: 1 }]);
+	const host = { mode: "fullscreen", terminal: { rows: 24, columns: 160 }, layoutRoot, requestRender() {} };
+	let footer: { dispose(): void } | undefined;
+	try {
+		await fire(handlers, "session_start", ctx);
+		footer = (ui.footerFactory as any)(host, plainTheme, {
+			getGitBranch: () => "feature",
+			getExtensionStatuses: () => new Map(),
+			getAvailableProviderCount: () => 1,
+			onBranchChange: () => () => {},
+		});
+		const frame = () => renderLayoutFrame(layoutRoot, 160, 24, () => {});
+		const boxes = (box: any): any[] => [box, ...(box.children ?? []).flatMap(boxes)];
+		const navClick = (label: string) => {
+			const nav = boxes(frame().root).find((box: any) => stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes(label) && stripAnsi(box.component.render(box.rect.width)[0] ?? "").includes("MAIN"));
+			const row = stripAnsi(nav.component.render(nav.rect.width)[0]);
+			return nav.component.handleMouse({ type: "click", button: "left", x: row.indexOf(label), y: 0, screenX: nav.rect.x + row.indexOf(label), screenY: nav.rect.y, width: nav.rect.width, height: nav.rect.height, shift: false, alt: false, ctrl: false });
+		};
+		// Initial frame
+		frame();
+		// Switch to GIT tab
+		navClick("GIT");
+		for (let i = 0; i < 20; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			frame();
+			if (stripAnsi(frame().lines.join("\n")).includes("init: real")) break;
+		}
+		assert.match(stripAnsi(frame().lines.join("\n")), /init: real/);
+
+		// Switch to TREE tab
+		navClick("TREE");
+		for (let i = 0; i < 20; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			frame();
+			if (stripAnsi(frame().lines.join("\n")).includes("feature.txt")) break;
+		}
+		assert.match(stripAnsi(frame().lines.join("\n")), /feature\.txt/);
+
+		// Wait for discoverSidebarGitRoots to finish and display root selector
+		for (let i = 0; i < 20; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			frame();
+			if (stripAnsi(frame().lines.join("\n")).includes("WORKTREE")) break;
+		}
+		const treeWithSelector = stripAnsi(frame().lines.join("\n"));
+		assert.match(treeWithSelector, /WORKTREE/);
+
+		// Switch tree root to MAIN via click
+		const treeRailBox = boxes(frame().root).find((box: any) => typeof box.component.handleMouse === "function" && stripAnsi(box.component.render(box.rect.width).join("\n")).includes("feature.txt"));
+		assert.ok(treeRailBox, "tree selector rail box found");
+		treeRailBox.component.handleMouse({ type: "click", button: "left", x: 4, y: 0, screenX: treeRailBox.rect.x + 4, screenY: treeRailBox.rect.y, width: treeRailBox.rect.width, height: treeRailBox.rect.height, shift: false, alt: false, ctrl: false });
+		for (let i = 0; i < 20; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			frame();
+			if (stripAnsi(frame().lines.join("\n")).includes("file.txt")) break;
+		}
+		assert.match(stripAnsi(frame().lines.join("\n")), /file\.txt/);
+	} finally {
+		footer?.dispose();
+		await fire(handlers, "session_shutdown", ctx);
+	}
 });
 
 test("PROFILE tab paints read-only cards only when its policy key is on", async t => {

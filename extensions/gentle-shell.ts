@@ -2894,7 +2894,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			let roots: SidebarGitRoots | undefined;
 			let selectedRoot = ctx.cwd;
 			const valid = (version: number) => aliveGit && gitActive && generation === version && currentContext === ctx && changes === tracker;
-			const guardedGit = (root: string, version: number): GitRunner => async args => valid(version) ? deps.gitRunner(root, 1024 * 1024)(args) : { code: 128, stdout: "" };
+			const guardedGit = (root: string, version: number): GitRunner => async args => valid(version) ? git.run(root, 1024 * 1024)(args) : { code: 128, stdout: "" };
 			// The GIT history and changes cards are one root-keyed state machine: a
 			// MAIN/WORKTREE switch keeps the last good frame painted until the newly
 			// selected root's history and diff have answered, then swaps it with a
@@ -2911,7 +2911,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				offsetRoot = root;
 			};
 			const gitCardsState = new SidebarGitCards({
-				git: root => deps.gitRunner(root, 1024 * 1024),
+				git: root => git.run(root, 1024 * 1024),
 				untrackedLines, fileRevision,
 				publish: () => { if (!aliveGit) return; syncGitOffsets(); invalidateSidebar(tui); tui.requestRender(); },
 			}, { history: tabsSettings.gitHistory === "on", diff: tabsSettings.diff === "on" });
@@ -3322,11 +3322,11 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			// previous root painted until a root never visited answers, and reads it
 			// once. The host only names the selected root.
 			const tree = new SidebarTree(treeRoot, theme, () => { invalidateSidebar(tui); tui.requestRender(); }, deps.treeReadDirectory, (path, root) => openTreeFile(root)(path));
-			const treeSession = new SidebarTreeSession(tree, treeGitRoot ?? treeRoot, treeGitRoot ? deps.gitRunner(treeGitRoot, 1024 * 1024) : undefined);
+			const treeSession = new SidebarTreeSession(tree, treeGitRoot ?? treeRoot, treeGitRoot ? git.run(treeGitRoot, 1024 * 1024) : undefined);
 			const selectTreeRoot = (root: string) => {
 				if (root === treeSelectedRoot) return;
 				treeSelectedRoot = root;
-				treeSession.setRoot(root, deps.gitRunner(root, 1024 * 1024));
+				treeSession.setRoot(root, git.run(root, 1024 * 1024));
 				invalidateSidebar(tui); tui.requestRender();
 			};
 			const refreshTree = () => treeSession.refresh();
@@ -3718,7 +3718,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 						if (!treeActive || epoch !== treeEpoch) return;
 						treeSession.setActive(true);
 						if (!treeGitRoot) return;
-						void discoverSidebarGitRoots(async args => treeActive && epoch === treeEpoch ? deps.gitRunner(treeRoot, 1024 * 1024)(args) : { code: 128, stdout: "" }).then(result => {
+						void discoverSidebarGitRoots(async args => treeActive && epoch === treeEpoch ? git.run(treeRoot, 1024 * 1024)(args) : { code: 128, stdout: "" }).then(result => {
 							if (!treeActive || epoch !== treeEpoch) return;
 							treeRoots = result;
 							if (result.state === "ready") selectTreeRoot(treeSelectedRoot === result.main ? result.main : result.wt);
